@@ -5225,6 +5225,85 @@ class SlackAdapter(BasePlatformAdapter):
                     return True
         return False
 
+    @staticmethod
+    def _user_only_event_owner_id(payload: Optional[dict]) -> str:
+        """Return the user authorization ID for a passive user-only delivery.
+
+        Slack can deliver the same ``message`` event shape for bot-event and
+        user-event subscriptions. Any delivery carrying a user authorization
+        but no bot authorization is ambient workspace traffic and must never
+        enter Hermes's bot reply path, even when relay configuration is absent.
+        """
+        if not isinstance(payload, dict):
+            return ""
+        authorizations = payload.get("authorizations")
+        if not isinstance(authorizations, list):
+            return ""
+        if any(
+            isinstance(auth, dict) and auth.get("is_bot") is True
+            for auth in authorizations
+        ):
+            return ""
+        return next(
+            (
+                str(auth.get("user_id"))
+                for auth in authorizations
+                if isinstance(auth, dict)
+                and auth.get("is_bot") is False
+                and auth.get("user_id")
+            ),
+            "",
+        )
+
+    async def _relay_owner_user_event(self, event: dict, payload: Optional[dict]) -> None:
+        """Hand a passive user event to the owner's local notification relay."""
+        hermes_home = _Path(os.getenv("HERMES_HOME", "~/.hermes")).expanduser()
+        script = hermes_home / "scripts" / "slack_realtime_notify.py"
+        if not script.is_file():
+            raise RuntimeError(f"Slack user-event relay script is missing: {script}")
+        from uuid import uuid4 as _uuid4
+
+        relay_payload = json.dumps(
+            {
+                "event": event,
+                "body": payload or {},
+                "reservation_owner": _uuid4().hex,
+            }
+        ).encode()
+        last_error = "unknown failure"
+        for attempt in range(2):
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(script),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(
+                    process.communicate(relay_payload), timeout=90
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.communicate()
+                last_error = "timed out"
+                logger.warning(
+                    "[Slack] User-event relay attempt %s timed out", attempt + 1
+                )
+            else:
+                if process.returncode == 0:
+                    return
+                last_error = stderr.decode(errors="replace")[:500]
+                logger.warning(
+                    "[Slack] User-event relay attempt %s failed rc=%s stderr=%s",
+                    attempt + 1,
+                    process.returncode,
+                    last_error,
+                )
+            if attempt == 0:
+                await asyncio.sleep(1)
+        raise RuntimeError(f"Slack user-event relay failed: {last_error}")
+
     async def _handle_slack_message(
         self, event: dict, payload: Optional[dict] = None
     ) -> None:
@@ -5251,6 +5330,24 @@ class SlackAdapter(BasePlatformAdapter):
                 event.get("ts", ""),
                 event.get("thread_ts", ""),
             )
+        user_event_owner_id = self._user_only_event_owner_id(payload)
+        if user_event_owner_id:
+            allowed_owner_ids = {
+                value.strip()
+                for value in os.getenv("SLACK_ALLOWED_USERS", "").split(",")
+                if value.strip()
+            }
+            if len(allowed_owner_ids) == 1 and user_event_owner_id in allowed_owner_ids:
+                await self._relay_owner_user_event(event, payload)
+            else:
+                logger.warning(
+                    "[Slack] Dropping passive user-scoped event: exactly one configured owner must match %s",
+                    user_event_owner_id,
+                )
+            logger.debug(
+                "[Slack] Passive user-scoped event received; skipping bot reply path"
+            )
+            return
         if event.get("subtype") == "message_changed":
             updated_message = event.get("message")
             if not isinstance(updated_message, dict):

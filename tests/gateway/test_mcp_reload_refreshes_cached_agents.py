@@ -174,3 +174,33 @@ async def test_reload_mcp_preserves_per_agent_toolset_overrides():
     assert captured_calls, "get_tool_definitions was never called to refresh the cache"
     assert captured_calls[0]["enabled_toolsets"] == ["safe"]
     assert captured_calls[0]["disabled_toolsets"] == ["terminal"]
+
+
+@pytest.mark.asyncio
+async def test_reload_mcp_re_resolves_platform_managed_agent_toolsets():
+    """A normal gateway session must gain MCP servers added after build time.
+
+    Platform-managed agents snapshot the platform toolset list when they are
+    created.  Reusing that stale list during /reload-mcp drops every newly-added
+    MCP namespace even though global discovery succeeded.
+    """
+    runner = _make_runner_with_cached_agents(num_agents=1)
+    runner._read_user_config = MagicMock(return_value={"mcp_servers": {"junction": {}}})
+    agent, _sig = runner._agent_cache["session-0"]
+    agent.platform = "telegram"
+    agent._gateway_toolsets_from_platform = True
+
+    with (
+        patch("tools.mcp_tool.shutdown_mcp_servers"),
+        patch("tools.mcp_tool.discover_mcp_tools", return_value=["junction_list_workspaces"]),
+        patch.dict("tools.mcp_tool._servers", {"junction": object()}, clear=True),
+        patch("hermes_cli.tools_config._get_platform_tools", return_value={"safe", "junction"}),
+        patch("tools.mcp_tool.refresh_agent_mcp_tools") as refresh,
+    ):
+        await runner._execute_mcp_reload(_make_event())
+
+    refresh.assert_called_once_with(
+        agent,
+        enabled_override=["junction", "safe"],
+        quiet_mode=True,
+    )

@@ -4507,6 +4507,13 @@ class TurnRunner:
                 # Reload from disk — do not reuse the startup snapshot (#60955).
                 fallback_model=self._runner._refresh_fallback_model(),
             )
+            # This agent's enabled-toolset snapshot came from the gateway's
+            # platform resolver (ctx.enabled_toolsets), not a caller-supplied
+            # per-agent allowlist.  /reload-mcp may therefore safely resolve it
+            # again from current config so newly-added MCP server namespaces are
+            # included.  Deliberately restricted agents created elsewhere do
+            # not carry this marker and keep their exact build-time selection.
+            agent._gateway_toolsets_from_platform = True
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     # Record the session_id the snapshot was taken for
@@ -19412,6 +19419,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 from tools.mcp_tool import refresh_agent_mcp_tools
                 _cache = getattr(self, "_agent_cache", None)
                 _cache_lock = getattr(self, "_agent_cache_lock", None)
+                _reload_user_config = None
                 if _cache_lock is not None and _cache:
                     with _cache_lock:
                         for _sess_key, _entry in list(_cache.items()):
@@ -19430,6 +19438,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             # edit; gateway agents are per-session and may be
                             # deliberately locked down. (Contract is asserted by
                             # test_reload_mcp_preserves_per_agent_toolset_overrides.)
+                            if getattr(_agent, "_gateway_toolsets_from_platform", False):
+                                from hermes_cli.tools_config import _get_platform_tools
+
+                                if _reload_user_config is None:
+                                    _reload_user_config = self._read_user_config()
+                                _platform = getattr(_agent, "platform", None)
+                                if _platform:
+                                    _enabled_override = sorted(
+                                        _get_platform_tools(_reload_user_config, str(_platform))
+                                    )
+                                    refresh_agent_mcp_tools(
+                                        _agent,
+                                        enabled_override=_enabled_override,
+                                        quiet_mode=True,
+                                    )
+                                    continue
                             refresh_agent_mcp_tools(_agent, quiet_mode=True)
             except Exception as _exc:
                 logger.debug(

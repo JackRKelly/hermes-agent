@@ -1853,11 +1853,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # read-only connections so they never queue behind writer flushes on
         # self._lock. See _read_ctx().
         self._read_local = threading.local()
-        # Strong set of all live read connections across all threads.  We
-        # hold a reference so short-lived reader threads' connections are
-        # not GC'd without close() — that would leak tracked fds in
-        # _live_connections.  close() drains this set.
-        self._read_conns: "set[sqlite3.Connection]" = set()
+        # Live read connections and their owning threads.  Reader threads can
+        # be short-lived (gateway executors are rebuilt during normal runtime),
+        # so _get_read_conn() reaps connections whose owners have exited.
+        # check_same_thread=False below makes that cross-thread close safe;
+        # each live connection is still used by only its owning thread.
+        self._read_conns: "dict[sqlite3.Connection, threading.Thread]" = {}
         self._read_conns_lock = threading.Lock()
         # Set when close() begins.  _get_read_conn checks this under the
         # lock so a reader that finishes opening after the drain finds the
@@ -2082,6 +2083,27 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             return conn
         if getattr(self._read_local, "failed", False):
             return None
+
+        # A thread-local connection outlives its worker unless we explicitly
+        # close it.  Long-running gateways create replacement/temporary reader
+        # threads over time; retaining every old connection eventually exhausts
+        # the process fd limit and makes unrelated config/auth reads fail with
+        # EMFILE.  Reap exited owners before opening another connection.
+        stale_conns = []
+        with self._read_conns_lock:
+            for stale_conn, owner in list(self._read_conns.items()):
+                if not owner.is_alive():
+                    self._read_conns.pop(stale_conn, None)
+                    stale_conns.append(stale_conn)
+        for stale_conn in stale_conns:
+            try:
+                stale_conn.close()
+            except Exception:
+                logger.debug(
+                    "failed to close stale read connection for %s",
+                    self.db_path,
+                    exc_info=True,
+                )
         try:
             conn = _connect_tracked_db(
                 f"file:{self.db_path}?mode=ro",
@@ -2089,6 +2111,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 uri=True,
                 timeout=5.0,
                 isolation_level=None,
+                check_same_thread=False,
             )
             conn.row_factory = sqlite3.Row
             # Load the CJK tokenizer extension on this connection so
@@ -2104,7 +2127,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     conn.close()
                     self._read_local.failed = True
                     return None
-                self._read_conns.add(conn)
+                self._read_conns[conn] = threading.current_thread()
         except sqlite3.Error:
             # Mark this thread failed so we don't retry the open on every
             # query; the locked writer connection still serves reads.
@@ -2637,13 +2660,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # (instance, function), so this removes exactly our registration;
         # no-op when the writer never started.
         atexit.unregister(self._drain_token_queue_at_exit)
-        # Close all read-only connections across all threads.  Per-thread
-        # connections live in threading.local() and would otherwise be GC'd
-        # without calling close(), leaking tracked fds in _live_connections.
-        # The strong set holds references so short-lived reader threads'
-        # connections survive until close() drains them.  Setting the closed
-        # flag under the lock prevents a reader from registering a new
-        # connection after the drain.
+        # Close all read-only connections across all threads. Setting the
+        # closed flag under the lock prevents a reader from registering a new
+        # connection after the drain. Reader connections use
+        # check_same_thread=False specifically so this cross-thread shutdown
+        # is safe (normal query use remains owner-thread-only).
         with self._read_conns_lock:
             self._read_conns_closed = True
             read_conns = list(self._read_conns)

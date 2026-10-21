@@ -8,6 +8,7 @@ per-thread read-only connection under WAL, never touch self._lock, and fall
 back to the legacy locked path when WAL or the read connection is missing.
 """
 
+import sqlite3
 import threading
 
 import pytest
@@ -41,6 +42,45 @@ def test_read_conn_is_per_thread(db):
 
 def test_read_conn_reused_within_thread(db):
     assert db._get_read_conn() is db._get_read_conn()
+
+
+@pytest.mark.requires_wal
+def test_dead_reader_thread_connection_is_reaped(db):
+    """Replacement reader threads must not accumulate SQLite descriptors."""
+    conns = {}
+
+    def grab(key):
+        conns[key] = db._get_read_conn()
+
+    first = threading.Thread(target=grab, args=("first",))
+    first.start()
+    first.join()
+    assert conns["first"] is not None
+
+    second = threading.Thread(target=grab, args=("second",))
+    second.start()
+    second.join()
+
+    assert conns["second"] is not None
+    assert len(db._read_conns) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conns["first"].execute("SELECT 1")
+
+
+@pytest.mark.requires_wal
+def test_close_drains_reader_connection_created_by_another_thread(db):
+    conns = []
+
+    t = threading.Thread(target=lambda: conns.append(db._get_read_conn()))
+    t.start()
+    t.join()
+    assert conns[0] is not None
+
+    db.close()
+
+    assert not db._read_conns
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conns[0].execute("SELECT 1")
 
 
 @pytest.mark.requires_wal

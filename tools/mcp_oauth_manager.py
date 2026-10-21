@@ -421,6 +421,39 @@ def _make_hermes_provider_class() -> Optional[type]:
                 outgoing = await inner.__anext__()
                 while True:
                     incoming = yield outgoing
+                    # The upstream SDK only refreshes *before* a request when
+                    # the locally-computed expiry has elapsed. Some providers
+                    # revoke opaque access tokens early and return 401 while
+                    # ``is_token_valid()`` is still True; the SDK's 401 branch
+                    # then skips the available refresh token and jumps straight
+                    # to browser authorization. A background gateway cannot
+                    # complete that flow. Refresh once here, retry the original
+                    # request with the persisted token, and hand the retry
+                    # response back to the inner generator. If refresh fails or
+                    # the retry is still unauthorized, preserve the SDK's normal
+                    # full-authorization fallback by forwarding the original or
+                    # retry 401 below.
+                    if (
+                        getattr(incoming, "status_code", None) == 401
+                        and self.context.can_refresh_token()
+                    ):
+                        original_401 = incoming
+                        try:
+                            refresh_request = await self._refresh_token()
+                            refresh_response = yield refresh_request
+                            if await self._handle_refresh_response(refresh_response):
+                                self._add_auth_header(outgoing)
+                                incoming = yield outgoing
+                            else:
+                                incoming = original_401
+                        except Exception as exc:
+                            logger.warning(
+                                "MCP OAuth '%s': early-401 refresh failed; "
+                                "falling back to authorization: %s",
+                                self._hermes_server_name,
+                                exc,
+                            )
+                            incoming = original_401
                     # Sniff the response for a dead-client-registration signal
                     # before handing it back to the SDK (best-effort, GH#36767).
                     await self._maybe_flag_poisoned_client(incoming)

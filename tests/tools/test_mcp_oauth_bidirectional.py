@@ -116,9 +116,9 @@ async def test_hermes_provider_forwards_asend_values(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hermes_provider_forwards_401_triggers_refresh(tmp_path, monkeypatch):
-    """A 401 response MUST flow into the inner generator and trigger the
-    SDK's 401 recovery branch.
+async def test_hermes_provider_forwards_401_without_refresh_token(tmp_path, monkeypatch):
+    """A 401 response without a refresh token MUST flow into the SDK's
+    authorization recovery branch.
 
     With the broken wrapper, the inner generator sees ``response = None``
     and the 401 check short-circuits into AttributeError. With the correct
@@ -143,7 +143,6 @@ async def test_hermes_provider_forwards_401_triggers_refresh(tmp_path, monkeypat
             access_token="old_access",
             token_type="Bearer",
             expires_in=3600,
-            refresh_token="old_refresh",
         )
     )
     await storage.set_client_info(
@@ -196,6 +195,89 @@ async def test_hermes_provider_forwards_401_triggers_refresh(tmp_path, monkeypat
 
     # Clean up the generator — we don't need to complete the full dance.
     await flow.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hermes_provider_refreshes_early_revoked_token_before_browser_auth(
+    tmp_path, monkeypatch
+):
+    """An early 401 must use the refresh token before browser authorization."""
+    import httpx
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+    from pydantic import AnyUrl
+
+    from tools.mcp_oauth import HermesTokenStorage
+    from tools.mcp_oauth_manager import _HERMES_PROVIDER_CLS, reset_manager_for_tests
+
+    assert _HERMES_PROVIDER_CLS is not None
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reset_manager_for_tests()
+
+    storage = HermesTokenStorage("srv")
+    await storage.set_tokens(
+        OAuthToken(
+            access_token="revoked_access",
+            token_type="Bearer",
+            expires_in=3600,
+            refresh_token="usable_refresh",
+        )
+    )
+    await storage.set_client_info(
+        OAuthClientInformationFull(
+            client_id="test-client",
+            redirect_uris=[AnyUrl("http://127.0.0.1:12345/callback")],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+        )
+    )
+    metadata = OAuthClientMetadata(
+        redirect_uris=[AnyUrl("http://127.0.0.1:12345/callback")],
+        client_name="Hermes Agent",
+    )
+    provider = _HERMES_PROVIDER_CLS(
+        server_name="srv",
+        server_url="https://example.com/mcp",
+        client_metadata=metadata,
+        storage=storage,
+        redirect_handler=_noop_redirect,
+        callback_handler=_noop_callback,
+    )
+
+    refresh_request = httpx.Request("POST", "https://auth.example.com/token")
+
+    async def _fake_refresh_token():
+        return refresh_request
+
+    async def _fake_handle_refresh_response(_response):
+        fresh = OAuthToken(
+            access_token="fresh_access",
+            token_type="Bearer",
+            expires_in=3600,
+            refresh_token="rotated_refresh",
+        )
+        provider.context.current_tokens = fresh
+        provider.context.update_token_expiry(fresh)
+        await storage.set_tokens(fresh)
+        return True
+
+    monkeypatch.setattr(provider, "_refresh_token", _fake_refresh_token)
+    monkeypatch.setattr(provider, "_handle_refresh_response", _fake_handle_refresh_response)
+
+    original = httpx.Request("POST", "https://example.com/mcp")
+    flow = provider.async_auth_flow(original)
+    outbound = await flow.__anext__()
+    assert outbound.headers["authorization"] == "Bearer revoked_access"
+
+    yielded_refresh = await flow.asend(httpx.Response(401, request=outbound))
+    assert yielded_refresh is refresh_request
+
+    retry = await flow.asend(httpx.Response(200, request=yielded_refresh))
+    assert retry.url == original.url
+    assert retry.headers["authorization"] == "Bearer fresh_access"
+
+    with pytest.raises(StopAsyncIteration):
+        await flow.asend(httpx.Response(200, request=retry))
 
 
 async def _noop_redirect(_url: str) -> None:
