@@ -15,6 +15,7 @@
  */
 
 import { expandRemotePath, shq } from './remote-lifecycle'
+import { REMOTE_DETACHED_SHELL_PY } from './remote-ssh-process'
 import { REMOTE_MARKER_JUDGE_PY } from './remote-update-marker-programs'
 import { encodedPowerShell, powerShellCommand, psLiteral } from './windows-remote-lifecycle'
 
@@ -250,7 +251,7 @@ function buildPosixManagedUpdateLaunch(target: RemoteUpdateTarget, correlationId
     `set +e; echo "managed-update start pid=$$ $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2; ` +
     `if [ -r "/proc/$$/stat" ]; then ` +
     `intent_creation="linux:$(awk '{print $22}' "/proc/$$/stat")"; ` +
-    `else intent_creation="darwin:$(ps -o lstart= -p "$$" | sed 's/^ *//')"; fi; ` +
+    `else intent_creation="darwin:$(ps -o lstart= -p "$$" | sed 's/^ *//; s/ *$//')"; fi; ` +
     `intent_tmp=${intentWord}."$$".tmp; ` +
     `printf '{"correlation":"%s","pid":%s,"creation":"%s"}' ${shq(correlation)} "$$" "$intent_creation" > "$intent_tmp" && ` +
     `mv -f "$intent_tmp" ${intentWord} || exit 70; ` +
@@ -264,8 +265,8 @@ function buildPosixManagedUpdateLaunch(target: RemoteUpdateTarget, correlationId
   return (
     `umask 077 && mkdir -p "$(dirname ${outputWord})" && rm -f ${statusWord} ${intentWord} && ` +
     `if command -v setsid >/dev/null 2>&1; then ` +
-    `setsid sh -c ${shq(inner)} </dev/null >>${outputWord} 2>&1 & ` +
-    `else nohup sh -c ${shq(inner)} </dev/null >>${outputWord} 2>&1 & fi; child=$!; ` +
+    `setsid sh -c ${shq(inner)} </dev/null >>${outputWord} 2>&1 & child=$!; ` +
+    `else child=$(python3 -c ${shq(REMOTE_DETACHED_SHELL_PY)} ${shq(inner)} ${outputWord}) || exit 70; fi; ` +
     `i=0; while [ ! -e ${intentWord} ]; do kill -0 "$child" 2>/dev/null || exit 1; ` +
     'i=$((i+1)); [ "$i" -ge 200 ] && exit 1; sleep 0.05; done; printf MANAGED_UPDATE_STARTED'
   )

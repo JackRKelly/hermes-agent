@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { type ChildProcess, exec as execCallback, type ExecOptionsWithStringEncoding, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -31,7 +31,7 @@ const exec: (command: string, options?: ExecOptionsWithStringEncoding) => Promis
 const ownershipId: string = '0123456789abcdef0123456789abcdef'
 const spawnNonce: string = '0123456789abcdef'
 interface SpawnVariant {
-  launcher: 'setsid' | 'nohup'
+  launcher: 'setsid' | 'python3'
   owned: boolean
 }
 
@@ -42,14 +42,15 @@ const variants: SpawnVariant[] = [
         { launcher: 'setsid' as const, owned: true }
       ]
     : []),
-  { launcher: 'nohup', owned: false },
-  { launcher: 'nohup', owned: true }
+  { launcher: 'python3', owned: false },
+  { launcher: 'python3', owned: true }
 ]
 
 interface ChildReport {
   pid: number
   sessionId: number
   hupIgnored: boolean
+  umask: number
   mutexFds: number[]
 }
 
@@ -81,7 +82,7 @@ interface SpawnFixture {
   dispose: () => Promise<void>
 }
 
-async function spawnFixture(launcher: 'setsid' | 'nohup', owned: boolean): Promise<SpawnFixture> {
+async function spawnFixture(launcher: 'setsid' | 'python3', owned: boolean): Promise<SpawnFixture> {
   const root: string = await mkdtemp(path.join(os.tmpdir(), 'hermes-spawn-'))
   const bin: string = path.join(root, 'bin')
   const shell: string = (await exec('command -v sh', { shell: 'sh' })).stdout.trim()
@@ -115,9 +116,9 @@ async function spawnFixture(launcher: 'setsid' | 'nohup', owned: boolean): Promi
   await mkdir(hermesHome)
   await mkdir(path.join(root, 'reports'))
 
-  // Restrict capability discovery, not the reported host OS. The fallback runs
-  // real nohup with no setsid executable anywhere on the child's PATH.
-  for (const tool of [
+  // Restrict capability discovery, not the reported host OS. The portable
+  // launcher runs real Python with no setsid/nohup on the child's PATH.
+  for (const tool of new Set([
     'sh',
     'python3',
     'mkdir',
@@ -131,7 +132,7 @@ async function spawnFixture(launcher: 'setsid' | 'nohup', owned: boolean): Promi
     'env',
     'ps',
     launcher
-  ]) {
+  ])) {
     const executable: string = (await exec(`command -v ${tool}`, { shell })).stdout.trim()
     await symlink(executable, path.join(bin, tool))
   }
@@ -150,7 +151,9 @@ for fd in range(3,256):
   candidate=os.fstat(fd)
   if (candidate.st_dev,candidate.st_ino)==(identity.st_dev,identity.st_ino):fds.append(fd)
  except OSError:pass
-report={'pid':pid,'sessionId':os.getsid(0),'hupIgnored':signal.getsignal(signal.SIGHUP)==signal.SIG_IGN,'mutexFds':fds}
+mask=os.umask(0)
+os.umask(mask)
+report={'pid':pid,'sessionId':os.getsid(0),'hupIgnored':signal.getsignal(signal.SIGHUP)==signal.SIG_IGN,'umask':mask,'mutexFds':fds}
 p=Path(os.environ['HOME'])/'reports'/str(pid)
 p.with_suffix('.tmp').write_text(json.dumps(report),encoding='utf-8')
 p.with_suffix('.tmp').replace(p)
@@ -225,7 +228,7 @@ test.skipIf(process.platform === 'win32').each(variants)(
 
       const results: { stdout: string; stderr: string }[] = await Promise.all(
         Array.from({ length: owned ? 2 : 1 }, (): Promise<{ stdout: string; stderr: string }> =>
-          fixture.run(fixture.command)
+          fixture.run(`umask 027; ${fixture.command}`)
         )
       )
 
@@ -245,12 +248,13 @@ test.skipIf(process.platform === 'win32').each(variants)(
       assert.equal(result.stdout.trim(), String(report.pid))
       assert.equal(result.stderr, '')
       assert.deepEqual(report.mutexFds, [])
+      assert.equal(report.umask, 0o027, 'detached backends preserve the launching shell umask')
       assert.ok(process.kill(report.pid, 0), 'the reported child survives the spawning shell exiting')
 
-      if (launcher === 'setsid') {
-        assert.notEqual(report.sessionId, parentSession)
-      } else {
-        assert.equal(report.sessionId, parentSession)
+      assert.notEqual(report.sessionId, parentSession)
+
+      if (launcher === 'python3') {
+        assert.equal((await stat(fixture.localPath(fixture.lock.logPath))).mode & 0o777, 0o600)
         assert.equal(report.hupIgnored, true)
         process.kill(report.pid, 'SIGHUP')
       }
@@ -310,6 +314,78 @@ test.skipIf(process.platform === 'win32').each(variants)(
     }
   },
   20_000
+)
+
+test.skipIf(process.platform === 'win32')(
+  'failed detached launch never publishes a PID or ownership record',
+  async () => {
+    const fixture = await spawnFixture('python3', true)
+
+    try {
+      // A real open(2) failure, before process creation (not a mocked launcher).
+      await mkdir(fixture.localPath(fixture.lock.logPath), { recursive: true })
+      await assert.rejects(fixture.run(fixture.command))
+      assert.deepEqual(await reports(fixture), [])
+      await assert.rejects(readFile(fixture.localPath(lockfilePath(ownershipId))), { code: 'ENOENT' })
+      await assert.rejects(readFile(fixture.localPath(connectReservationPath(ownershipId))), { code: 'ENOENT' })
+    } finally {
+      await fixture.dispose()
+    }
+  }
+)
+
+test.skipIf(process.platform === 'win32')(
+  'portable backend survives real transport group closure with its exact PID and no mutex FD',
+  async () => {
+    const fixture = await spawnFixture('python3', true)
+
+    const transport = spawn(fixture.shell, ['-c', `${fixture.command}; sleep 30`], {
+      env: fixture.env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+
+    const closed = new Promise(resolve => transport.once('exit', resolve))
+
+    try {
+      await expect.poll(async () => (await reports(fixture)).length, { timeout: 5_000 }).toBe(1)
+      const [report] = await reports(fixture)
+      const published = JSON.parse(await readFile(fixture.localPath(lockfilePath(ownershipId)), 'utf8'))
+      assert.equal(published.pid, report.pid)
+      assert.equal(report.sessionId, report.pid, 'the backend, not a discarded launcher, leads the new session')
+      assert.notEqual(report.sessionId, transport.pid)
+      process.kill(-transport.pid!, 'SIGHUP')
+      await closed
+      process.kill(report.pid, 'SIGHUP')
+      await new Promise(resolve => setTimeout(resolve, 100))
+      assert.ok(process.kill(report.pid, 0))
+      assert.deepEqual(report.mutexFds, [])
+      assert.equal(
+        await pidIsOurDashboard(
+          fixture.ssh,
+          report.pid,
+          spawnNonce,
+          fixture.lock.hermesPath,
+          fixture.lock.hermesHome,
+          ownershipId,
+          'ops__pid__'
+        ),
+        true
+      )
+      await fixture.run(
+        `python3 -c 'import fcntl,sys;f=open(sys.argv[1],"a");fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)' ${expandRemotePath(`${fixture.marker}.lock`)}`
+      )
+    } finally {
+      try {
+        process.kill(-transport.pid!, 'SIGTERM')
+      } catch {
+        /* The isolated transport may already have exited after SIGHUP. */
+      }
+
+      await fixture.dispose()
+    }
+  },
+  10_000
 )
 
 /** A python3 child that prints one line (after its setup) and stays alive. */

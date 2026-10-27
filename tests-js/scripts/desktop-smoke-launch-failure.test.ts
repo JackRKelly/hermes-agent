@@ -30,7 +30,11 @@ test('an app that dies before Playwright attaches leaves a failed receipt carryi
     expect(receipt.status).toBe('failed')
     expect(receipt.error).toContain('Process failed to launch!')
     expect(receipt.error).toMatch(/<process did exit: exitCode=[1-9]\d*/)
-    expect(receipt.error).toMatch(/\]\[err\] .*bad option: --no-sandbox/)
+    // Playwright prepends --no-sandbox only on Linux; other hosts reject
+    // the first Chromium-specific switch after Node's supported --inspect.
+    expect(receipt.error).toMatch(process.platform === 'linux'
+      ? /\]\[err\] .*bad option: --no-sandbox/
+      : /\]\[err\] .*bad option: --remote-debugging-port=0/)
   } finally {
     fs.rmSync(work, { recursive: true, force: true })
   }

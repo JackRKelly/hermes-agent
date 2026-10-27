@@ -18,10 +18,13 @@ let
     };
 
     postPatch = ''
+      # Mocha 11 still pins vulnerable diff 7 / serialize-javascript 6.
+      # Keep its runner API; override only these dev/test dependencies.
+      substituteInPlace package.json --replace-fail '"scripts": {' '"overrides": {"mocha": {"diff": "8.0.3", "serialize-javascript": "7.1.3"}}, "scripts": {'
       ln -s ${./node-gyp-11-4-0-package-lock.json} package-lock.json
     '';
 
-    npmDepsHash = "sha256-P25m02VxIXkPD7rYI2Wki9+levrtNg2xk8pU+nEUXsE=";
+    npmDepsHash = "sha256-VD4CURguuANBlzfsrHBXFDW/8bCV4P5RtQf+bYpZU4c=";
 
     npmDepsFetcherVersion = 2;
 

@@ -8,7 +8,7 @@ vi.mock('node:child_process', () => ({
 }))
 
 const { execFileSync } = await import('node:child_process')
-const { macosSysroot, xcrunClangArgv } = await import('./macos-sysroot.mjs')
+const { macosSysroot, xcrunClangArgv, xcrunClangEnv } = await import('./macos-sysroot.mjs')
 
 const exec = vi.mocked(execFileSync)
 const opts = env => ({ encoding: 'utf8', env, stdio: 'pipe' })
@@ -71,6 +71,17 @@ it('reports a stale SDKROOT and falls back to the toolchain default instead of f
     expect(warn).toHaveBeenLastCalledWith(expect.stringContaining(`SDKROOT=${SDKROOT}`))
   }
   expect(warn).toHaveBeenCalledTimes(3)
+})
+
+it('uses the resolved SDK for xcrun tool lookup without mutating the caller environment', () => {
+  const inherited = { ...env, SDKROOT: '/missing/MacOSX99.sdk', PATH: '/tools' }
+  const selected = sdkDir(CLT_SDK)
+  expect(xcrunClangEnv(selected, inherited)).toEqual({ ...inherited, SDKROOT: selected })
+  expect(inherited.SDKROOT).toBe('/missing/MacOSX99.sdk')
+  // If no SDK was resolved, --sdk macosx selects it; do not inherit a stale override.
+  expect(xcrunClangEnv(null, inherited)).toEqual({ ...env, PATH: '/tools' })
+  expect(xcrunClangEnv(null, env)).toEqual(env)
+  expect(xcrunClangEnv(selected, env)).toEqual({ ...env, SDKROOT: selected })
 })
 
 it('ignores an empty SDKROOT', () => {

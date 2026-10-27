@@ -30,6 +30,7 @@ import crypto from 'node:crypto'
 import { READY_IN_MERGED_OUTPUT_RE } from './backend-ready'
 import { parseRemoteProfileListing } from './connection-registry'
 import { backendProfileArg } from './profile-id-guard'
+import { REMOTE_DETACHED_SHELL_PY, REMOTE_PROCESS_ARGV_PY } from './remote-ssh-process'
 import { REMOTE_MARKER_GATE_PY } from './remote-update-marker-programs'
 import { assertBootstrapNotSuperseded, withRemoteTimeout } from './ssh-connection'
 
@@ -689,16 +690,11 @@ async function pidIsOurDashboard(
     `expected_token=os.path.expanduser(${shq(ownershipId ? spawnTokenPath(ownershipId, spawnNonce) : '')})\n` +
     `expected_profile=${shq(profile)}\n` +
     `nonce=${shq(spawnNonce)}\n` +
-    'try:\n' +
-    ' raw=open(f"/proc/{pid}/cmdline","rb").read()\n' +
-    ' args=[x.decode("utf-8","surrogateescape") for x in raw.split(b"\\0") if x]\n' +
-    'except OSError:\n' +
-    ' try:\n' +
-    '  line=subprocess.check_output(["ps","-ww","-o","command=","-p",str(pid)],text=True).strip()\n' +
-    ' except subprocess.CalledProcessError:\n' +
-    '  # pid already gone — a dead process is FOREIGN, not a transport error\n' +
-    '  print("FOREIGN");sys.exit(0)\n' +
-    ' args=shlex.split(line)\n' +
+    REMOTE_PROCESS_ARGV_PY +
+    '\n' +
+    'try:args=process_argv(pid)\n' +
+    'except (OSError,ValueError):\n' +
+    ' print("FOREIGN");sys.exit(0)\n' +
     'ok=False\n' +
     'try:\n' +
     // A profile literally named "serve" puts the value token before the
@@ -1116,9 +1112,9 @@ async function terminateOwnedDashboardForUpdate(ssh, expected) {
   return { pid: lock.pid, terminated: true, alreadyStopped: false }
 }
 
-// Detach so the backend survives the SSH channel closing: setsid (Linux)
-// starts a new session; macOS has no setsid, so fall back to nohup (HUP-immune;
-// fd-detachment is already handled by </dev/null + redirect + &).
+// Detach so the backend survives SSH closure: setsid where available, otherwise
+// system Python creates a new session and explicitly ignores SIGHUP. Unlike
+// Darwin nohup, the Python launcher does not require a controlling terminal.
 function buildSpawnCommand(hermesPath, profile, opts: any = {}) {
   const hermes = expandRemotePath(hermesPath)
   // The roster/SSH bridge hands us the profile verbatim: a non-slug value must never
@@ -1156,9 +1152,14 @@ function buildSpawnCommand(hermesPath, profile, opts: any = {}) {
     `exec env HERMES_DESKTOP=1 ${hermes} ${profileArgs}${subCmd}`
 
   const detachedShell: string = `eval "exec $1>&-"; ${dashCmd} </dev/null >> ${logPath} 2>&1 & echo $!`
-  // The inner shell backgrounds Hermes and reports its PID; backgrounding the
-  // launcher too adds its unrelated PID to the value published in the lock.
-  const detachedSpawn: string = `child=$("$(command -v setsid || echo nohup)" sh -c ${shq(detachedShell)} hermes-update-child "$1")`
+
+  // Each branch returns the exec-preserved backend PID, never a launcher PID.
+  // Python's close_fds also drops the update mutex before the child can exec.
+  const detachedSpawn: string =
+    `if command -v setsid >/dev/null 2>&1; then ` +
+    `child=$(setsid sh -c ${shq(detachedShell)} hermes-update-child "$1") || exit 70; ` +
+    `else child=$(python3 -c ${shq(REMOTE_DETACHED_SHELL_PY)} ${shq(dashCmd)} ${logPath}) || exit 70; fi; ` +
+    `case "$child" in ''|*[!0-9]*) exit 70;; esac; kill -0 "$child" 2>/dev/null || exit 70`
 
   if (!opts.ownershipId || !opts.lockMetadata) {
     return withRemoteUpdateMutex(

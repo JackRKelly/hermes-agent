@@ -11,11 +11,32 @@ afterEach((): void => {
   vi.unstubAllEnvs()
 })
 
-test.skipIf(process.platform === 'win32')('local SSH sockets use the suffixed default root', (): void => {
+test.skipIf(process.platform === 'win32')('local SSH sockets use the suffixed default root when it fits the AF_UNIX budget', (): void => {
   vi.stubEnv('HERMES_DATA_DIR_SUFFIX', 'magic-test')
-  const socket: string = controlSocketPath('user', 'host', 22)
+  const home = vi.spyOn(os, 'homedir').mockReturnValue('/home/test')
 
-  assert.equal(path.dirname(socket), path.join(platformDefaultHermesHome(os.homedir()), 'desktop-ssh'))
+  try {
+    const socket: string = controlSocketPath('user', 'host', 22)
+
+    assert.equal(path.dirname(socket), path.join(platformDefaultHermesHome('/home/test'), 'desktop-ssh'))
+    assert.ok(Buffer.byteLength(`${socket}.0123456789abcdef`) <= 104)
+  } finally {
+    home.mockRestore()
+  }
+})
+
+test.skipIf(process.platform === 'win32')('overlong suffixed HOME uses the owned short SSH socket root', (): void => {
+  vi.stubEnv('HERMES_DATA_DIR_SUFFIX', 'magic-test')
+  const home = vi.spyOn(os, 'homedir').mockReturnValue(`/home/${'long-home-'.repeat(20)}`)
+
+  try {
+    const socket: string = controlSocketPath('user', 'host', 22)
+
+    assert.equal(path.dirname(socket), `/tmp/hermes-ssh-${process.getuid!()}`)
+    assert.ok(Buffer.byteLength(`${socket}.0123456789abcdef`) <= 104)
+  } finally {
+    home.mockRestore()
+  }
 })
 
 test('default data roots append the suffix literally on each platform', (): void => {

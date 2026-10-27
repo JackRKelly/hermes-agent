@@ -65,16 +65,22 @@ function makeFakeUnixTerminal(srcRoot) {
 
 // ─── optional native helper tests ───────────────────────────────────
 
-test('a missing Linux HUD toolchain leaves no empty package directories', () => {
+test('an unavailable Linux HUD helper is nonfatal and leaves no empty package directories', () => {
   const tmp = fs.mkdtempSync(join(os.tmpdir(), 'hermes-hud-'))
   const warnings = []
   const originalWarn = console.warn
   console.warn = message => warnings.push(String(message))
   try {
     const distDir = join(tmp, 'dist')
-    assert.equal(buildHudModifierMonitor({ source: join(tmp, 'missing-source'), distDir, platform: 'linux', arch: 'x64' }), null)
+    // On Linux this reaches the compiler and fails on the missing source. On
+    // other hosts the cross-packaging guard must refuse BEFORE compiling: it
+    // must never ship a host binary under the Linux target's name.
+    assert.equal(buildHudModifierMonitor({ source: join(tmp, 'missing-source'), distDir, platform: 'linux', arch: process.arch }), null)
     assert.equal(existsSync(join(distDir, 'native')), false)
-    assert.match(warnings.join('\n'), /desktop packaging continues/)
+    const diagnostic = process.platform === 'linux'
+      ? /native build needs a C compiler, libx11-dev and libxi-dev; desktop packaging continues/
+      : new RegExp(`linux-${process.arch} needs a native build; modifier tap unavailable for this target`)
+    assert.match(warnings.join('\n'), diagnostic)
   } finally {
     console.warn = originalWarn
     fs.rmSync(tmp, { recursive: true, force: true })
