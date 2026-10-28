@@ -118,6 +118,12 @@ hashes as well as these pinned diagnostics.
 - Timing classification additionally requires the marker-bodies module's exact
   `_creation_time` **and** `_run` entries in `collection.wrapped_aliases`.
   Generic helper start/end records from some other import are insufficient.
+  The first native run missed the test's execution namespace; local collection
+  reproduced pytest importing this test by its bare module name.
+  Instrumentation therefore also binds the selected function's actual globals,
+  verifies their source path against its node ID, and records canonical aliases
+  derived from that verified path. Original callables and test bodies remain
+  unchanged; a passing test without these bindings is not timing evidence.
 - The canonical command selects an absolute resolved `ProgramFiles/Git/bin/bash.exe`,
   rejects missing/relative/escaped/System32/WSL paths, and never falls back to bare
   `bash` or PATH lookup. The existing supported interpreter adapter is unchanged.

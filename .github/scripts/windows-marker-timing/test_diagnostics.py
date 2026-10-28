@@ -5,6 +5,36 @@ import native_controls as controls
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_selected_bare_pytest_module_globals_are_actually_wrapped(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from typing import Any
+        import tempfile
+        import marker_timing_plugin as plugin
+        bind = getattr(plugin, 'bind_selected_helpers', None)
+        self.assertTrue(callable(bind), 'missing actual selected-function global binding')
+        assert callable(bind)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            relative = 'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py'
+            namespace: dict[str, Any] = {'__file__': str(root / relative), '__name__': 'test_desktop_update_windows_marker_bodies'}
+            calls = []
+            original = lambda: calls.append('original')
+            wrapped = lambda: (calls.append('wrapped'), original())
+            namespace.update(_creation_time=original, _run=original)
+            exec('def selected():\n _creation_time()\n _run()\n', namespace)
+            item = SimpleNamespace(nodeid=relative + '::selected', obj=namespace['selected'])
+            aliases = bind([item], root, {'_creation_time': original, '_run': original},
+                           {'_creation_time': wrapped, '_run': wrapped})
+            namespace['selected']()
+            self.assertEqual(calls, ['wrapped', 'original', 'wrapped', 'original'])
+            expected = relative[:-3].replace('/', '.')
+            self.assertEqual(set(aliases), {expected + '._creation_time', expected + '._run'})
+            namespace['__file__'] = str(root / 'foreign.py')
+            with self.assertRaises(RuntimeError):
+                bind([item], root, {'_creation_time': original, '_run': original},
+                     {'_creation_time': wrapped, '_run': wrapped})
+
     def test_windows_popen_audit_uses_actual_command_when_executable_is_none(self):
         import native_no_shell as no_shell
         import controller

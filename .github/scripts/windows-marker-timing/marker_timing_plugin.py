@@ -51,6 +51,26 @@ def pytest_addoption(parser):
     parser.addini('marker_timing_dir', 'Required durable diagnostic output directory')
 
 
+def bind_selected_helpers(items, root, originals, wrappers) -> list[str]:
+    """Bind execution globals even when pytest imports a test by its bare name."""
+    aliases = []
+    root = Path(root).resolve()
+    for item in items:
+        relative = item.nodeid.split('::', 1)[0].replace('\\', '/')
+        expected = (root / relative).resolve()
+        namespace = getattr(item.obj, '__globals__', None)
+        if (not relative.endswith('.py') or not expected.is_relative_to(root)
+                or namespace is None or Path(namespace.get('__file__', '')).resolve() != expected):
+            raise RuntimeError('Selected function globals do not match the actual source path')
+        canonical = relative[:-3].replace('/', '.')
+        for helper, original in originals.items():
+            if namespace.get(helper) is original:
+                namespace[helper] = wrappers[helper]
+            if namespace.get(helper) is wrappers[helper]:
+                aliases.append(f'{canonical}.{helper}')
+    return aliases
+
+
 def pytest_collection_finish(session):
     # Final selected items only: modifyitems runs before pytest's -k deselection.
     config, items = session.config, session.items
@@ -75,6 +95,7 @@ def pytest_collection_finish(session):
                     if value is original:
                         setattr(module, attr, wrappers[helper])
                         patched.append(f'{name}.{attr}')
+    patched.extend(bind_selected_helpers(items, config.rootpath, originals, wrappers))
     emit('collection', platform=sys.platform, machine=platform.machine(),
          executable=sys.executable, helper_source_sha256=hashlib.sha256(
              Path(source.__file__).read_bytes()).hexdigest(),
