@@ -7,89 +7,92 @@ on:
 permissions:
   contents: read
 
+env:
+  SUBJECT_SHA: 9137390617a558f548255b26c9faf588e77aad3f
+  OPENROUTER_API_KEY: ''
+  OPENAI_API_KEY: ''
+  NOUS_API_KEY: ''
+
 jobs:
   isolated-case-control:
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
-      - name: Check out the exact failing source, not the probe controller
+      - name: Check out the exact controller first
         uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
         with:
-          ref: c733af920b0a40bfdbc73c454e275657ebdb5270
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Preserve the self-contained helper across subject checkout
+        shell: bash
+        run: |
+          cp .github/workflows/windows_acceptance_controller.py "$RUNNER_TEMP/windows_acceptance_controller.py"
+          python -c "from pathlib import Path; import hashlib,os; p=Path(os.environ['RUNNER_TEMP'])/'windows_acceptance_controller.py'; print('controller_sha256='+hashlib.sha256(p.read_bytes()).hexdigest())"
+          printf 'HERMES_HOME=%s/windows-acceptance-setup-home\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Check out the exact acceptance subject
+        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
+        with:
+          ref: ${{ env.SUBJECT_SHA }}
+          persist-credentials: false
+          clean: true
+
+      - name: Verify exact subject and real Windows host
+        id: source_check
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$SUBJECT_SHA"
+          git diff --exit-code HEAD --
+          python -c "import os,platform; assert platform.system() == 'Windows' and os.name == 'nt'; print({'os':platform.system(),'arch':platform.machine(),'cpu_count':os.cpu_count()})"
 
       - name: Set up the same locked test environment
+        id: pm
         uses: ./.github/actions/setup-pm
         with:
           packages: git,ripgrep
           extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
           test-environment: 'true'
           prune-python-cache: true
+          save-tools-cache: 'false'
+          save-python-cache: 'false'
+          save-node-cache: 'false'
 
-      - name: Verify source and native host
-        id: source_check
+      - name: Five native fixture tests, 31 isolated cases, real restamp mutation RED
         shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = c733af920b0a40bfdbc73c454e275657ebdb5270
-          python -c "import os,platform; assert platform.system() == 'Windows'; print({'os':platform.system(),'arch':platform.machine(),'cpu_count':os.cpu_count()})"
-
-      - name: Observe Git layout without changing Git or its configuration
-        shell: bash
-        run: |
-          python - <<'PY'
-          import json, shutil, subprocess
-          from pathlib import Path
-          from hermes_cli import update_cmd_git as git_update
-          selected = shutil.which('git')
-          print(json.dumps({'selected_git': selected, 'locator_result': str(git_update._locate_real_git())}))
-          roots = [Path(r'C:\Program Files\Git'), Path(r'C:\Program Files (x86)\Git')]
-          if selected:
-              roots.append(Path(selected).parent.parent)
-          seen = set()
-          for root in roots:
-              if not root.is_dir():
-                  continue
-              for executable in root.rglob('git.exe'):
-                  if executable in seen:
-                      continue
-                  seen.add(executable)
-                  result = {'path': str(executable), 'size': executable.stat().st_size}
-                  try:
-                      version = subprocess.run([str(executable), '--version'], capture_output=True, text=True, timeout=15)
-                      result.update(exit=version.returncode, stdout=version.stdout.strip(), stderr=version.stderr.strip())
-                  except subprocess.TimeoutExpired:
-                      result['probe'] = '15-second diagnostic observation expired'
-                  print(json.dumps(result))
-          PY
-
-      - name: Run Git locator, command and all five native live tests
-        if: always() && steps.source_check.outcome == 'success'
-        shell: bash
-        run: |
-          scripts/run_tests.sh -j 2 --file-retries 0 \
-            tests/hermes_cli/test_git_trampoline_locator.py \
-            tests/hermes_cli/test_cmd_update.py \
-            tests/hermes_cli/test_git_trampoline_windows_live.py \
-            -- -vv --tb=long
         env:
-          HERMES_TEST_WORKERS: '2'
-          OPENROUTER_API_KEY: ''
-          OPENAI_API_KEY: ''
-          NOUS_API_KEY: ''
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          "$HERMES_PYTHON" "$RUNNER_TEMP/windows_acceptance_controller.py" \
+            --repo "$GITHUB_WORKSPACE" --subject "$SUBJECT_SHA" \
+            --output "$RUNNER_TEMP/windows-acceptance-evidence"
 
-      - name: Verify native Git console-hide compatibility
+      - name: Verify original subject is still unchanged
         if: always() && steps.source_check.outcome == 'success'
         shell: bash
         run: |
-          scripts/run_tests.sh -j 1 --file-retries 0 \
-            tests/test_windows_subprocess_no_window_flags.py \
-            -- -k test_update_git_plumbing_spawns_hide_console_window -vv --tb=long
-        env:
-          HERMES_TEST_WORKERS: '1'
-          OPENROUTER_API_KEY: ''
-          OPENAI_API_KEY: ''
-          NOUS_API_KEY: ''
+          test "$(git rev-parse HEAD)" = "$SUBJECT_SHA"
+          git diff --exit-code HEAD --
 
-      - name: Verify no source files were changed
-        if: always() && steps.source_check.outcome == 'success'
-        shell: bash
-        run: git diff --exit-code
+      # Existing repository pin, official action only. No source archive, private
+      # profile, credentials, provider state or unrelated runner home is uploaded.
+      - name: Retain diagnostic logs, exact outcomes and mutation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-acceptance-${{ env.SUBJECT_SHA }}-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/windows-acceptance-evidence/metadata.json
+            ${{ runner.temp }}/windows-acceptance-evidence/summary.json
+            ${{ runner.temp }}/windows-acceptance-evidence/**/process.json
+            ${{ runner.temp }}/windows-acceptance-evidence/**/result.json
+            ${{ runner.temp }}/windows-acceptance-evidence/**/pytest.log
+            ${{ runner.temp }}/windows-acceptance-evidence/**/junit.xml
+            ${{ runner.temp }}/windows-acceptance-evidence/**/mutation.json
+            ${{ runner.temp }}/windows-acceptance-evidence/**/desktop-update-handoff.log
+            ${{ runner.temp }}/windows-acceptance-evidence/**/.hermes-update-result.json
+            ${{ runner.temp }}/windows-acceptance-evidence/**/.hermes-update-in-progress
+            ${{ runner.temp }}/windows-acceptance-evidence/**/calls.jsonl
