@@ -37,6 +37,25 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def model_catalog(monkeypatch):
+    """Pin metadata, not routing: a cold/missing live catalog means unknown,
+    which is intentionally eligible for vision rather than known text-only.
+    """
+    from agent import models_dev
+
+    catalog = {
+        "deepseek": {"models": {
+            "deepseek-v4-pro": {"modalities": {"input": ["text"]}},
+        }},
+        "anthropic": {"models": {
+            "claude-sonnet-4-6": {"modalities": {"input": ["text", "image"]}},
+        }},
+    }
+    monkeypatch.setattr(models_dev, "fetch_models_dev", lambda *args, **kwargs: catalog)
+    return catalog
+
+
 @pytest.fixture
 def isolated_home(monkeypatch):
     """Temp HERMES_HOME with config + clean credential env vars."""
@@ -200,6 +219,43 @@ model:
         provider, client, _model = resolve_vision_provider_client(provider="auto")
         assert client is not None
         assert provider == "anthropic"
+
+    @pytest.mark.parametrize("supports_vision", [False, True, None])
+    @pytest.mark.parametrize("has_credentials", [False, True])
+    def test_catalog_capability_controls_client_eligibility(
+        self, isolated_home, monkeypatch, model_catalog, supports_vision, has_credentials
+    ):
+        """Known text-only is blocked; unknown is permissive, not credential-free."""
+        _write_config(isolated_home, """
+model:
+  provider: deepseek
+  default: deepseek-v4-pro
+""")
+        if supports_vision is None:
+            model_catalog["deepseek"]["models"].clear()
+        else:
+            inputs = ["text", "image"] if supports_vision else ["text"]
+            model_catalog["deepseek"]["models"]["deepseek-v4-pro"]["modalities"]["input"] = inputs
+        if has_credentials:
+            monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        _fresh_modules()
+
+        from agent.auxiliary_client import _main_model_supports_vision, resolve_vision_provider_client
+        from agent.models_dev import get_model_capabilities
+
+        caps = get_model_capabilities("deepseek", "deepseek-v4-pro", allow_network=True)
+        assert (None if caps is None else caps.supports_vision) is supports_vision
+        assert _main_model_supports_vision("deepseek", "deepseek-v4-pro") is (supports_vision is not False)
+        provider, client, model = resolve_vision_provider_client(provider="auto")
+        eligible = has_credentials and supports_vision is not False
+        assert (client is not None) is eligible
+        if eligible:
+            assert client is not None
+            assert provider == "deepseek"
+            assert model == "deepseek-v4-pro"
+            assert client.base_url.host == "api.deepseek.com"
+        else:
+            assert client is None
 
     def test_unknown_capability_does_not_block(self, isolated_home, monkeypatch):
         """When models.dev has no entry, fall back to permissive (attempt the call).
