@@ -8,11 +8,14 @@ release) must not turn healthy work into a failure.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -152,33 +155,163 @@ def test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup(tmp_pa
         assert (result['ok'], result['exit_code']) == (False, 130), result
 
 
-_TIMED_CHECKOUT_HOLDER = """
-import msvcrt, os, sys, time
-fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
-os.lseek(fd, 1 << 20, os.SEEK_SET)
-msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
-time.sleep(float(sys.argv[2]))
+_CHECKOUT_HOLDER = """
+import json, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | getattr(os, 'O_BINARY', 0), 0o644)
+os.lseek(fd, 1 << 20, os.SEEK_SET)   # hermes_cli/update_lock.py::_try_lock's byte
+if os.name == 'nt':
+    import msvcrt
+    def lock(): msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    def unlock(): msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+else:   # native POSIX protocol tests, never a substitute for the Windows E2E
+    import fcntl
+    def lock(): fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 1)
+    def unlock(): fcntl.lockf(fd, fcntl.LOCK_UN, 1)
+try:
+    lock()
+    print('locked', flush=True)
+    command = sys.stdin.readline()
+    # EOF is unconditional cleanup, not a successful release handshake.
+    if command:
+        assert command == 'release\\n', repr(command)
+        released = time.time()   # lower bound, immediately before the actual unlock
+        unlock()
+        print(json.dumps({'released': released}), flush=True)
+finally:
+    os.close(fd)
 """
+
+
+class _CheckoutHolder:
+    """Hold a real lock until *observed* R6; no startup-duration guesses.
+
+    stdout acknowledges acquisition/unlock; stdin EOF releases on every failure.
+    The reader drains the pipe independently, including during bounded teardown.
+    """
+
+    def __init__(self, lock: Path, home: Path, timeout: float = 150):
+        self.lock, self.home = lock, home
+        self.deadline = time.monotonic() + timeout
+        self.stop = threading.Event()
+        self.messages = queue.Queue()
+        self.released = self.initial_finished_at = None
+        self.error = None
+        self.proc = None
+        self.reader = self.observer = None
+
+    def _remaining(self):
+        remaining = self.deadline - time.monotonic()
+        assert remaining > 0, 'checkout-holder protocol deadline expired'
+        return remaining
+
+    def _read(self):
+        for line in self.proc.stdout:
+            self.messages.put(line.rstrip('\n'))
+        self.messages.put('<EOF>')
+
+    def _message(self):
+        while not self.stop.is_set():
+            try:
+                return self.messages.get(timeout=min(0.05, self._remaining()))
+            except queue.Empty:
+                continue
+        raise AssertionError('checkout-holder protocol cancelled')
+
+    def __enter__(self):
+        self.proc = subprocess.Popen(
+            [sys.executable, '-u', '-c', _CHECKOUT_HOLDER, str(self.lock)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+        try:
+            ready = self._message()
+            assert ready == 'locked', f'checkout lock was not acquired: {ready}'
+            self.observer = threading.Thread(target=self._observe, daemon=True)
+            self.observer.start()
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def _observe(self):
+        try:
+            while not self.stop.is_set():
+                assert time.monotonic() < self.deadline, 'R6 wait was not observed'
+                assert self.proc.poll() is None, 'checkout holder exited before R6'
+                try:
+                    log = (self.home / 'logs/desktop-update-handoff.log').read_text(encoding='utf-8-sig')
+                    if 'keeping the update marker' in log:
+                        initial = json.loads((self.home / '.hermes-update-result.json').read_text(encoding='utf-8-sig'))
+                        assert (self.home / '.hermes-update-in-progress').is_file(), 'R6 lost its marker'
+                        self.initial_finished_at = initial['finished_at']
+                        break
+                except (FileNotFoundError, PermissionError):
+                    pass   # Add-Content temporarily denies read sharing on Windows.
+                self.stop.wait(min(0.05, max(0, self.deadline - time.monotonic())))
+            else:
+                return
+            # The result clock is whole seconds. Cross its next boundary explicitly,
+            # so removing post-R6 restamping cannot accidentally pass in the same second.
+            while time.time() < self.initial_finished_at + 1:
+                if self.stop.wait(min(0.05, self._remaining())):
+                    return
+            if self.stop.is_set():
+                return
+            self.proc.stdin.write('release\n')
+            self.proc.stdin.flush()
+            self.released = json.loads(self._message())['released']
+            assert self.released >= self.initial_finished_at + 1
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.proc.stdin.close()   # EOF also unlocks after observer failure.
+
+    def finish(self):
+        self.observer.join(timeout=max(0, self.deadline - time.monotonic()))
+        assert not self.observer.is_alive(), 'R6 wait was not observed'
+        if self.error is not None:
+            raise self.error
+        assert self.released is not None, 'R6 release was not acknowledged'
+
+    def __exit__(self, *_):
+        self.stop.set()
+        if self.observer is not None:
+            self.observer.join(timeout=5)
+        # Closing stdin wakes the child even when no log/ack ever arrived.
+        if not self.proc.stdin.closed:
+            self.proc.stdin.close()
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=5)
+        self.reader.join(timeout=5)
+        self.proc.stdout.close()
+        assert not self.reader.is_alive(), 'checkout-holder reader leaked'
+        assert self.observer is None or not self.observer.is_alive(), 'R6 observer leaked'
 
 
 @pytest.mark.platforms('windows')
 def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path) -> None:
     # The relaunched Desktop drops a non-manual result whose finished_at is 30 minutes old; the
     # R6 wait lasts up to 2 h. The result must carry the time the hand-off actually finished.
-    holders = []
+    with ExitStack() as cleanup:
+        holders = []
 
-    def hold_checkout(_home: Path, install: Path) -> None:
-        holders.append((subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
-                                          str(install / '.hermes-update.lock'), '25']), time.time() + 25))
-    try:
+        def hold_checkout(home: Path, install: Path) -> None:
+            holders.append(cleanup.enter_context(_CheckoutHolder(install / '.hermes-update.lock', home)))
+
         code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
-    finally:
-        for proc, _ in holders:
-            proc.kill(); proc.wait()
+        holders[0].finish()
     assert code == 0, out
     log = (home / 'logs/desktop-update-handoff.log').read_text(encoding='utf-8-sig')
     assert 'keeping the update marker' in log, log
-    assert result['ok'] is True and result['finished_at'] >= int(holders[0][1]) - 1, result
+    assert result['ok'] is True and result['finished_at'] >= int(holders[0].released), result
+    assert result['finished_at'] > holders[0].initial_finished_at, result
+    assert 'removed update marker (owned)' in log, log
+    assert not (home / '.hermes-update-in-progress').exists()
+    assert not list(home.glob('.hermes-update-result.json.*.tmp'))
 
 
 @pytest.mark.platforms('windows')
