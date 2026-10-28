@@ -140,7 +140,8 @@ BUILD_INPUTS = ('.github/actions/setup-windows-build-deps/action.yml',
 
 def openssl_path(name):
     # Deliberately no general archive extraction or arbitrary filesystem roots.
-    return (name in OPENSSL_REQUIRED[1:] or
+    return (name in (*OPENSSL_REQUIRED[1:], 'include/openssl/__DECC_INCLUDE_EPILOGUE.H',
+                     'include/openssl/__DECC_INCLUDE_PROLOGUE.H') or
             re.fullmatch(r'include/openssl/[a-z0-9_][a-z0-9_.-]*\.h', name) is not None)
 
 
@@ -155,7 +156,9 @@ def regular_file(path, root):
 
 
 def openssl_files(root):
-    names = {relative_key(p, root) for p in (root / 'include' / 'openssl').glob('*.h')}
+    # glob('*.h') matches .H on Windows but omits it on case-sensitive hosts.
+    names = {relative_key(p, root) for p in (root / 'include' / 'openssl').iterdir()
+             if p.suffix.lower() == '.h'}
     names.update(OPENSSL_REQUIRED[1:])
     require(set(OPENSSL_REQUIRED) <= names, 'Missing required OpenSSL files')
     for name in names:

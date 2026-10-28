@@ -72,6 +72,73 @@ class ScheduleTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 c.verify_openssl(artifact, identity, digest)
 
+    def test_openssl_decc_headers_roundtrip_preserves_every_byte_and_hash(self):
+        headers = ('include/openssl/__DECC_INCLUDE_EPILOGUE.H',
+                   'include/openssl/__DECC_INCLUDE_PROLOGUE.H')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install, artifact, destination = [root / n for n in ('install', 'artifact', 'dest')]
+            payloads = {name: b'local fixture\x00\r\n' + name.encode()
+                        for name in (*c.OPENSSL_REQUIRED, *headers)}
+            for name, payload in payloads.items():
+                path = install / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            digest = c.export_openssl(install, artifact, {})
+            manifest = c.verify_openssl(artifact, {}, digest, destination=destination)
+            self.assertEqual(manifest['files'], {n: c.sha(b) for n, b in payloads.items()})
+            self.assertEqual(c.openssl_files(destination), manifest['files'])
+            for name, payload in payloads.items():
+                self.assertEqual((artifact / name).read_bytes(), payload)
+                self.assertEqual((destination / name).read_bytes(), payload)
+            for name in headers:
+                with self.subTest(header=name):
+                    path = artifact / name
+                    path.write_bytes(payloads[name] + b'tampered')
+                    with self.assertRaisesRegex(RuntimeError, 'OpenSSL hash mismatch'):
+                        c.verify_openssl(artifact, {}, digest)
+                    path.write_bytes(payloads[name])
+                    path = destination / name
+                    path.write_bytes(payloads[name] + b'cache tampered')
+                    with self.assertRaisesRegex(RuntimeError, 'Installed OpenSSL changed'):
+                        c.verify_openssl(artifact, {}, digest, installed=destination)
+                    path.unlink()
+                    with self.assertRaises(RuntimeError):
+                        c.verify_openssl(artifact, {}, digest, installed=destination)
+                    path.write_bytes(payloads[name])
+            c.verify_openssl(artifact, {}, digest, installed=destination)
+
+    def test_openssl_export_rejects_unknown_uppercase_headers_and_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install, artifact = root / 'install', root / 'artifact'
+            for name in c.OPENSSL_REQUIRED:
+                path = install / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'local negative fixture')
+            for name in ('UNKNOWN.H', '__DECC_INCLUDE_OTHER.H', '__DECC_INCLUDE_EPILOGUE.h'):
+                path = install / 'include' / 'openssl' / name
+                path.write_bytes(b'not an allowlisted header')
+                with self.subTest(header=name), self.assertRaisesRegex(RuntimeError, 'Non-allowlisted OpenSSL path'):
+                    c.export_openssl(install, artifact, {})
+                self.assertFalse(artifact.exists())
+                path.unlink()
+            outside = root / 'outside.H'
+            outside.write_bytes(b'must never export through a link')
+            path = install / 'include' / 'openssl' / '__DECC_INCLUDE_EPILOGUE.H'
+            path.symlink_to(outside)
+            with self.assertRaisesRegex(RuntimeError, 'Link/reparse path forbidden'):
+                c.export_openssl(install, artifact, {})
+            self.assertFalse(artifact.exists())
+            path.unlink()
+            headers = install / 'include' / 'openssl'
+            moved = root / 'outside-headers'
+            headers.rename(moved)
+            headers.symlink_to(moved, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, 'Link/reparse path forbidden'):
+                c.export_openssl(install, artifact, {})
+            self.assertFalse(artifact.exists())
+
     def test_downloaded_mutation_log_accepts_identical_pytest_current_alias_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -244,7 +311,12 @@ class ScheduleTests(unittest.TestCase):
             files = {n: c.sha((root / n).read_bytes()) for n in c.OPENSSL_REQUIRED}
             for name in ('../secret', '/absolute', 'C:/home/secret', 'include/openssl/../secret.h',
                          'include\\openssl\\ssl.h', 'include/openssl/SSL.H', 'home/token',
-                         'lib/evil.lib', 'include/openssl/sub/secret.h'):
+                         'lib/evil.lib', 'include/openssl/sub/secret.h',
+                         'include/openssl/UNKNOWN.H', 'include/openssl/__DECC_INCLUDE_OTHER.H',
+                         'include/openssl/../__DECC_INCLUDE_EPILOGUE.H',
+                         'include/openssl/sub/__DECC_INCLUDE_PROLOGUE.H',
+                         'include/openssl/__DECC_INCLUDE_EPILOGUE.H.bak',
+                         'lib/__DECC_INCLUDE_EPILOGUE.H', 'lib/libcrypto.LIB'):
                 manifest = {'identity': {}, 'files': {**files, name: 'a' * 64}}
                 c.save(root / 'manifest.json', manifest)
                 with self.subTest(path=name), self.assertRaisesRegex(RuntimeError, 'Non-allowlisted OpenSSL path'):
