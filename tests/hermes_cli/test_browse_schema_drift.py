@@ -448,6 +448,107 @@ def test_gateway_boot_reserve_waits_out_a_browse_reconcile(tmp_path):
         gateway.wait()
 
 
+@pytest.mark.platforms("linux", "macos")
+@pytest.mark.parametrize("handoff", ["free", "gateway", "expired"])
+def test_boot_retries_a_released_conflict_without_bypassing_ownership(tmp_path, monkeypatch, handoff):
+    """A maintenance holder may release between failed reserve and diagnosis. Retry the real
+    reservation, not a stale conflict; a new gateway or an expired deadline still refuses."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    import gateway.run_bootstrap as bootstrap
+    from gateway.runtime_ownership import OwnershipConflict, ProfileOwnership
+    from hermes_state_reconcile import BROWSE_RECONCILE_PURPOSE
+
+    home = _profile_home(tmp_path)
+    free = _profile_home(tmp_path, "alpha")
+    code = _PURPOSE_HOLDER.replace(
+        "time.sleep(float(sys.argv[2]))",
+        'sys.stdin.readline(); owner.close(); print("released", flush=True); sys.stdin.readline()',
+    )
+    holder = subprocess.Popen([sys.executable, "-c", code, str(home), "30", BROWSE_RECONCILE_PURPOSE],
+                              env=os.environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    booting = ProfileOwnership()
+    successor = ProfileOwnership()
+    real_probe = bootstrap._conflicting_homes
+    observed = []
+
+    def release_before_probe(homes):
+        assert holder.stdin is not None and holder.stdout is not None
+        # reserve() has already failed; its partial acquisition must have been rolled back.
+        assert not booting.homes
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        assert holder.stdout.readline().strip() == "released"
+        conflicts = real_probe(homes)
+        assert conflicts == []
+        observed.append(conflicts)
+        if handoff == "gateway":
+            successor.reserve([home])  # wins after the advisory probe but BEFORE boot retries
+        return conflicts
+
+    monkeypatch.setattr(bootstrap, "_conflicting_homes", release_before_probe)
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        if handoff == "free":
+            bootstrap._reserve_waiting_out_browse_reconcile(booting, [free, home])
+            assert booting.owns(home) and booting.owns(free)
+            with pytest.raises(OwnershipConflict):
+                successor.reserve([home])
+        else:
+            # Do not re-trigger the release barrier when diagnosing a successor's real lock.
+            def probe_once(homes):
+                return real_probe(homes) if observed else release_before_probe(homes)
+            monkeypatch.setattr(bootstrap, "_conflicting_homes", probe_once)
+            with pytest.raises(OwnershipConflict):
+                bootstrap._reserve_waiting_out_browse_reconcile(
+                    booting, [free, home], wait_s=0 if handoff == "expired" else 5,
+                )
+            assert not booting.homes
+        assert time.monotonic() - started < 2
+        assert observed == [[]]
+    finally:
+        booting.close()
+        successor.close()
+        holder.kill()
+        holder.wait(timeout=60)
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_gateway_boot_default_wait_for_stuck_browse_is_bounded(tmp_path):
+    """The retry path must not turn a stuck maintenance reservation into an unbounded boot."""
+    import time
+
+    import gateway.run_bootstrap as bootstrap
+    from gateway.runtime_ownership import OwnershipConflict, ProfileOwnership
+    from hermes_state_reconcile import BROWSE_RECONCILE_PURPOSE
+
+    home = _profile_home(tmp_path)
+    free = _profile_home(tmp_path, "alpha")
+    holder = _hold(home, 30, BROWSE_RECONCILE_PURPOSE)
+    booting = ProfileOwnership()
+    witness = ProfileOwnership()
+    try:
+        wait_s = bootstrap._browse_reconcile_reserve_wait_s()
+        started = time.monotonic()
+        with pytest.raises(OwnershipConflict):
+            bootstrap._reserve_waiting_out_browse_reconcile(booting, [free, home])
+        assert wait_s <= time.monotonic() - started < wait_s + 2
+        assert not booting.homes
+        witness.reserve([free])  # every failed atomic attempt released its partial reservation
+        with pytest.raises(OwnershipConflict):
+            witness.reserve([home])  # timing out did not disturb the maintenance holder
+    finally:
+        booting.close()
+        witness.close()
+        holder.kill()
+        holder.wait(timeout=60)
+
+
 # ── Independent review round 2 ──
 
 
@@ -523,32 +624,55 @@ class SlowConnection:
     and chains to that handler when it does."""
     def __init__(self, conn):
         self._conn = conn
+        self._slow_vm = phase != "ddl"
         self.set_progress_handler(None, 0)
     def __getattr__(self, name):
         return getattr(self._conn, name)
+    def cursor(self, *a, **kw):
+        # DDL starts after durability setup and BEGIN; keep this rollback control distinct
+        # from cancellation during pre-transaction macOS PRAGMAs.
+        self._slow_vm = True
+        return self._conn.cursor(*a, **kw)
     def set_progress_handler(self, handler, n):
         def slow():
-            time.sleep(0.01)
+            if self._slow_vm:
+                time.sleep(0.01)
             return handler() if handler is not None else 0
         return self._conn.set_progress_handler(slow, 5)
     def close(self):
         return self._conn.close()
 
 def holding_lock():
-    """Only connections opened while THIS process holds gateway.lock are slowed."""
-    lock = Path(sys.argv[1]).with_name("gateway.lock")
-    try:
-        return json.loads(lock.read_text()).get("pid") == os.getpid()
-    except (OSError, ValueError):
-        return False
+    """Only connections opened while THIS process actually holds gateway.lock are slowed.
+    The JSON record alone is insufficient: it survives the initial reserve/release probe."""
+    from gateway.runtime_ownership import _maintenance
+    state = getattr(_maintenance, "state", None)
+    return (state is not None and state[0] == os.getpid()
+            and state[1].owns(Path(sys.argv[1]).parent))
 
 def slowed(path, *a, **kw):
     conn = original(path, *a, **kw)
     read_only = "mode=ro" in str(path)
     if holding_lock() and (phase == "integrity") == read_only:
+        conn.set_trace_callback(lambda sql: print("SQL", sql, flush=True)
+                                if sql in ("BEGIN IMMEDIATE", "COMMIT", "ROLLBACK") else None)
         print("slowed", flush=True)  # this process holds gateway.lock and the slow phase begins
         return SlowConnection(conn)
     return conn
+
+# Observe the REAL deadline's start; do not charge the pre-lock integrity scan or subprocess
+# scheduling against the lock-held budget. Include all work after that deadline starts, including
+# the second legacy-holder check and durability setup, not just the SQL after "slowed".
+import hermes_state_reconcile as reconcile
+original_budget = reconcile._Budget
+class TimedBudget(original_budget):
+    def __init__(self, seconds):
+        global started
+        super().__init__(seconds)
+        if holding_lock():
+            started = self.deadline - seconds
+            print("BUDGET_START", seconds, file=sys.stderr, flush=True)
+reconcile._Budget = TimedBudget
 
 ssr.connect_tracked = slowed
 started = time.monotonic()
@@ -562,7 +686,7 @@ except HTTPException as exc:
 
 
 @pytest.mark.platforms("linux", "macos")
-@pytest.mark.parametrize("phase", ["ddl"])
+@pytest.mark.parametrize("phase", ["durability", "ddl"])
 def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(tmp_path, phase):
     """R2-2: the busy timeout bounds lock contention, not SQL execution. A slow DDL must be
     interrupted at the browse budget (rolled back, retryable 503), and gateway boot's wait must
@@ -584,16 +708,39 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     path = _lagging_store_with_history(home, rows=400)
     before = _file_state(path)
     browse = subprocess.Popen([sys.executable, "-c", _SLOW_BROWSE, str(path), phase], env=os.environ,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    assert browse.stdout.readline().strip() == "started"
-    assert browse.stdout.readline().strip() == "slowed", "the slow phase never ran under the lock"
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     booting = ProfileOwnership()
+    output = []
     try:
+        assert browse.stdout is not None
+        assert browse.stdout.readline().strip() == "started"
+        assert browse.stdout.readline().strip() == "slowed", "the slow phase never ran under the lock"
+        started = time.monotonic()
         bootstrap._reserve_waiting_out_browse_reconcile(booting, [home])  # default wait: must not raise
+        assert time.monotonic() - started < wait_s
         assert booting.owns(home)
+        # A successful advisory probe is not ownership: boot must still hold the actual flock.
+        from gateway.runtime_ownership import OwnershipConflict
+        contender = ProfileOwnership()
+        try:
+            with pytest.raises(OwnershipConflict):
+                contender.reserve([home])
+        finally:
+            contender.close()
+        output.append(browse.communicate(timeout=60))
     finally:
         booting.close()
-    out = browse.communicate(timeout=60)[0]
+        if browse.poll() is None:
+            browse.kill()
+        browse.wait(timeout=60)
+    out, err = output[0]
+    assert browse.returncode == 0, (out, err)
+    assert [line for line in err.splitlines() if line.startswith("BUDGET_START")] == [
+        f"BUDGET_START {budget_s}",
+    ], err
+    assert "SQL COMMIT" not in out
+    if phase == "ddl":
+        assert "SQL BEGIN IMMEDIATE" in out, out
     result = next(line for line in out.splitlines() if line.startswith("RESULT"))
     _, status, elapsed, *detail = result.split(" ", 3)
     assert status == "503", out
@@ -776,6 +923,49 @@ class _SlowProgress:
 
     def close(self):
         return self._conn.close()
+
+
+@pytest.mark.platforms("macos")
+def test_slow_durability_pragmas_obey_the_browse_budget(tmp_path, monkeypatch):
+    """The real macOS durability PRAGMAs may load the schema before BEGIN. They must be
+    interruptible too, and a swallowed best-effort PRAGMA error must not start a transaction."""
+    import time
+
+    import hermes_cli.sqlite_safe_read as ssr
+    import hermes_state_reconcile as reconcile
+    from gateway.runtime_ownership import ProfileOwnership
+
+    home = _profile_home(tmp_path)
+    path = _lagging_store_with_history(home, rows=10)
+    before = _file_state(path)
+    original = ssr.connect_tracked
+    statements = []
+
+    def slow_writable(p, *a, **kw):
+        conn = original(p, *a, **kw)
+        if "mode=ro" not in str(p):
+            conn.set_trace_callback(statements.append)
+            return _SlowProgress(conn)
+        return conn
+
+    monkeypatch.setattr(ssr, "connect_tracked", slow_writable)
+    owner = _owned(home)
+    started = time.monotonic()
+    try:
+        with pytest.raises(reconcile.BrowseBudgetExceeded):
+            reconcile._apply_additive_schema(path, reconcile._Budget(0.3))
+        assert time.monotonic() - started < 2.3
+        assert not any(sql.startswith("BEGIN") for sql in statements), statements
+    finally:
+        owner.close()
+    successor = ProfileOwnership()
+    try:
+        successor.reserve([home])
+        assert successor.owns(home)
+    finally:
+        successor.close()
+    assert _file_state(path) == before
+    assert "last_read_at" not in _session_columns(path)
 
 
 def test_slow_integrity_scan_is_bounded_and_not_repeated_on_every_poll(tmp_path, monkeypatch):

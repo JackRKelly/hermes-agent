@@ -232,8 +232,13 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
     budget.check()
     with closing(connect_tracked(path, tracking_path=path, timeout=budget.busy_timeout(),
                                  isolation_level=None)) as conn:
-        _reapply_durability_barriers(conn)
+        # macOS durability PRAGMAs can execute the schema VM before BEGIN, so they need the
+        # same deadline as the DDL. Their best-effort helper swallows SQLite errors: explicitly
+        # check afterward so an interrupted PRAGMA cannot fall through to BEGIN with an expired
+        # budget (or surface as an unclassified OperationalError outside the rollback handler).
         budget.arm(conn)
+        _reapply_durability_barriers(conn)
+        budget.check()
         conn.execute('BEGIN IMMEDIATE')
         try:
             cursor = conn.cursor()

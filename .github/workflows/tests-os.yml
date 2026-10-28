@@ -200,7 +200,9 @@ jobs:
         env:
           # These files spawn nested PowerShell trees. CPU-count parallelism
           # starves cold child startup before the fixture's idle deadline.
-          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}
+          # Smaller Windows runners can override the upstream 16-worker default
+          # via a repository variable; macOS retains automatic worker selection.
+          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (vars.HERMES_CI_WINDOWS_TEST_WORKERS || '16') || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
