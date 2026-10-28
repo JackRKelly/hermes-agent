@@ -15,7 +15,7 @@ jobs:
       - name: Check out the exact failing source, not the probe controller
         uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
         with:
-          ref: cf209904494cc5d03bef5b0de0f9752714c77746
+          ref: c733af920b0a40bfdbc73c454e275657ebdb5270
 
       - name: Set up the same locked test environment
         uses: ./.github/actions/setup-pm
@@ -29,7 +29,7 @@ jobs:
         id: source_check
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = cf209904494cc5d03bef5b0de0f9752714c77746
+          test "$(git rev-parse HEAD)" = c733af920b0a40bfdbc73c454e275657ebdb5270
           python -c "import os,platform; assert platform.system() == 'Windows'; print({'os':platform.system(),'arch':platform.machine(),'cpu_count':os.cpu_count()})"
 
       - name: Observe Git layout without changing Git or its configuration
@@ -61,45 +61,28 @@ jobs:
                   print(json.dumps(result))
           PY
 
-      - name: Isolate the finished-at failure with an immediate traceback
+      - name: Run Git locator, command and all five native live tests
         if: always() && steps.source_check.outcome == 'success'
         shell: bash
         run: |
-          scripts/run_tests.sh -j 1 --file-retries 0 \
-            tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py \
-            -- -m "platforms and not integration" \
-            -k test_result_finished_at_is_stamped_after_the_r6_release_wait \
-            -x -vv --tb=long -o faulthandler_timeout=45
+          scripts/run_tests.sh -j 2 --file-retries 0 \
+            tests/hermes_cli/test_git_trampoline_locator.py \
+            tests/hermes_cli/test_cmd_update.py \
+            tests/hermes_cli/test_git_trampoline_windows_live.py \
+            -- -vv --tb=long
         env:
-          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_WORKERS: '2'
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
 
-      - name: Isolate the CPU-busy watchdog case without extending its deadlines
+      - name: Verify native Git console-hide compatibility
         if: always() && steps.source_check.outcome == 'success'
         shell: bash
         run: |
           scripts/run_tests.sh -j 1 --file-retries 0 \
-            tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py \
-            -- -m "platforms and not integration" \
-            -k test_cpu_busy_pipe_silent_update_is_not_killed_by_the_idle_watchdog \
-            -x -vv --tb=long -o faulthandler_timeout=45
-        env:
-          HERMES_TEST_WORKERS: '1'
-          OPENROUTER_API_KEY: ''
-          OPENAI_API_KEY: ''
-          NOUS_API_KEY: ''
-
-      - name: Isolate the marker case without extending its deadlines
-        if: always() && steps.source_check.outcome == 'success'
-        shell: bash
-        run: |
-          scripts/run_tests.sh -j 1 --file-retries 0 \
-            tests/scripts/desktop_update/test_desktop_update_windows_marker.py \
-            -- -m "platforms and not integration" \
-            -k delegate-without-ct-is-ignored \
-            -x -vv --tb=long -o faulthandler_timeout=45
+            tests/test_windows_subprocess_no_window_flags.py \
+            -- -k test_update_git_plumbing_spawns_hide_console_window -vv --tb=long
         env:
           HERMES_TEST_WORKERS: '1'
           OPENROUTER_API_KEY: ''
