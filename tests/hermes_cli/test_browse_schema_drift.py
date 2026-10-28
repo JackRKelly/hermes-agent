@@ -624,10 +624,14 @@ class SlowConnection:
     and chains to that handler when it does."""
     def __init__(self, conn):
         self._conn = conn
-        self._slow_vm = phase != "ddl"
+        self._slow_vm = phase not in ("ddl", "pre_begin")
         self.set_progress_handler(None, 0)
     def __getattr__(self, name):
         return getattr(self._conn, name)
+    def execute(self, sql, *a, **kw):
+        if sql == "BEGIN IMMEDIATE":
+            print("BEGIN_ATTEMPT", flush=True)
+        return self._conn.execute(sql, *a, **kw)
     def cursor(self, *a, **kw):
         # DDL starts after durability setup and BEGIN; keep this rollback control distinct
         # from cancellation during pre-transaction macOS PRAGMAs.
@@ -655,8 +659,13 @@ def slowed(path, *a, **kw):
     read_only = "mode=ro" in str(path)
     if holding_lock() and (phase == "integrity") == read_only:
         conn.set_trace_callback(lambda sql: print("SQL", sql, flush=True)
-                                if sql in ("BEGIN IMMEDIATE", "COMMIT", "ROLLBACK") else None)
+                                if sql in ("BEGIN IMMEDIATE", "COMMIT", "ROLLBACK")
+                                or sql.startswith("ALTER TABLE") else None)
         print("slowed", flush=True)  # this process holds gateway.lock and the slow phase begins
+        if phase == "pre_begin":
+            # A genuinely elapsed deadline before BEGIN is a different control from
+            # slow DDL rollback. Never reset/fake the clock or extend either budget.
+            time.sleep(reconcile.BROWSE_RECONCILE_BUDGET_S + 0.1)
         return SlowConnection(conn)
     return conn
 
@@ -685,16 +694,45 @@ except HTTPException as exc:
 '''
 
 
+def _browse_child(code, *args):
+    import os
+    import subprocess
+    import sys
+
+    # readline() and communicate() must share an unbuffered binary pipe. A text
+    # wrapper can read SQL ahead during the handshake; communicate() then bypasses
+    # that buffer via os.read() and silently loses the transaction evidence.
+    return subprocess.Popen([sys.executable, "-c", code, *map(str, args)], env=os.environ,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+
+def test_browse_child_keeps_transaction_evidence_buffered_at_the_handshake():
+    """A ready child can put handshake and SQL in the same pipe read. Mixing text
+    readline() with communicate() must not silently discard read-ahead transaction evidence."""
+    code = "import os; os.write(1, b'started\\nslowed\\nSQL BEGIN IMMEDIATE\\nSQL ROLLBACK\\n')"
+    child = _browse_child(code)
+    try:
+        # This tiny burst fits in the pipe; exit proves all lines precede the first read.
+        child.wait(timeout=60)
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == b"started"
+        assert child.stdout.readline().strip() == b"slowed"
+        out, err = child.communicate(timeout=60)
+        assert child.returncode == 0, (out, err)
+        assert out == b"SQL BEGIN IMMEDIATE\nSQL ROLLBACK\n"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=60)
+
+
 @pytest.mark.platforms("linux", "macos")
-@pytest.mark.parametrize("phase", ["durability", "ddl"])
+@pytest.mark.parametrize("phase", ["durability", "ddl", "pre_begin"])
 def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(tmp_path, phase):
     """R2-2: the busy timeout bounds lock contention, not SQL execution. A slow DDL must be
     interrupted at the browse budget (rolled back, retryable 503), and gateway boot's wait must
     outlast that budget, so a slow browse never turns into a startup refusal. (The integrity scan
     no longer runs under the lock: see test_gateway_boot_never_waits_on_a_slow_integrity_scan.)"""
-    import os
-    import subprocess
-    import sys
     import time
 
     import gateway.run_bootstrap as bootstrap
@@ -707,14 +745,13 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     home = _profile_home(tmp_path)
     path = _lagging_store_with_history(home, rows=400)
     before = _file_state(path)
-    browse = subprocess.Popen([sys.executable, "-c", _SLOW_BROWSE, str(path), phase], env=os.environ,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    browse = _browse_child(_SLOW_BROWSE, path, phase)
     booting = ProfileOwnership()
     output = []
     try:
         assert browse.stdout is not None
-        assert browse.stdout.readline().strip() == "started"
-        assert browse.stdout.readline().strip() == "slowed", "the slow phase never ran under the lock"
+        assert browse.stdout.readline().strip() == b"started"
+        assert browse.stdout.readline().strip() == b"slowed", "the slow phase never ran under the lock"
         started = time.monotonic()
         bootstrap._reserve_waiting_out_browse_reconcile(booting, [home])  # default wait: must not raise
         assert time.monotonic() - started < wait_s
@@ -734,6 +771,7 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
             browse.kill()
         browse.wait(timeout=60)
     out, err = output[0]
+    out, err = out.decode(), err.decode()
     assert browse.returncode == 0, (out, err)
     assert [line for line in err.splitlines() if line.startswith("BUDGET_START")] == [
         f"BUDGET_START {budget_s}",
@@ -741,6 +779,13 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     assert "SQL COMMIT" not in out
     if phase == "ddl":
         assert "SQL BEGIN IMMEDIATE" in out, out
+        assert "SQL ALTER TABLE" in out, out
+        assert "SQL ROLLBACK" in out, out
+    elif phase == "pre_begin":
+        assert "BEGIN_ATTEMPT" not in out, out
+        assert "SQL BEGIN IMMEDIATE" not in out, out
+        assert "SQL ALTER TABLE" not in out, out
+        assert "SQL ROLLBACK" not in out, out
     result = next(line for line in out.splitlines() if line.startswith("RESULT"))
     _, status, elapsed, *detail = result.split(" ", 3)
     assert status == "503", out

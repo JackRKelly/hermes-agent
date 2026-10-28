@@ -44,9 +44,13 @@ class CompactingModel(BaseHTTPRequestHandler):
         if body.get('model') == 'original' and 'SUMMARY_RETAINED_FACTS' in wire and not self.server.blocked.is_set():
             self.server.blocked.set()
             self.server.release.wait(60)
-        # Only the pressure turns are large: the followers must not trigger a second compaction.
+        # Seed both the protected head and the old user-turn negative control before adding
+        # pressure. Otherwise modest system-prompt growth can compact at PRESSURE_3, while
+        # PRESSURE_1 is legitimately still inside the token-based protected tail.
+        add_history = str(text).startswith('PRESSURE_') and not str(text).startswith(('PRESSURE_0 ', 'PRESSURE_1 '))
+        # Only later pressure turns are large: followers must not trigger a second compaction.
         reply = 'SUMMARY_RETAINED_FACTS' if body.get('model') == 'summary' else (
-            'ACK_' + str(text)[:40] + (' ' + 'historical detail ' * 700 if str(text).startswith('PRESSURE_') else ''))
+            'ACK_' + str(text)[:40] + (' ' + 'historical detail ' * 700 if add_history else ''))
         message = {'role': 'assistant', 'content': reply}
         payload = json.dumps({'id': 'local', 'model': body.get('model'), 'choices': [
             {'index': 0, 'message': message, 'finish_reason': 'stop'}],
@@ -71,11 +75,15 @@ class CompactingModel(BaseHTTPRequestHandler):
 
 @pytest.mark.platforms('linux')
 @pytest.mark.parametrize('restart', ['graceful', 'crash'])
-def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_path, restart):
+@pytest.mark.parametrize('project_context', ['', 'ordinary local context ' * 100], ids=['bare', 'project-context'])
+def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_path, restart, project_context):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
     user.mkdir()
+    # A modest project prompt must not decide whether PRESSURE_1 is summarized or protected.
+    if project_context:
+        (home / 'AGENTS.md').write_text(project_context)
     peer = ThreadingHTTPServer(('127.0.0.1', 0), CompactingModel)
     peer.requests = []
     peer.blocked, peer.release = threading.Event(), threading.Event()
@@ -138,6 +146,13 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
             else:
                 raise AssertionError('automatic compression never published')
             compacting = params
+            # Establish the compression fixture before testing restoration. PRESSURE_1 must
+            # really have entered the summary, not still be a legitimate protected-tail row.
+            summary = next(r for r in peer.requests if r['model'] == 'summary')
+            assert 'PRESSURE_1 ' in summary['wire'], summary['wire']
+            compressed_wire = json.loads(peer.requests[-1]['wire'])
+            assert any(str(m.get('content', '')).startswith('PRESSURE_0 ') for m in compressed_wire)
+            assert not any(str(m.get('content', '')).startswith('PRESSURE_1 ') for m in compressed_wire)
             children = rows('SELECT id FROM sessions WHERE parent_session_id=?', (sid,))
             assert len(children) == 1, children
             receipts = {compacting['input_id']: accepted['admission_id']}

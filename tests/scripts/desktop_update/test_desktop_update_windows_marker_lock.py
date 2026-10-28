@@ -175,6 +175,46 @@ def test_child_observer_rejects_descendants(tmp_path: Path) -> None:
         assert descendant is None or not descendant.is_running()
 
 
+def test_published_fixture_runtime_command_uses_its_own_import_closure(tmp_path: Path) -> None:
+    """Query and execute the real launcher without borrowing an installed PM package."""
+    install = tmp_path / 'checkout'
+    launcher = publish_fixture_launcher(install, '''
+import json
+import sys
+import pm.environments
+import pm.paths
+
+def main():
+    print(json.dumps({
+        'environments': pm.environments.__file__, 'paths': pm.paths.__file__,
+        'args': sys.argv[1:], 'python': sys.executable,
+    }))
+    return 0
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+''')
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('HERMES_RUNTIME_DIR', 'HERMES_INSTALL_ROOT')}
+    env['HERMES_HOME'] = str(tmp_path / 'home')
+    query = subprocess.run(
+        [str(launcher), '--print-runtime-command', '--module', 'hermes_cli.main'],
+        cwd=install, env=env, capture_output=True, text=True, check=True,
+    )
+    runtime = json.loads(query.stdout)
+    assert os.path.samefile(runtime[0], sys.executable)
+    assert runtime[1:3] == ['-I', '-c']
+    result = subprocess.run(
+        [*runtime, '--closure-probe'], cwd=install, env=env,
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(result.stdout)
+    assert Path(data['environments']).resolve() == install / 'pm' / 'environments.py'
+    assert Path(data['paths']).resolve() == install / 'pm' / 'paths.py'
+    assert data['args'] == ['--closure-probe']
+    assert os.path.samefile(data['python'], sys.executable)
+
+
 @pytest.mark.parametrize('relay', [False, True])
 def test_help_probe_handshake_gates_real_launcher(tmp_path: Path, relay: bool) -> None:
     install = tmp_path / 'checkout'
