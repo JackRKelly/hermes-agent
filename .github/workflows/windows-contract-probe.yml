@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  low-concurrency-control:
+  isolated-case-control:
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
@@ -26,31 +26,87 @@ jobs:
           prune-python-cache: true
 
       - name: Verify source and native host
+        id: source_check
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = cf209904494cc5d03bef5b0de0f9752714c77746
           python -c "import os,platform; assert platform.system() == 'Windows'; print({'os':platform.system(),'arch':platform.machine(),'cpu_count':os.cpu_count()})"
 
-      - name: Reproduce failed files at two workers without retries
+      - name: Observe Git layout without changing Git or its configuration
         shell: bash
         run: |
-          scripts/run_tests.sh -j 2 --file-retries 0 \
-            tests/gateway/test_control_socket_windows_live.py \
-            tests/hermes_cli/test_git_trampoline_windows_live.py \
-            tests/hermes_cli/test_local_runtime_processes.py \
-            tests/pm/test_source_launcher_stages.py \
-            tests/ci/test_update_ci_routing.py \
+          python - <<'PY'
+          import json, shutil, subprocess
+          from pathlib import Path
+          from hermes_cli import update_cmd_git as git_update
+          selected = shutil.which('git')
+          print(json.dumps({'selected_git': selected, 'locator_result': str(git_update._locate_real_git())}))
+          roots = [Path(r'C:\Program Files\Git'), Path(r'C:\Program Files (x86)\Git')]
+          if selected:
+              roots.append(Path(selected).parent.parent)
+          seen = set()
+          for root in roots:
+              if not root.is_dir():
+                  continue
+              for executable in root.rglob('git.exe'):
+                  if executable in seen:
+                      continue
+                  seen.add(executable)
+                  result = {'path': str(executable), 'size': executable.stat().st_size}
+                  try:
+                      version = subprocess.run([str(executable), '--version'], capture_output=True, text=True, timeout=15)
+                      result.update(exit=version.returncode, stdout=version.stdout.strip(), stderr=version.stderr.strip())
+                  except subprocess.TimeoutExpired:
+                      result['probe'] = '15-second diagnostic observation expired'
+                  print(json.dumps(result))
+          PY
+
+      - name: Isolate the finished-at failure with an immediate traceback
+        if: always() && steps.source_check.outcome == 'success'
+        shell: bash
+        run: |
+          scripts/run_tests.sh -j 1 --file-retries 0 \
             tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py \
-            tests/scripts/desktop_update/test_desktop_update_windows_marker.py \
-            tests/scripts/install/test_install_ps1_native_calls.py \
-            -- -m "platforms and not integration" -v --tb=short
+            -- -m "platforms and not integration" \
+            -k test_result_finished_at_is_stamped_after_the_r6_release_wait \
+            -x -vv --tb=long -o faulthandler_timeout=45
         env:
-          HERMES_TEST_WORKERS: '2'
+          HERMES_TEST_WORKERS: '1'
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+
+      - name: Isolate the CPU-busy watchdog case without extending its deadlines
+        if: always() && steps.source_check.outcome == 'success'
+        shell: bash
+        run: |
+          scripts/run_tests.sh -j 1 --file-retries 0 \
+            tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py \
+            -- -m "platforms and not integration" \
+            -k test_cpu_busy_pipe_silent_update_is_not_killed_by_the_idle_watchdog \
+            -x -vv --tb=long -o faulthandler_timeout=45
+        env:
+          HERMES_TEST_WORKERS: '1'
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+
+      - name: Isolate the marker case without extending its deadlines
+        if: always() && steps.source_check.outcome == 'success'
+        shell: bash
+        run: |
+          scripts/run_tests.sh -j 1 --file-retries 0 \
+            tests/scripts/desktop_update/test_desktop_update_windows_marker.py \
+            -- -m "platforms and not integration" \
+            -k delegate-without-ct-is-ignored \
+            -x -vv --tb=long -o faulthandler_timeout=45
+        env:
+          HERMES_TEST_WORKERS: '1'
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
 
       - name: Verify no source files were changed
-        if: always()
+        if: always() && steps.source_check.outcome == 'success'
         shell: bash
         run: git diff --exit-code
