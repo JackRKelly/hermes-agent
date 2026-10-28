@@ -1,0 +1,56 @@
+name: Windows contract diagnostic
+
+on:
+  push:
+    branches: [ci/windows-contract-probe-20261028]
+
+permissions:
+  contents: read
+
+jobs:
+  low-concurrency-control:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact failing source, not the probe controller
+        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
+        with:
+          ref: cf209904494cc5d03bef5b0de0f9752714c77746
+
+      - name: Set up the same locked test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: git,ripgrep
+          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Verify source and native host
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = cf209904494cc5d03bef5b0de0f9752714c77746
+          python -c "import os,platform; assert platform.system() == 'Windows'; print({'os':platform.system(),'arch':platform.machine(),'cpu_count':os.cpu_count()})"
+
+      - name: Reproduce failed files at two workers without retries
+        shell: bash
+        run: |
+          scripts/run_tests.sh -j 2 --file-retries 0 \
+            tests/gateway/test_control_socket_windows_live.py \
+            tests/hermes_cli/test_git_trampoline_windows_live.py \
+            tests/hermes_cli/test_local_runtime_processes.py \
+            tests/pm/test_source_launcher_stages.py \
+            tests/ci/test_update_ci_routing.py \
+            tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py \
+            tests/scripts/desktop_update/test_desktop_update_windows_marker.py \
+            tests/scripts/install/test_install_ps1_native_calls.py \
+            -- -m "platforms and not integration" -v --tb=short
+        env:
+          HERMES_TEST_WORKERS: '2'
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+
+      - name: Verify no source files were changed
+        if: always()
+        shell: bash
+        run: git diff --exit-code
