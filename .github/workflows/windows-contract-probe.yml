@@ -7,23 +7,92 @@ on:
 permissions:
   contents: read
 
+# Serialize runs too; within each run the DAG and unified matrix allow one VM.
+concurrency:
+  group: windows-contract-acceptance
+  cancel-in-progress: false
+
 env:
-  SUBJECT_SHA: 2b682fffaa6c06fb700df0d32e21c0b4ac7370e6
+  SUBJECT_SHA: 81f29fbf2ac018f41ec4325a229d2ee3e913222b
   OPENROUTER_API_KEY: ''
   OPENAI_API_KEY: ''
   NOUS_API_KEY: ''
 
 jobs:
+  prepare-arm-openssl:
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    outputs:
+      manifest-sha256: ${{ steps.export.outputs.manifest_sha256 }}
+    steps:
+      - name: Check out the exact controller first
+        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Preserve the self-contained helper across subject checkout
+        shell: bash
+        run: cp .github/workflows/windows_acceptance_controller.py "$RUNNER_TEMP/windows_acceptance_controller.py"
+      - name: Check out the exact acceptance subject
+        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
+        with:
+          ref: ${{ env.SUBJECT_SHA }}
+          persist-credentials: false
+          clean: true
+      - name: Verify exact subject and real Windows ARM host
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$SUBJECT_SHA"
+          git diff --exit-code HEAD --
+          python -c "import os,platform; assert platform.system() == 'Windows' and os.name == 'nt' and platform.machine().lower() == 'arm64'"
+      - name: Prepare native Windows ARM64 build dependencies
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        uses: ./.github/actions/setup-windows-build-deps
+      - name: Export only exact-subject OpenSSL headers and two static libraries
+        id: export
+        shell: bash
+        run: |
+          python "$RUNNER_TEMP/windows_acceptance_controller.py" --repo "$GITHUB_WORKSPACE" \
+            --subject "$SUBJECT_SHA" --output "$RUNNER_TEMP/openssl-unused" \
+            --openssl export --artifact "$RUNNER_TEMP/windows-openssl"
+      - name: Retain required same-run prerequisite, not machine state
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-openssl-arm64-${{ env.SUBJECT_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/windows-openssl/
+
   whole-file-acceptance:
+    needs: prepare-arm-openssl
     strategy:
       fail-fast: false
       max-parallel: 1
+      # Whole-file groups only. Mutation has its own VM/group: no shared source,
+      # duration cache, homes, or unproved concurrent mutation isolation.
       matrix:
         include:
           - runner: windows-2025
             arch: x64
+            group: files-1
+          - runner: windows-2025
+            arch: x64
+            group: files-2
+          - runner: windows-2025
+            arch: x64
+            group: mutation
           - runner: windows-11-arm
             arch: arm64
+            group: files-1
+          - runner: windows-11-arm
+            arch: arm64
+            group: files-2
+          - runner: windows-11-arm
+            arch: arm64
+            group: files-3
+          - runner: windows-11-arm
+            arch: arm64
+            group: mutation
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
@@ -55,9 +124,36 @@ jobs:
           git diff --exit-code HEAD --
           python -c "import os,platform; assert platform.system() == 'Windows' and os.name == 'nt'; print({'os':platform.system(),'arch':platform.machine(),'cpu_count':os.cpu_count()})"
 
+      - name: Download required exact-run ARM OpenSSL prerequisite
+        if: matrix.arch == 'arm64'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-openssl-arm64-${{ env.SUBJECT_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-openssl
+
+      - name: Verify identity and every allowed byte before installing ARM OpenSSL
+        if: matrix.arch == 'arm64'
+        shell: bash
+        env:
+          OPENSSL_MANIFEST_SHA: ${{ needs.prepare-arm-openssl.outputs.manifest-sha256 }}
+        run: |
+          python "$RUNNER_TEMP/windows_acceptance_controller.py" --repo "$GITHUB_WORKSPACE" \
+            --subject "$SUBJECT_SHA" --output "$RUNNER_TEMP/openssl-unused" \
+            --openssl install --artifact "$RUNNER_TEMP/windows-openssl" --manifest-sha "$OPENSSL_MANIFEST_SHA"
+
       - name: Prepare native Windows ARM64 build dependencies
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
         uses: ./.github/actions/setup-windows-build-deps
+
+      - name: Recheck ARM OpenSSL bytes after original build-deps and its cache restore
+        if: matrix.arch == 'arm64'
+        shell: bash
+        env:
+          OPENSSL_MANIFEST_SHA: ${{ needs.prepare-arm-openssl.outputs.manifest-sha256 }}
+        run: |
+          python "$RUNNER_TEMP/windows_acceptance_controller.py" --repo "$GITHUB_WORKSPACE" \
+            --subject "$SUBJECT_SHA" --output "$RUNNER_TEMP/openssl-unused" \
+            --openssl verify --artifact "$RUNNER_TEMP/windows-openssl" --manifest-sha "$OPENSSL_MANIFEST_SHA"
 
       - name: Set up the same locked test environment
         id: pm
@@ -71,14 +167,15 @@ jobs:
           save-python-cache: 'false'
           save-node-cache: 'false'
 
-      - name: Native whole files (41 partition + 13 marker-lock + 5 protocol), real mutation RED
+      - name: Native bounded whole-file group or real mutation RED
         shell: bash
         env:
           HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
         run: |
           "$HERMES_PYTHON" "$RUNNER_TEMP/windows_acceptance_controller.py" \
             --repo "$GITHUB_WORKSPACE" --subject "$SUBJECT_SHA" --arch "${{ matrix.arch }}" \
-            --output "$RUNNER_TEMP/windows-acceptance-evidence-${{ matrix.arch }}"
+            --group "${{ matrix.group }}" \
+            --output "$RUNNER_TEMP/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}"
 
       - name: Verify original subject is still unchanged
         if: always() && steps.source_check.outcome == 'success'
@@ -87,25 +184,69 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SUBJECT_SHA"
           git diff --exit-code HEAD --
 
-      # Existing repository pin, official action only. No source archive, private
-      # profile, credentials, provider state or unrelated runner home is uploaded.
+      # Explicit evidence files only; never archive source, homes or credentials.
       - name: Retain selected logs, exact outcomes and mutation evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-acceptance-${{ matrix.arch }}-${{ env.SUBJECT_SHA }}-${{ github.run_id }}
+          name: windows-acceptance-${{ matrix.arch }}-${{ matrix.group }}-${{ env.SUBJECT_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
           include-hidden-files: true
           path: |
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/metadata.json
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/summary.json
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/process.json
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/result.json
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/pytest.log
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/junit.xml
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/mutation.json
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/desktop-update-handoff.log
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/.hermes-update-result.json
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/.hermes-update-in-progress
-            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/calls.jsonl
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/metadata.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/summary.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/process.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/result.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/pytest.log
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/junit.xml
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/mutation.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/desktop-update-handoff.log
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/.hermes-update-result.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/.hermes-update-in-progress
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}-${{ matrix.group }}/**/calls.jsonl
+
+  exact-subject-aggregate:
+    needs: [prepare-arm-openssl, whole-file-acceptance]
+    if: always()
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out exact controller
+        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Preserve aggregate verifier
+        run: cp .github/workflows/windows_acceptance_controller.py "$RUNNER_TEMP/windows_acceptance_controller.py"
+      - name: Check out exact acceptance subject
+        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a
+        with:
+          ref: ${{ env.SUBJECT_SHA }}
+          persist-credentials: false
+          clean: true
+      - name: Download all exact-run group evidence without merging directories
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: windows-acceptance-*-${{ env.SUBJECT_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-groups
+          merge-multiple: false
+      - name: Fail closed unless every architecture, group, case and mutation is complete
+        if: always()
+        env:
+          ACCEPTANCE_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python "$RUNNER_TEMP/windows_acceptance_controller.py" --repo "$GITHUB_WORKSPACE" \
+            --subject "$SUBJECT_SHA" --aggregate-dir "$RUNNER_TEMP/windows-groups" \
+            --output "$RUNNER_TEMP/windows-final-acceptance"
+      - name: Retain exact-subject global verdict
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-final-acceptance-${{ env.SUBJECT_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/windows-final-acceptance/aggregate.json

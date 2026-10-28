@@ -46,7 +46,7 @@ HASHES = {
     'scripts/desktop-update/marker-claim.ps1': '43fabb7a293eba12e8044d26447952891f9a481b61e76205326de9e0b1df11cf',
     'scripts/desktop-update/update-job.ps1': 'a2f599925aca103b5204e6c9de44a94efa9dd0dcba0cf10af8e381e52643eda6',
     'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py': '225de09a1420cf406964a6e313d3a9e235c3149ac2fd7c42a9cc5f6bbafc67aa',
-    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py': '2cb44bc565731abd75eea33376eb250065ce97471aee7b5acf83274145e6c36f',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py': '9d19bbd5320e6dcdafa2b6fdd96c54401848e72c1e92ee5459ace3a18e972331',
     'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py': 'd9199d78cee359d015ebb571cdefa94212217264c772e270e4105ba983651a76',
     'tests/scripts/desktop_update/test_desktop_update_windows_commit_release.py': '5d7ddb97bd93d21487e6ff18fe7ee83edf149bbdb79c4e5f19c7ef59aaf72493',
     'tests/scripts/desktop_update/test_desktop_update_windows_commit_supervision.py': 'f1587fb0129b92623c72c7ad097bf918e710164302daf41bffea3cce1a101d57',
@@ -54,9 +54,192 @@ HASHES = {
     'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py': 'f6f8ca08272e68db0a396344f39be82878132bb3caac9837f7d2b7defd9f1b1c',
     'tests/scripts/desktop_update/test_desktop_update_windows_marker_custodian.py': '443d2ad33d33052e0f1ad15e2e856fb36b8ab863a128da15fbaa265e23d39964',
     'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py': '0659269e51cea52c893aaa372d6669ad35fbaadb2ebae5ee3d8d43f508ec4c74',
-    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py': '2d0b82a6454bf8377d4446b88e027c65d75ca345e39279aee4fe45486c6d30e8',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py': '814ad155401ca6439b36ac77d7b6c99a1c6693428f5cd0ddbbc3bb0c6c8635ae',
     'tests/scripts/desktop_update/test_r6_checkout_fixture.py': '378e9d0691ec996c9e52e8615af98d165bdf321ac7f0b4dc1c079bdb1c0276d1',
+    'tests/installation_launcher_fixture.py': '071870cf46a2d9b718f984521af4414f4f3d361f220484f31ca573a628492643',
+    'pm/__init__.py': '67adcba1f0e4db2b2967d07e6b630aca4214b1fac9bd8649dcf221b4bf3fcfac',
+    'pm/paths.py': '8f15860b82f443a424186317dc361ea6063e0e7c3113af9b56a76f6b89e97737',
+    'pm/environments.py': '40b5fb014b07ad7c7187352bacb9b79581da4c1304d2e86768eb5dfd95a2ea2b',
+    'hermes_cli/_launchers.py': '4defa7fd066a8cb582befab800f39a9488289519125bc8ccc2e92b8e439e3311',
+    'hermes_constants.py': '74d849629c176703d48f9aa43a245fd8819545ac908c805e347db7d691976510',
 }
+EXPECTED_NODES = [
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_release.py::test_result_finished_at_is_stamped_after_the_r6_release_wait',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py::test_verify_failure_after_a_committed_update_is_ok_with_warnings',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py::test_result_is_atomic_json_carrying_started_at_and_warnings',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py::test_a_result_that_cannot_be_published_leaves_no_tmp_file',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py::test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup[interrupted-True]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py::test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup[partial-True]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py::test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup[interrupted,another-run-False]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py::test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup[failed-False]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py::test_claim_is_the_first_action_and_writes_a_v2_body',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py::test_live_foreign_owner_refuses_and_reused_pid_is_reclaimed[True]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py::test_live_foreign_owner_refuses_and_reused_pid_is_reclaimed[False]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py::test_owner_creation_time_is_read_for_system_processes[True]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py::test_owner_creation_time_is_read_for_system_processes[False]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py::test_r4_old_desktop_wrapper_claim_is_adopted_by_lineage[start-b]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py::test_r4_old_desktop_wrapper_claim_is_adopted_by_lineage[waiting-wrapper]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py::test_r4_old_desktop_lineage_never_adopts_an_unrelated_live_claim',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py::test_r4_live_wrapper_not_the_desktops_child_is_adopted_only_with_the_handoff_started_at[env-matches]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py::test_r4_live_wrapper_not_the_desktops_child_is_adopted_only_with_the_handoff_started_at[env-differs]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_release.py::test_marker_with_a_live_delegate_is_handed_to_it_at_finish',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_supervision.py::test_watchdog_remap_after_banner_reports_interrupted_followups',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_supervision.py::test_cpu_busy_pipe_silent_update_is_not_killed_by_the_idle_watchdog',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_supervision.py::test_hanging_update_help_probe_is_bounded',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py::test_marker_bodies_are_parsed_positionally_like_every_other_reader[crlf-bom-v2]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py::test_marker_bodies_are_parsed_positionally_like_every_other_reader[delegate-without-ct-is-ignored]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py::test_marker_bodies_are_parsed_positionally_like_every_other_reader[fractional-started-at]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py::test_marker_bodies_are_parsed_positionally_like_every_other_reader[garbled-ct-is-v1-fresh]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py::test_marker_bodies_are_parsed_positionally_like_every_other_reader[garbled-ct-is-v1-past-20min]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py::test_marker_bodies_are_parsed_positionally_like_every_other_reader[garbled-line-2]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py::test_marker_bodies_are_parsed_positionally_like_every_other_reader[missing-line-2]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py::test_desktop_started_handoff_only_adopts_its_bridge[absent]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py::test_desktop_started_handoff_only_adopts_its_bridge[someone-else]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py::test_live_desktop_bridge_marker_is_adopted_keeping_its_started_at',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py::test_dead_owner_marker_is_reclaimed_and_released',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py::test_desktop_that_never_exits_is_not_relaunched_over',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py::test_ui_profile_sweep_keeps_dirs_of_live_handoffs',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_custodian.py::test_script_killed_right_after_spawning_the_update_leaves_a_live_marker',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py::test_launcher_lineage_rule_matches_the_shared_table',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py::test_handoff_run_adopts_only_the_desktop_bridge_for_that_run[ok]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py::test_handoff_run_adopts_only_the_desktop_bridge_for_that_run[other-run]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py::test_handoff_run_adopts_only_the_desktop_bridge_for_that_run[stale-ct]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py::test_handoff_run_adopts_only_the_desktop_bridge_for_that_run[v1]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_a7_claim_is_decided_inside_the_marker_lock',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_a7_concurrent_claimants_over_a_dead_marker_yield_one_owner',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_child_observer_uses_live_identity_not_initialized_command_line',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_child_observer_identifies_real_suspended_child',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_child_observer_rejects_non_update_process[existing-identity]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_child_observer_rejects_non_update_process[wrong-image]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_child_observer_rejects_descendants',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_help_probe_handshake_gates_real_launcher[False]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_help_probe_handshake_gates_real_launcher[True]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_help_probe_rejects_foreign_identity[nonce-another-run-foreign help readiness]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_help_probe_rejects_foreign_identity[parent--1-help has wrong parent]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_help_probe_rejects_foreign_identity[created-0.0-help has wrong creation identity]',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_script_killed_before_publishing_the_delegate_runs_no_update',
+    'tests/scripts/desktop_update/test_r6_checkout_fixture.py::test_checkout_holder_waits_for_real_r6_before_releasing',
+    'tests/scripts/desktop_update/test_r6_checkout_fixture.py::test_checkout_holder_eof_cleanup_unlocks_without_observed_wait',
+    'tests/scripts/desktop_update/test_r6_checkout_fixture.py::test_checkout_holder_rejects_failed_acquisition',
+    'tests/scripts/desktop_update/test_r6_checkout_fixture.py::test_checkout_holder_cancels_a_missing_release_ack',
+    'tests/scripts/desktop_update/test_r6_checkout_fixture.py::test_checkout_holder_reports_missing_r6_without_leaking',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py::test_published_fixture_runtime_command_uses_its_own_import_closure',
+]
+
+def group_mapping(arch):
+    require(arch in ('x64', 'arm64'), 'Unknown architecture')
+    groups = ([ALL_FILES[:6], ALL_FILES[6:]] if arch == 'x64'
+              else [ALL_FILES[:4], ALL_FILES[4:8], ALL_FILES[8:]])
+    return {**{f'files-{i + 1}': names for i, names in enumerate(groups)}, 'mutation': []}
+
+
+OPENSSL_REQUIRED = ('include/openssl/ssl.h', 'lib/libcrypto.lib', 'lib/libssl.lib')
+BUILD_INPUTS = ('.github/actions/setup-windows-build-deps/action.yml',
+                'scripts/windows-build-deps.ps1', 'scripts/build/windows-deps.ps1')
+
+
+def openssl_path(name):
+    # Deliberately no general archive extraction or arbitrary filesystem roots.
+    return (name in OPENSSL_REQUIRED[1:] or
+            re.fullmatch(r'include/openssl/[a-z0-9_][a-z0-9_.-]*\.h', name) is not None)
+
+
+def regular_file(path, root):
+    require(path.is_relative_to(root) and path.is_file(), f'Missing artifact file: {path}')
+    for part in [path, *path.parents]:
+        require(not part.is_symlink() and not getattr(part, 'is_junction', lambda: False)(),
+                f'Link/reparse path forbidden: {part}')
+        if part == root:
+            break
+    require(path.resolve().is_relative_to(root.resolve()), 'Path escaped root')
+
+
+def openssl_files(root):
+    names = {relative_key(p, root) for p in (root / 'include' / 'openssl').glob('*.h')}
+    names.update(OPENSSL_REQUIRED[1:])
+    require(set(OPENSSL_REQUIRED) <= names, 'Missing required OpenSSL files')
+    for name in names:
+        require(openssl_path(name), f'Non-allowlisted OpenSSL path: {name}')
+        regular_file(root / name, root)
+    return {n: sha((root / n).read_bytes()) for n in sorted(names)}
+
+
+def export_openssl(installed, output, identity):
+    import shutil
+    require(not output.exists(), 'Artifact export must be fresh')
+    files = openssl_files(installed)
+    output.mkdir(parents=True)
+    for name in files:
+        dest = output / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(installed / name, dest)
+    save(output / 'manifest.json', {'identity': identity, 'files': files})
+    digest = sha((output / 'manifest.json').read_bytes())
+    verify_openssl(output, identity, digest)
+    return digest
+
+
+def verify_openssl(artifact, identity, digest, destination=None, installed=None):
+    import shutil
+    path = artifact / 'manifest.json'
+    regular_file(path, artifact)
+    require(re.fullmatch(r'[0-9a-f]{64}', digest or '') is not None and sha(path.read_bytes()) == digest,
+            'OpenSSL manifest digest mismatch')
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            require(key not in obj, f'Duplicate manifest key: {key}')
+            obj[key] = value
+        return obj
+    data = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique)
+    require(set(data) == {'identity', 'files'} and data['identity'] == identity,
+            'Wrong OpenSSL source/build/host/run/controller identity')
+    files = data['files']
+    require(isinstance(files, dict) and set(OPENSSL_REQUIRED) <= files.keys(), 'Missing required OpenSSL files')
+    for name, expected in files.items():
+        require(openssl_path(name), f'Non-allowlisted OpenSSL path: {name}')
+        require(isinstance(expected, str) and re.fullmatch(r'[0-9a-f]{64}', expected) is not None,
+                'Invalid file digest')
+        regular_file(artifact / name, artifact)
+        require(sha((artifact / name).read_bytes()) == expected, f'OpenSSL hash mismatch: {name}')
+    actual = set()
+    for p in artifact.rglob('*'):
+        require(not p.is_symlink() and not getattr(p, 'is_junction', lambda: False)(), 'Artifact link forbidden')
+        if p.is_file():
+            actual.add(relative_key(p, artifact))
+        else:
+            require(p.is_dir() and relative_key(p, artifact) in ('include', 'include/openssl', 'lib'),
+                    'Unexpected artifact directory')
+    require(actual == set(files) | {'manifest.json'}, 'Unexpected/missing artifact contents')
+    if destination is not None:
+        # Install only verified, allowlisted headers/libs. Never a home/venv/checkout.
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            dest = destination / name
+            for part in [dest, *dest.parents]:
+                require(not part.is_symlink() and not getattr(part, 'is_junction', lambda: False)(),
+                        'Destination link forbidden')
+                if part == destination:
+                    break
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(artifact / name, dest)
+        installed = destination
+    if installed is not None:
+        require(openssl_files(installed) == files, 'Installed OpenSSL changed after artifact verification/build-deps cache restore')
+    return data
+
+
+def build_identity(root, subject):
+    require(re.fullmatch(r'[0-9a-f]{40}', subject or '') is not None, 'Full subject SHA required')
+    require(git(root, 'rev-parse', 'HEAD').decode().strip() == subject, 'Wrong subject HEAD')
+    git(root, 'diff', '--exit-code', 'HEAD', '--')
+    require(platform.system() == 'Windows' and os.name == 'nt' and platform.machine().lower() == 'arm64',
+            'Real Windows ARM64 required for OpenSSL artifact')
+    return {'subject': subject, 'build_hashes': {n: sha(git(root, 'show', subject + ':' + n)) for n in BUILD_INPUTS},
+            'os': 'Windows', 'arch': 'arm64', 'controller_sha256': sha(Path(__file__).read_bytes()),
+            'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT']}
+
+
 RESTAMP = (
     '        if ($script:MarkerReleaseWaited -and [System.IO.File]::Exists($ResultPath)) {\n'
     '            Write-Result ($finalCode -eq 0) $finalCode $finalMsg $manualAction\n'
@@ -153,7 +336,8 @@ def collect(root, env):
     require(len(nodes) == len(set(nodes)), 'Duplicate collected nodes')
     counts = {name: sum(n.startswith(name + '::') for n in nodes) for name in ALL_FILES}
     require(all(counts.values()) and sum(counts[n] for n in FILES) == 41
-            and counts[MARKER_LOCK] == 13 and counts[FIXTURE] == 5, f'Wrong collection: {counts}')
+            and counts[MARKER_LOCK] == 14 and counts[FIXTURE] == 5, f'Wrong collection: {counts}')
+    require(sorted(nodes) == sorted(EXPECTED_NODES), 'Original 59 plus portable fixture case identities changed')
     selector = subprocess.run([sys.executable, 'scripts/ci/list_os_marked_tests.py', 'windows'],
                               cwd=root, env=env, capture_output=True, text=True, timeout=60, check=True)
     require(set(FILES) <= set(selector.stdout.splitlines()), 'Windows selector omitted partition files')
@@ -215,10 +399,14 @@ def execute(command, root, folder, env, timeout=300):
     folder.mkdir(parents=True, exist_ok=True)
     start, clock = time.time(), time.monotonic()
     result = {'command': command, 'cwd': str(root), 'started_epoch': start,
-              'outer_budget_seconds': timeout, 'outer_timeout': False, 'cleanup': None}
+              'outer_budget_seconds': timeout, 'outer_timeout': False, 'cleanup': None,
+              'state': 'running'}
     with (folder / 'pytest.log').open('w', encoding='utf-8') as log:
         proc = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
         result['owned_pid'] = proc.pid
+        # Cancellation can kill this controller before wait() returns. Retain
+        # the exact owned invocation/start, without claiming it completed.
+        save(folder / 'process.json', result)
         try:
             result['returncode'] = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -229,6 +417,7 @@ def execute(command, root, folder, env, timeout=300):
             result['cleanup'] = {'returncode': kill.returncode, 'stdout': kill.stdout, 'stderr': kill.stderr}
             result['returncode'] = proc.wait(timeout=15)
     result['elapsed_seconds'] = time.monotonic() - clock
+    result['state'] = 'completed'
     save(folder / 'process.json', result)
     return result
 
@@ -293,13 +482,52 @@ def match_inventory(path, expected):
 
 def aggregate(results, nodes):
     actual = [n for r in results for n in r.get('nodes', [])]
+    underlying = [{'file': r.get('file'), 'error': r.get('error', 'No accepted outcome')}
+                  for r in results if not r.get('accepted')]
     require(len(actual) == len(set(actual)) and sorted(actual) == sorted(nodes),
-            'Missing/duplicate whole-file case inventory')
+            'Missing/duplicate whole-file case inventory; underlying file failures: '
+            + json.dumps(underlying, sort_keys=True))
     require(len(results) == len(ALL_FILES) and {r['file'] for r in results} == set(ALL_FILES),
             'Missing/duplicate whole-file executions')
     return {'collected': len(nodes), 'completed': len(actual), 'unique': len(set(actual)),
             'passed': sum(len(r['nodes']) for r in results if r['accepted']),
             'whole_files': len(results), 'retries': 0, 'skipped': 0}
+
+
+def aggregate_groups(records, identity):
+    expected_groups = {(a, g) for a in ('x64', 'arm64') for g in group_mapping(a)}
+    keys = [(r.get('architecture'), r.get('group')) for r in records]
+    errors = [{'arch': r.get('architecture'), 'group': r.get('group'),
+               'error': r.get('error'), 'files': [{'file': f.get('file'), 'error': f.get('error')}
+               for f in r.get('files', []) if not f.get('accepted')]}
+              for r in records if not r.get('accepted')]
+    context = '; underlying group/file failures: ' + json.dumps(errors, sort_keys=True)
+    require(len(keys) == len(set(keys)) and set(keys) == expected_groups,
+            'Missing/duplicate/unexpected architecture groups' + context)
+    totals = {}
+    for arch in ('x64', 'arm64'):
+        files = []
+        for r in records:
+            if r['architecture'] != arch:
+                continue
+            require(all(r.get(k) == v for k, v in identity.items()), 'Wrong subject/controller/run identity' + context)
+            require(r.get('accepted') is True and r.get('source_unchanged') is True,
+                    'Group failed or source changed' + context)
+            require(len(r.get('nodes', [])) == len(set(r.get('nodes', []))) and
+                    sorted(r.get('nodes', [])) == sorted(EXPECTED_NODES), 'Wrong exact global case identities')
+            wanted = group_mapping(arch)[r['group']]
+            actual = [f.get('file') for f in r.get('files', [])]
+            require(len(actual) == len(set(actual)) and set(actual) == set(wanted),
+                    'Missing/duplicate/wrong group whole files' + context)
+            require(all(f.get('accepted') is True for f in r['files']), 'Rejected whole-file outcome' + context)
+            if r['group'] == 'mutation':
+                require(r.get('mutation', {}).get('accepted') is True, 'Missing real mutation RED')
+            else:
+                require(r.get('mutation') is None, 'Unexpected duplicate mutation')
+            files.extend(r['files'])
+        totals[arch] = aggregate(files, EXPECTED_NODES)
+        require(totals[arch]['passed'] == 60, 'Not the complete 60-case acceptance inventory')
+    return totals
 
 
 def run_file(root, folder, name, nodes):
@@ -434,6 +662,38 @@ class ControllerUnitTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     aggregate(bad, expected)
 
+    def test_inventory_failure_retains_underlying_file_errors(self):
+        results = [{'file': f, 'nodes': [f + '::test_case'], 'accepted': True} for f in ALL_FILES]
+        expected = [r['nodes'][0] for r in results]
+        results[0].update(nodes=[], accepted=False, error='Whole-file wall exceeded unchanged 300s budget')
+        results[1].update(nodes=[], accepted=False, error='JUnit outcomes: 2 fixture import failures')
+        with self.assertRaises(RuntimeError) as raised:
+            aggregate(results, expected)
+        message = str(raised.exception)
+        self.assertIn('Missing/duplicate whole-file case inventory', message)
+        for result in results[:2]:
+            self.assertIn(result['file'], message)
+            self.assertIn(result['error'], message)
+
+    def test_process_record_survives_interrupted_controller(self):
+        # A real local child checks the durable record before it exits. This
+        # exercises telemetry only, not Windows acceptance or a fake host.
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            command = [sys.executable, '-c',
+                       'import json, pathlib, sys, time; '
+                       'p = pathlib.Path(sys.argv[1]); '
+                       'deadline = time.monotonic() + 2; '
+                       '\nwhile not p.exists() and time.monotonic() < deadline: time.sleep(.01)\n'
+                       'r = json.loads(p.read_text()); '
+                       'assert r["state"] == "running"; '
+                       'assert r["outer_budget_seconds"] == 300',
+                       str(folder / 'process.json')]
+            result = execute(command, folder, folder, dict(os.environ))
+            self.assertEqual(result['returncode'], 0)
+            self.assertEqual(result['state'], 'completed')
+            self.assertEqual(json.loads((folder / 'process.json').read_text()), result)
+
     def test_mutation_exact_and_guarded(self):
         context = b'Write-Result ($finalCode -eq 0)\nInvoke-MarkerRelease\n# finish time (unless something already consumed it).\n'
         for nl in (b'\n', b'\r\n'):
@@ -488,12 +748,174 @@ class ControllerUnitTests(unittest.TestCase):
                 classify(path, 1, node=TIMESTAMP)
 
 
+def load_json(path):
+    return json.loads(path.read_text(encoding='utf-8-sig'))
+
+
+def verify_process(folder, result, red=False):
+    process = load_json(folder / 'process.json')
+    require(all(result.get(k) == v for k, v in process.items()), 'Process/result record mismatch')
+    require(process.get('state') == 'completed' and process.get('outer_timeout') is False
+            and process.get('outer_budget_seconds') == 300 and process.get('cleanup') is None
+            and process.get('returncode') == int(red)
+            and 0 <= process.get('elapsed_seconds', 300) < 300, 'Rejected process outcome/deadline')
+    return process
+
+
+def resolve_mutation_log(directory, result):
+    from pathlib import PureWindowsPath
+    # Upload-artifact dereferences pytest's `...current` directory junction.
+    # The original native rglob sees one log; the downloaded artifact has two
+    # byte-identical paths. Anchor to the recorded canonical path, not a glob.
+    base = PureWindowsPath(result['command'][11])
+    recorded = PureWindowsPath(result['handoff_log'])
+    require(base.is_absolute() and recorded.is_absolute(), 'Absolute recorded Windows paths required')
+    relative = recorded.relative_to(base)
+    require(len(relative.parts) == 4 and relative.parts[1:] == ('home', 'logs', 'desktop-update-handoff.log')
+            and re.fullmatch(r'test_result_finished_at_[a-z_]+[0-9]+', relative.parts[0]) is not None,
+            'Wrong canonical mutation log path')
+    canonical = directory / 'tmp' / Path(*relative.parts)
+    regular_file(canonical, directory / 'tmp')
+    alias = directory / 'tmp' / Path(re.sub(r'[0-9]+$', 'current', relative.parts[0]), *relative.parts[1:])
+    logs = list((directory / 'tmp').rglob('desktop-update-handoff.log'))
+    require(canonical in logs and set(logs) <= {canonical, alias}, 'Unexpected mutation log paths')
+    for log in logs:
+        regular_file(log, directory / 'tmp')
+        require(sha(log.read_bytes()) == result.get('handoff_log_sha256'), 'Changed/foreign mutation log or alias')
+    return canonical
+
+
+def mutation_source_identity(root, subject):
+    # Native git archive applies the explicit text/eol export conversion too.
+    # Compare Windows CRLF script bytes, not the raw LF Git blob on Linux.
+    attrs = attributes(root)
+    original = projected(git(root, 'show', subject + ':' + POWERSHELL), attrs[POWERSHELL])
+    test = projected(git(root, 'show', subject + ':' + TIMESTAMP_FILE), attrs[TIMESTAMP_FILE])
+    return {'before_sha256': sha(original), 'after_sha256': sha(mutate(original)), 'test_sha256': sha(test)}
+
+
+def verify_group_artifact(folder, identity, root=None):
+    metadata, summary = [load_json(folder / n) for n in ('metadata.json', 'summary.json')]
+    for data in (metadata, summary):
+        require(all(data.get(k) == v for k, v in identity.items()), 'Wrong downloaded source/controller/run')
+    arch, group = metadata.get('architecture'), metadata.get('group')
+    require(arch in ('x64', 'arm64') and group in group_mapping(arch), 'Wrong downloaded architecture/group')
+    require(summary.get('architecture') == arch and summary.get('group') == group, 'Summary/metadata group mismatch')
+    require(metadata.get('host_os') == 'Windows' and
+            metadata.get('native_python_platform') == {'x64': 'win-amd64', 'arm64': 'win-arm64'}[arch]
+            and metadata.get('python', '').startswith('3.14.9 '), 'Not recorded native Windows Python 3.14.9')
+    require(metadata.get('workers') == 2 and metadata.get('retries') == 0
+            and metadata.get('effective_file_budget_seconds') == 300 and metadata.get('validation_only') is False,
+            'Wrong worker/retry/cap/execution policy')
+    require(metadata.get('collected') == 60 and metadata.get('unique') == 60 and
+            len(metadata.get('nodes', [])) == 60 and sorted(metadata['nodes']) == sorted(EXPECTED_NODES),
+            'Wrong exact collected case identities')
+    require({n: d.get('sha256') for n, d in metadata.get('hashes', {}).items()} == HASHES,
+            'Wrong scoped source manifest')
+    # Keep the original per-file error rather than masking it with an XML error.
+    require(summary.get('accepted') is True and summary.get('source_unchanged') is True,
+            'Rejected group: ' + json.dumps(summary, sort_keys=True))
+    results = summary.get('files', [])
+    wanted = group_mapping(arch)[group]
+    require(len(results) == len(wanted) and {r.get('file') for r in results} == set(wanted),
+            'Wrong group whole-file inventory')
+    for result in results:
+        name = result['file']
+        directory = folder / Path(name).stem
+        require(result == load_json(directory / 'result.json') and result.get('accepted') is True,
+                'Whole-file result mismatch/failure: ' + name)
+        process = verify_process(directory, result)
+        command = process.get('command', [])
+        require(len(command) == 17 and command[0].replace('\\', '/').endswith('/Git/bin/bash.exe')
+                and command[1:13] == ['scripts/run_tests.sh', '-j', '1', '--file-retries', '0',
+                                     '--file-timeout', '300', '--fail-on-skip', name, '--', '-vv', '--tb=long']
+                and command[13] == '--basetemp' and command[15] == '--junitxml',
+                'Noncanonical/split/deselected/retried whole-file command')
+        nodes = [n for n in EXPECTED_NODES if n.startswith(name + '::')]
+        require(result.get('cache_entry_absent') == name and result.get('effective_file_timeout_seconds') == 300,
+                'Timeout scaling/cache guard missing')
+        require(result.get('junit') == classify(directory / 'junit.xml', process['returncode'], len(nodes)),
+                'Recorded/rechecked JUnit outcomes differ')
+        require(sorted(result.get('nodes', [])) == sorted(match_inventory(directory / 'junit.xml', nodes)),
+                'Wrong file identities')
+    red = summary.get('mutation')
+    if group == 'mutation':
+        require(root is not None, 'Exact source needed to verify mutation')
+        directory = folder / 'mutation' / 'timestamp-red'
+        require(red == load_json(directory / 'result.json') and red.get('accepted') is True
+                and red.get('node') == TIMESTAMP and red.get('expected_mutation_red') is True, 'Wrong mutation result')
+        process = verify_process(directory, red, red=True)
+        command = process['command']
+        require(len(command) == 14 and command[1:11] == ['-m', 'pytest', TIMESTAMP, '-x', '-vv', '--tb=long',
+                '--durations=0', '-o', 'faulthandler_timeout=60', '--basetemp'] and command[12] == '--junitxml',
+                'Wrong mutation command')
+        require(red['junit'] == classify(directory / 'junit.xml', 1, node=TIMESTAMP, red=True), 'Wrong mutation JUnit')
+        record = load_json(folder / 'mutation' / 'mutation.json')
+        expected_source = mutation_source_identity(root, identity['subject'])
+        require(record.get('subject') == identity['subject'] and record.get('changed_paths') == [POWERSHELL]
+                and all(record.get(k) == v for k, v in expected_source.items()),
+                'Wrong/nonreal mutation source identity')
+        log = resolve_mutation_log(directory, red)
+        text = log.read_text(encoding='utf-8-sig')
+        require('keeping the update marker' in text and 'removed update marker (owned)' in text,
+                'Wrong real R6 mutation evidence')
+        _, cases = junit(directory / 'junit.xml')
+        failure = cases[0].find('failure')
+        require(failure is not None, 'Mutation failure element missing')
+        if failure is None:
+            raise RuntimeError('Mutation failure element missing')
+        evidence = timestamp_mismatch(failure.text or '')
+        published = load_json(log.parent.parent / '.hermes-update-result.json')
+        require(evidence == red.get('timestamp_evidence') and published.get('ok') is True
+                and published.get('finished_at') == evidence['finished_at'], 'Wrong actual stale result')
+    else:
+        require(red is None, 'Unexpected mutation outside dedicated group')
+    return {**summary, 'nodes': metadata['nodes']}
+
+
+def aggregate_artifacts(root, artifacts, subject, output):
+    identity = {'subject': subject, 'controller_sha256': sha(Path(__file__).read_bytes()),
+                'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT']}
+    result = {**identity, 'accepted': False, 'errors': []}
+    records = []
+    try:
+        source_guard(root, subject)
+        expected = {f'windows-acceptance-{a}-{g}-{subject}-{identity["run_id"]}-{identity["run_attempt"]}'
+                    for a in ('x64', 'arm64') for g in group_mapping(a)}
+        actual = {p.name for p in artifacts.iterdir()}
+        if actual != expected:
+            result['errors'].append({'missing_artifacts': sorted(expected - actual),
+                                     'extra_artifacts': sorted(actual - expected)})
+        for name in sorted(expected & actual):
+            try:
+                records.append(verify_group_artifact(artifacts / name, identity, root))
+            except Exception as exc:
+                result['errors'].append({'artifact': name, 'error': repr(exc)})
+        require(not result['errors'], 'Rejected group evidence; see per-group errors')
+        result['totals'] = aggregate_groups(records, identity)
+        needs = json.loads(os.environ['ACCEPTANCE_NEEDS_JSON'])
+        require(set(needs) == {'prepare-arm-openssl', 'whole-file-acceptance'} and
+                all(v.get('result') == 'success' for v in needs.values()), 'Preparation or matrix job did not succeed')
+        result['accepted'] = True
+    except Exception as exc:
+        result['error'] = repr(exc)
+    output.mkdir(parents=True, exist_ok=False)
+    save(output / 'aggregate.json', result)
+    print(json.dumps(result, indent=2))
+    return int(not result['accepted'])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--subject')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--arch', choices=('x64', 'arm64'))
+    parser.add_argument('--group')
+    parser.add_argument('--openssl', choices=('export', 'install', 'verify'))
+    parser.add_argument('--artifact', type=Path)
+    parser.add_argument('--manifest-sha')
+    parser.add_argument('--aggregate-dir', type=Path)
     parser.add_argument('--list', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
@@ -501,6 +923,21 @@ def main():
         return int(not unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ControllerUnitTests)).wasSuccessful())
     if args.repo is None or not args.subject or args.output is None:
         parser.error('--repo --subject --output required')
+    if args.openssl:
+        identity = build_identity(args.repo.resolve(), args.subject)
+        installed = Path('C:/vcpkg/installed/arm64-windows-static-md')
+        require(args.artifact is not None, '--artifact required')
+        if args.openssl == 'export':
+            digest = export_openssl(installed, args.artifact, identity)
+            with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+                stream.write('manifest_sha256=' + digest + '\n')
+        else:
+            verify_openssl(args.artifact, identity, args.manifest_sha,
+                           destination=installed if args.openssl == 'install' else None,
+                           installed=installed if args.openssl == 'verify' else None)
+        return 0
+    if args.aggregate_dir is not None:
+        return aggregate_artifacts(args.repo.resolve(), args.aggregate_dir, args.subject, args.output)
     require(sys.version_info[:3] == (3, 14, 9), 'Exact Python 3.14.9 required')
     if not args.list:
         require(platform.system() == 'Windows' and os.name == 'nt', 'Native Windows required; no spoofing')
@@ -509,12 +946,15 @@ def main():
         require(__import__('struct').calcsize('P') == 8, '64-bit Python required')
         require(__import__('sysconfig').get_platform() == {'x64': 'win-amd64', 'arm64': 'win-arm64'}[args.arch or ''],
                 'Python must be native to the matrix architecture, not emulated')
+    require(args.arch in ('x64', 'arm64') and args.group in group_mapping(args.arch), 'Explicit bounded group required')
     root, output = args.repo.resolve(), args.output.resolve()
     require(not output.is_relative_to(root), 'Evidence must be outside source checkout')
     output.mkdir(parents=True, exist_ok=False)
     attrs, hashes = source_guard(root, args.subject)
     nodes = collect(root, sandbox(output / 'collection-sandbox', root))
     metadata = {'subject': args.subject, 'hashes': hashes, 'nodes': nodes, 'collected': len(nodes),
+                'group': args.group, 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                'host_os': platform.system(), 'native_python_platform': __import__('sysconfig').get_platform(),
                 'unique': len(set(nodes)), 'workers': 2, 'retries': 0, 'effective_file_budget_seconds': 300, 'architecture': args.arch,
                 'python': sys.version, 'executable': sys.executable, 'platform': platform.platform(),
                 'controller_sha256': sha(Path(__file__).read_bytes()), 'validation_only': args.list,
@@ -523,7 +963,8 @@ def main():
     if args.list:
         print(json.dumps(metadata, indent=2))
         return 0
-    summary = {'subject': args.subject, 'accepted': False}
+    summary = {k: metadata[k] for k in ('subject', 'architecture', 'group', 'controller_sha256', 'run_id', 'run_attempt')}
+    summary.update(accepted=False, files=[], mutation=None)
     try:
         cache = root / 'test_durations.json'
         require(not cache.exists(), 'Inherited duration cache is forbidden; use a fresh checkout')
@@ -531,13 +972,19 @@ def main():
             expected = [n for n in nodes if n.startswith(name + '::')]
             return run_file(root, output / Path(name).stem, name, expected)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(whole_file, ALL_FILES))
+            results = list(pool.map(whole_file, group_mapping(args.arch)[args.group]))
         summary['files'] = results
-        # Always attempt the real challenge after the independent whole-file runs.
-        summary['mutation'] = mutation(root, output, args.subject, attrs)
-        summary['totals'] = aggregate(results, nodes)
+        # Dedicated sequential group: no concurrent mutation/shared cache risk.
+        if args.group == 'mutation':
+            summary['mutation'] = mutation(root, output, args.subject, attrs)
+        expected = [n for n in nodes if n.split('::')[0] in group_mapping(args.arch)[args.group]]
+        actual = [n for r in results for n in r.get('nodes', [])]
+        require(len(actual) == len(set(actual)) and sorted(actual) == sorted(expected),
+                'Group case inventory mismatch; underlying file failures: ' + json.dumps(results))
+        summary['group_totals'] = {'completed': len(actual), 'whole_files': len(results), 'retries': 0, 'skipped': 0}
         require(all(r['accepted'] for r in results), 'Not every canonical whole-file run passed')
-        require(summary['mutation']['accepted'], 'Mutation did not produce exact timestamp RED')
+        if args.group == 'mutation':
+            require(summary['mutation']['accepted'], 'Mutation did not produce exact timestamp RED')
         summary['accepted'] = True
     except Exception as exc:
         summary['error'] = repr(exc)
