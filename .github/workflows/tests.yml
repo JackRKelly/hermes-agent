@@ -42,13 +42,18 @@ jobs:
     # 3x the price because files contend for the shared machine. Separate machines
     # scale linearly. run_tests_parallel.py partitions from the checkout alone, so
     # both slices agree on the split without a planning job.
-    name: Run tests (${{ matrix.slice }}/2)
+    name: Run tests (${{ matrix.slice }}/${{ strategy.job-total }})
     runs-on: ${{ vars.HERMES_CI_LINUX_RUNNER || 'blacksmith-32vcpu-ubuntu-2404' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      # A smaller fork runner may need more queued slices later; never grow
+      # the ordinary Python lane beyond its existing two concurrent VMs.
+      max-parallel: 2
       matrix:
-        slice: [1, 2]
+        # Empty/unset keeps the upstream split. Extra fork slices queue behind
+        # the same two VMs; the test step rejects holes/duplicates/non-integers.
+        slice: ${{ fromJSON(vars.HERMES_CI_LINUX_TEST_SLICES || '[1,2]') }}
     steps:
       - name: Checkout code
         uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
@@ -110,10 +115,27 @@ jobs:
         # No --files: the runner discovers the suite itself. The discovered
         # set is identical to the list the removed matrix job used to pass in.
         run: |
+          "$HERMES_PYTHON" - <<'PY'
+          import json, os
+          slices = json.loads(os.environ['HERMES_TEST_SLICE_MATRIX'])
+          if (not isinstance(slices, list) or not 2 <= len(slices) <= 256
+                  or any(type(index) is not int for index in slices)
+                  or slices != list(range(1, len(slices) + 1))):
+              raise SystemExit('test slices must be contiguous integers [1,2,...,N], 2 <= N <= 256')
+          index, total = map(int, os.environ['HERMES_TEST_SLICE'].split('/'))
+          if total != len(slices) or index not in slices:
+              raise SystemExit('test slice does not match the actual matrix total')
+          workers = os.environ['HERMES_TEST_WORKERS']
+          if not workers.isdecimal() or int(workers) < 1:
+              raise SystemExit('test workers must be a positive integer')
+          PY
           scripts/run_tests.sh
         env:
-          HERMES_TEST_SLICE: ${{ matrix.slice }}/2
-          HERMES_TEST_WORKERS: 32
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/${{ strategy.job-total }}
+          HERMES_TEST_SLICE_MATRIX: ${{ vars.HERMES_CI_LINUX_TEST_SLICES || '[1,2]' }}
+          # Keep the upstream 32-core default. Forks using smaller runners can
+          # bound per-file process trees without relaxing test/job deadlines.
+          HERMES_TEST_WORKERS: ${{ vars.HERMES_CI_LINUX_TEST_WORKERS || '32' }}
           HERMES_TEST_FILE_TIMEOUT: 600
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""

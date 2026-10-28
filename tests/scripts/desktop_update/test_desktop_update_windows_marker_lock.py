@@ -5,16 +5,20 @@ delegate before it runs a single instruction.
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import os
 import subprocess
 import sys
 import time
+import uuid
+
+import psutil
 
 import pytest
 
 from tests.installation_launcher_fixture import publish_fixture_launcher
 from tests.scripts.desktop_update.windows_handoff_support import (
     MARKER,
-    POWERSHELL,
     HOLD_CLI,
     _creation_time,
     _ProcessWatch,
@@ -97,17 +101,209 @@ def test_a7_concurrent_claimants_over_a_dead_marker_yield_one_owner(tmp_path: Pa
 
 # -- the update child is the delegate before it runs anything ------------------
 
-FIND_UPDATE_CHILD = r"""
-param([int]$Parent, [int]$Seconds)
-$deadline = (Get-Date).AddSeconds($Seconds)
-while ((Get-Date) -lt $deadline) {
-    $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" |
-        Where-Object { $_.CommandLine -match '--yes' } | Select-Object -First 1
-    if ($row) { [Console]::Out.Write($row.ProcessId); exit 0 }
-    Start-Sleep -Milliseconds 100
-}
-exit 1
-"""
+def test_child_observer_uses_live_identity_not_initialized_command_line() -> None:
+    """A newborn/suspended process need not expose any update argv to an observer."""
+    parent = psutil.Process()
+    executable = parent.exe()
+    before = {(p.pid, p.create_time()) for p in parent.children()}
+    child = subprocess.Popen([executable, '-c', 'import time; time.sleep(60)'])
+    try:
+        found = _wait_for_update_child(parent.pid, before, executable, timeout=5)
+        assert found == (child.pid, psutil.Process(child.pid).create_time())
+        assert '--yes' not in psutil.Process(child.pid).cmdline()
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.platforms('windows')
+def test_child_observer_identifies_real_suspended_child(tmp_path: Path) -> None:
+    ran = tmp_path / 'resumed'
+    before = {(p.pid, p.create_time()) for p in psutil.Process().children()}
+    child = subprocess.Popen([
+        sys.executable, '-c', 'import pathlib, sys; pathlib.Path(sys.argv[1]).touch()', str(ran),
+    ], creationflags=0x00000004)   # CREATE_SUSPENDED, as used by StartAssigned
+    try:
+        assert _wait_for_update_child(os.getpid(), before, sys.executable, timeout=5) == (
+            child.pid, psutil.Process(child.pid).create_time(),
+        )
+        assert not ran.exists(), 'observer required the suspended child to execute'
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+    assert not ran.exists()
+
+
+@pytest.mark.parametrize('exclude', ['existing-identity', 'wrong-image'])
+def test_child_observer_rejects_non_update_process(exclude: str) -> None:
+    image = psutil.Process().exe()
+    child = subprocess.Popen([image, '-c', 'import time; time.sleep(60)'])
+    try:
+        identity = (child.pid, psutil.Process(child.pid).create_time())
+        before = {identity} if exclude == 'existing-identity' else set()
+        executable = image if before else image + '.not-the-interpreter'
+        with pytest.raises(AssertionError, match='no new update child'):
+            _wait_for_update_child(os.getpid(), before, executable, timeout=0)
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_child_observer_rejects_descendants(tmp_path: Path) -> None:
+    ready = tmp_path / 'grandchild-ready'
+    worker = subprocess.Popen([
+        psutil.Process().exe(), '-c',
+        'import pathlib, subprocess, sys; '
+        'p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]); '
+        'target = pathlib.Path(sys.argv[1]); staged = target.with_suffix(".tmp"); '
+        'staged.write_text(str(p.pid)); staged.replace(target); '
+        'sys.stdin.read(); p.kill(); p.wait()', str(ready),
+    ], stdin=subprocess.PIPE)
+    descendant = None
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            assert time.monotonic() < deadline and worker.poll() is None
+            time.sleep(0.02)
+        descendant = psutil.Process(int(ready.read_text()))
+        assert descendant.ppid() == worker.pid
+        before = {(worker.pid, psutil.Process(worker.pid).create_time())}
+        with pytest.raises(AssertionError, match='no new update child'):
+            _wait_for_update_child(os.getpid(), before, psutil.Process().exe(), timeout=0)
+    finally:
+        worker.communicate(timeout=5)
+        assert descendant is None or not descendant.is_running()
+
+
+@pytest.mark.parametrize('relay', [False, True])
+def test_help_probe_handshake_gates_real_launcher(tmp_path: Path, relay: bool) -> None:
+    install = tmp_path / 'checkout'
+    launcher = publish_fixture_launcher(install, _GATED_HOLD_CLI)
+    hold = tmp_path / 'release-update'
+    nonce = uuid.uuid4().hex
+    runtime = json.loads(subprocess.check_output(
+        [str(launcher), '--print-runtime-command', '--module', 'hermes_cli.main'],
+        cwd=install, text=True,
+    ))
+    command = [*runtime, '--help']
+    if relay:
+        command = [sys.executable, '-c',
+                   'import subprocess, sys; sys.exit(subprocess.call(sys.argv[1:]))', *command]
+    child = subprocess.Popen(
+        command, cwd=install,
+        env={**os.environ, 'HANDOFF_HOLD': str(hold), 'HANDOFF_NONCE': nonce},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready = _wait_for_help_probe(hold, nonce, child, os.getpid(), timeout=5)
+        assert ready['root_pid'] == child.pid
+        assert ready['created'] == psutil.Process(ready['pid']).create_time()
+        assert ready['root_created'] == psutil.Process(child.pid).create_time()
+        assert child.poll() is None
+        assert not Path(str(hold) + '.pid').exists()
+        Path(str(hold) + '.help-release').touch()
+        out, err = child.communicate(timeout=5)
+        assert child.returncode == 0, err
+        assert out.strip() == '--keep-stash'
+    finally:
+        Path(str(hold) + '.help-release').touch()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            for descendant in psutil.Process(child.pid).children(recursive=True):
+                descendant.kill()
+            child.kill()
+            child.wait()
+
+
+@pytest.mark.parametrize('field,value,message', [
+    ('nonce', 'another-run', 'foreign help readiness'),
+    ('parent', -1, 'help has wrong parent'),
+    ('created', 0.0, 'help has wrong creation identity'),
+])
+def test_help_probe_rejects_foreign_identity(tmp_path: Path, field, value, message) -> None:
+    hold = tmp_path / 'release-update'
+    proc = psutil.Process()
+    data = {'nonce': 'this-run', 'pid': proc.pid, 'parent': proc.ppid(),
+            'executable': proc.exe(), 'created': proc.create_time()}
+    data[field] = value
+    Path(str(hold) + '.help-ready').write_text(json.dumps(data), encoding='utf-8')
+    # The ready file already exists, so no Popen is needed for this identity check.
+    with pytest.raises(AssertionError, match=message):
+        _wait_for_help_probe(hold, 'this-run', None, proc.ppid(), timeout=0)
+
+
+_GATED_HOLD_CLI = HOLD_CLI.replace(
+    "        print('--keep-stash'); return 0",
+    """        import json, psutil
+        hold = Path(os.environ['HANDOFF_HOLD'])
+        ready = Path(str(hold) + '.help-ready')
+        staged = Path(str(ready) + '.tmp')
+        staged.write_text(json.dumps({
+            'nonce': os.environ['HANDOFF_NONCE'], 'pid': os.getpid(),
+            'parent': os.getppid(), 'executable': psutil.Process().exe(),
+            'created': psutil.Process().create_time(),
+        }), encoding='utf-8')
+        os.replace(staged, ready)
+        while not Path(str(hold) + '.help-release').exists():
+            time.sleep(0.02)
+        print('--keep-stash'); return 0""",
+)
+
+
+def _wait_for_help_probe(
+    hold: Path, nonce: str, script: subprocess.Popen | None, parent_pid: int, *, timeout: float = 60,
+) -> dict:
+    ready = Path(str(hold) + '.help-ready')
+    deadline = time.monotonic() + timeout
+    while not ready.exists():
+        assert script is not None, 'no process supplied while awaiting help readiness'
+        assert script.poll() is None, f'hand-off exited before help readiness: {script.communicate()}'
+        assert time.monotonic() < deadline, 'final help probe never became ready'
+        time.sleep(0.02)
+    data = json.loads(ready.read_text(encoding='utf-8'))
+    assert data['nonce'] == nonce, f'foreign help readiness: {data}'
+    probe = psutil.Process(data['pid'])
+    assert data['parent'] == probe.ppid(), f'help has wrong parent: {data}'
+    assert os.path.samefile(data['executable'], probe.exe()), f'help has wrong interpreter: {data}'
+    assert data['created'] == probe.create_time(), f'help has wrong creation identity: {data}'
+    # A Windows venv redirector may be the direct child and execute Python in
+    # its own child. Validate that real ancestry for readiness only; the update
+    # observer still accepts *only* a new direct child of the hand-off.
+    root = probe
+    while root.ppid() != parent_pid:
+        ancestor = root.parent()
+        assert ancestor is not None, f'help is not descended from {parent_pid}: {data}'
+        root = ancestor
+    data.update(root_pid=root.pid, root_created=root.create_time(), root_executable=root.exe())
+    return data
+
+
+def _wait_for_update_child(
+    parent_pid: int, before: set[tuple[int, float]], executable: str, *, timeout: float = 60,
+) -> tuple[int, float]:
+    """Use native process metadata, not CIM's possibly uninitialized CommandLine.
+
+    The gated final help probe is in ``before``. Once released, the next *new*
+    direct child with that interpreter is the suspended update. The custodian,
+    probe, unrelated processes and descendants cannot satisfy this boundary.
+    """
+    parent = psutil.Process(parent_pid)
+    deadline = time.monotonic() + timeout
+    expected = os.path.normcase(os.path.realpath(executable))
+    while True:
+        seen = []
+        for child in parent.children(recursive=False):
+            try:
+                identity = (child.pid, child.create_time())
+                image = os.path.normcase(os.path.realpath(child.exe()))
+                seen.append((identity, image))
+                if identity not in before and image == expected:
+                    return identity
+            except psutil.NoSuchProcess:
+                continue   # a probe exiting while the snapshot is inspected
+        assert time.monotonic() < deadline, f'no new update child of {parent_pid}: {seen=}, {before=}'
+        time.sleep(0.02)
 
 
 @pytest.mark.platforms('windows')
@@ -117,28 +313,34 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
     Killed there, no update instruction may have run, and the custodian line 1 names releases
     the marker (nothing holds the checkout)."""
     install = tmp_path / 'checkout'
-    publish_fixture_launcher(install, HOLD_CLI)
+    publish_fixture_launcher(install, _GATED_HOLD_CLI)
     home = tmp_path / 'home'; home.mkdir()
     hold = tmp_path / 'release-update'
     ran = Path(str(hold) + '.pid')
     marker = home / MARKER
-    finder = tmp_path / 'find_child.ps1'
-    finder.write_text(FIND_UPDATE_CHILD, encoding='utf-8')
-    script = _script(home, install=install, HANDOFF_HOLD=str(hold))
+    nonce = uuid.uuid4().hex
+    script = _script(home, install=install, HANDOFF_HOLD=str(hold), HANDOFF_NONCE=nonce)
     lock = None
     try:
-        deadline = time.monotonic() + 60
-        while not (marker.exists() and _custodian(home, script.pid)
-                   and marker.read_bytes().split(b'\n')[0] == _custodian(home, script.pid).encode()):
-            assert time.monotonic() < deadline and script.poll() is None, 'script never claimed'
-            time.sleep(0.02)
-        lock = _HeldLock(home)   # after the claim, before the delegate publication
-        child = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(finder),
-                                '-Parent', str(script.pid), '-Seconds', '60'],
-                               capture_output=True, text=True, timeout=90, check=False)
-        assert child.returncode == 0, 'the update child never appeared'
-        watch = _ProcessWatch(int(child.stdout))
+        # The last launcher probe holds the hand-off *after* expensive startup
+        # but *before* StartAssigned. Acquire the marker lock at that exact
+        # boundary instead of racing startup from the first custodian log line.
+        ready = _wait_for_help_probe(hold, nonce, script, script.pid)
+        assert marker.read_bytes().split(b'\n')[0] == _custodian(home, script.pid).encode()
+        before = {(p.pid, p.create_time()) for p in psutil.Process(script.pid).children()}
+        assert (ready['root_pid'], ready['root_created']) in before
+        lock = _HeldLock(home)
+        Path(str(hold) + '.help-release').touch()
+        child_pid, child_created = _wait_for_update_child(script.pid, before, ready['root_executable'])
+        watch = _ProcessWatch(child_pid)
         try:
+            # Open the kernel watch before trusting the observed identity. Its
+            # handle pins this PID until close, preventing a reuse during kill.
+            child = psutil.Process(child_pid)
+            assert child.create_time() == child_created
+            assert child.ppid() == script.pid
+            assert not ran.exists(), 'the update child ran before delegate publication'
+            assert not any(line.startswith('delegate:') for line in marker.read_text().splitlines())
             subprocess.run(['taskkill', '/F', '/PID', str(script.pid)], capture_output=True, check=True)
             script.wait(timeout=30)
             # The script's death closes the child's job; kill-on-close then terminates the child

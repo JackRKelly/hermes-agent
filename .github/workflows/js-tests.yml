@@ -11,7 +11,7 @@ on:
 
 jobs:
   check:
-    name: JS & TS checks
+    name: ${{ matrix.partition == 'all' && 'JS & TS checks' || format('JS & TS checks ({0})', matrix.partition) }}
     # One 32-core job replaces a 14-leg matrix. The matrix spread about 612s
     # of check payload over 4-core runners. It paid about 371s of repeated
     # setup to do it: 14 checkouts, 14 node installs, 14 node_modules
@@ -21,6 +21,14 @@ jobs:
     # their own worker pool from the core count.
     runs-on: ${{ vars.HERMES_CI_LINUX_RUNNER || 'blacksmith-32vcpu-ubuntu-2404' }}
     timeout-minutes: 30
+    # Opt-in for ordinary shared 4-core runners. The upstream 32-core lane
+    # remains one job with its original command and worker defaults.
+    strategy:
+      fail-fast: false
+      # Partition job deadlines, not peak runner capacity.
+      max-parallel: 1
+      matrix:
+        partition: ${{ fromJSON(vars.HERMES_CI_JS_RESOURCE_PROFILE == 'shared' && '["desktop-ui-1/2","desktop-ui-2/2","other"]' || '["all"]') }}
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
         with:
@@ -78,7 +86,7 @@ jobs:
       - name: Prepare locked Electron runtime before parallel checks
         run: node scripts/build/electron-runtime.mjs --source .
 
-      # Every check runs at the same time. The step fails only after all of
+      # By default every check runs at the same time. The step fails only after all of
       # them finish. There are two reasons this is not ``npm run --ws check``.
       #
       #   * ``--ws`` is serial and stops at the first workspace that fails. A
@@ -96,7 +104,25 @@ jobs:
       # not an empty run, because an empty run reports green after it checks
       # nothing.
       - name: Run all workspace checks
-        run: node .github/scripts/run-workspace-checks.mjs
+        env:
+          CHECK_PARTITION: ${{ matrix.partition }}
+        run: |
+          case "$CHECK_PARTITION" in
+            all)
+              node .github/scripts/run-workspace-checks.mjs
+              ;;
+            other)
+              # One workspace and one nested Vitest worker: the metadata
+              # contracts start real Python validators and retain a 15s bound.
+              node .github/scripts/run-workspace-checks.mjs --partition other --concurrency 1 --vitest-workers 1
+              ;;
+            desktop-ui-1/2|desktop-ui-2/2)
+              # Each disjoint half gets its own 4-core runner. Keep three
+              # workers, leaving one core for Vite and the coordinator.
+              node .github/scripts/run-workspace-checks.mjs --partition "$CHECK_PARTITION" --concurrency 1 --vitest-workers 3
+              ;;
+            *) echo "Invalid check partition: $CHECK_PARTITION" >&2; exit 1 ;;
+          esac
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
         # leaves an untracked or modified file in the checkout is reported here. Runs only when
