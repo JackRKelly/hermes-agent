@@ -1,4 +1,4 @@
-name: Windows contract diagnostic
+name: Windows whole-file acceptance
 
 on:
   push:
@@ -8,14 +8,23 @@ permissions:
   contents: read
 
 env:
-  SUBJECT_SHA: 9137390617a558f548255b26c9faf588e77aad3f
+  SUBJECT_SHA: 2b682fffaa6c06fb700df0d32e21c0b4ac7370e6
   OPENROUTER_API_KEY: ''
   OPENAI_API_KEY: ''
   NOUS_API_KEY: ''
 
 jobs:
-  isolated-case-control:
-    runs-on: windows-2025
+  whole-file-acceptance:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - runner: windows-2025
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
       - name: Check out the exact controller first
@@ -46,6 +55,10 @@ jobs:
           git diff --exit-code HEAD --
           python -c "import os,platform; assert platform.system() == 'Windows' and os.name == 'nt'; print({'os':platform.system(),'arch':platform.machine(),'cpu_count':os.cpu_count()})"
 
+      - name: Prepare native Windows ARM64 build dependencies
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        uses: ./.github/actions/setup-windows-build-deps
+
       - name: Set up the same locked test environment
         id: pm
         uses: ./.github/actions/setup-pm
@@ -58,14 +71,14 @@ jobs:
           save-python-cache: 'false'
           save-node-cache: 'false'
 
-      - name: Five native fixture tests, 31 isolated cases, real restamp mutation RED
+      - name: Native whole files (41 partition + 13 marker-lock + 5 protocol), real mutation RED
         shell: bash
         env:
           HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
         run: |
           "$HERMES_PYTHON" "$RUNNER_TEMP/windows_acceptance_controller.py" \
-            --repo "$GITHUB_WORKSPACE" --subject "$SUBJECT_SHA" \
-            --output "$RUNNER_TEMP/windows-acceptance-evidence"
+            --repo "$GITHUB_WORKSPACE" --subject "$SUBJECT_SHA" --arch "${{ matrix.arch }}" \
+            --output "$RUNNER_TEMP/windows-acceptance-evidence-${{ matrix.arch }}"
 
       - name: Verify original subject is still unchanged
         if: always() && steps.source_check.outcome == 'success'
@@ -76,23 +89,23 @@ jobs:
 
       # Existing repository pin, official action only. No source archive, private
       # profile, credentials, provider state or unrelated runner home is uploaded.
-      - name: Retain diagnostic logs, exact outcomes and mutation evidence
+      - name: Retain selected logs, exact outcomes and mutation evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-acceptance-${{ env.SUBJECT_SHA }}-${{ github.run_id }}
+          name: windows-acceptance-${{ matrix.arch }}-${{ env.SUBJECT_SHA }}-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           include-hidden-files: true
           path: |
-            ${{ runner.temp }}/windows-acceptance-evidence/metadata.json
-            ${{ runner.temp }}/windows-acceptance-evidence/summary.json
-            ${{ runner.temp }}/windows-acceptance-evidence/**/process.json
-            ${{ runner.temp }}/windows-acceptance-evidence/**/result.json
-            ${{ runner.temp }}/windows-acceptance-evidence/**/pytest.log
-            ${{ runner.temp }}/windows-acceptance-evidence/**/junit.xml
-            ${{ runner.temp }}/windows-acceptance-evidence/**/mutation.json
-            ${{ runner.temp }}/windows-acceptance-evidence/**/desktop-update-handoff.log
-            ${{ runner.temp }}/windows-acceptance-evidence/**/.hermes-update-result.json
-            ${{ runner.temp }}/windows-acceptance-evidence/**/.hermes-update-in-progress
-            ${{ runner.temp }}/windows-acceptance-evidence/**/calls.jsonl
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/metadata.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/summary.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/process.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/result.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/pytest.log
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/junit.xml
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/mutation.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/desktop-update-handoff.log
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/.hermes-update-result.json
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/.hermes-update-in-progress
+            ${{ runner.temp }}/windows-acceptance-evidence-${{ matrix.arch }}/**/calls.jsonl

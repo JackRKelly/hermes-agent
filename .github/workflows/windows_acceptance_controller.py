@@ -1,4 +1,4 @@
-"""Native Windows diagnostic acceptance; never a replacement for full-file CI.
+"""Native Windows x64/ARM64 canonical whole-file acceptance and mutation challenge.
 
 --list and --self-test do not execute Windows cases and allow real macOS Python.
 All execution requires native Windows, exact subject SHA and Python 3.14.9.
@@ -24,19 +24,38 @@ import xml.etree.ElementTree as ET
 FILES = [
     'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py',
     'tests/scripts/desktop_update/test_desktop_update_windows_marker.py',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_release.py',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_supervision.py',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_custodian.py',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py',
 ]
 FIXTURE = 'tests/scripts/desktop_update/test_r6_checkout_fixture.py'
+MARKER_LOCK = 'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py'
+ALL_FILES = [*FILES, MARKER_LOCK, FIXTURE]
 POWERSHELL = 'scripts/desktop-update/windows.ps1'
+TIMESTAMP_FILE = 'tests/scripts/desktop_update/test_desktop_update_windows_commit_release.py'
 TIMESTAMP_NAME = 'test_result_finished_at_is_stamped_after_the_r6_release_wait'
-TIMESTAMP = FILES[0] + '::' + TIMESTAMP_NAME
+TIMESTAMP = TIMESTAMP_FILE + '::' + TIMESTAMP_NAME
 HASHES = {
-    POWERSHELL: 'b9e83ea4819a1a4bcedd023f2b3caf145f303c209bbb88404834c8f16e1fb760',
+    'tests/scripts/desktop_update/conftest.py': 'd3f427f92034b64755a846c185d31ac8e55231dc5664cc26e098f5fe1bffb82b',
+    'scripts/desktop-update/windows.ps1': 'b9e83ea4819a1a4bcedd023f2b3caf145f303c209bbb88404834c8f16e1fb760',
     'scripts/desktop-update/marker.ps1': 'fd9bb4a536f0dbf37c54d1e902eef0635e2c04913dd631e91b468696ce526299',
     'scripts/desktop-update/marker-claim.ps1': '43fabb7a293eba12e8044d26447952891f9a481b61e76205326de9e0b1df11cf',
     'scripts/desktop-update/update-job.ps1': 'a2f599925aca103b5204e6c9de44a94efa9dd0dcba0cf10af8e381e52643eda6',
-    FILES[0]: '52c686fe89af3ca7447ecf621689845a301f69b8bde9812da0f64529bfc58883',
-    FILES[1]: '5604da95a472a8ec2b93a4abe1a41553e2247f57eb1c3c0e063fb992018b002b',
-    FIXTURE: '378e9d0691ec996c9e52e8615af98d165bdf321ac7f0b4dc1c079bdb1c0276d1',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py': '225de09a1420cf406964a6e313d3a9e235c3149ac2fd7c42a9cc5f6bbafc67aa',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker.py': '2cb44bc565731abd75eea33376eb250065ce97471aee7b5acf83274145e6c36f',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_lineage.py': 'd9199d78cee359d015ebb571cdefa94212217264c772e270e4105ba983651a76',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_release.py': '5d7ddb97bd93d21487e6ff18fe7ee83edf149bbdb79c4e5f19c7ef59aaf72493',
+    'tests/scripts/desktop_update/test_desktop_update_windows_commit_supervision.py': 'f1587fb0129b92623c72c7ad097bf918e710164302daf41bffea3cce1a101d57',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_bodies.py': '58c35527edc253fb8daa4c8ba5a248582c08ef72d537811792b79d2657cace89',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lifecycle.py': 'f6f8ca08272e68db0a396344f39be82878132bb3caac9837f7d2b7defd9f1b1c',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_custodian.py': '443d2ad33d33052e0f1ad15e2e856fb36b8ab863a128da15fbaa265e23d39964',
+    'tests/scripts/desktop_update/test_desktop_update_windows_handoff_protocol.py': '0659269e51cea52c893aaa372d6669ad35fbaadb2ebae5ee3d8d43f508ec4c74',
+    'tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py': '2d0b82a6454bf8377d4446b88e027c65d75ca345e39279aee4fe45486c6d30e8',
+    'tests/scripts/desktop_update/test_r6_checkout_fixture.py': '378e9d0691ec996c9e52e8615af98d165bdf321ac7f0b4dc1c079bdb1c0276d1',
 }
 RESTAMP = (
     '        if ($script:MarkerReleaseWaited -and [System.IO.File]::Exists($ResultPath)) {\n'
@@ -126,12 +145,18 @@ def sandbox(folder, root):
 
 
 def collect(root, env):
-    proc = subprocess.run([sys.executable, '-m', 'pytest', *FILES, '--collect-only', '-q'],
+    proc = subprocess.run([sys.executable, '-m', 'pytest', *ALL_FILES, '--collect-only', '-q'],
                           cwd=root, env=env, capture_output=True, text=True, timeout=60, check=False)
     require(proc.returncode == 0, proc.stdout + proc.stderr)
     nodes = [line.strip() for line in proc.stdout.splitlines()
-             if any(line.startswith(name + '::') for name in FILES)]
-    require(len(nodes) == len(set(nodes)) == 31, f'Expected 31 unique nodes: {len(nodes)} / {len(set(nodes))}')
+             if any(line.startswith(name + '::') for name in ALL_FILES)]
+    require(len(nodes) == len(set(nodes)), 'Duplicate collected nodes')
+    counts = {name: sum(n.startswith(name + '::') for n in nodes) for name in ALL_FILES}
+    require(all(counts.values()) and sum(counts[n] for n in FILES) == 41
+            and counts[MARKER_LOCK] == 13 and counts[FIXTURE] == 5, f'Wrong collection: {counts}')
+    selector = subprocess.run([sys.executable, 'scripts/ci/list_os_marked_tests.py', 'windows'],
+                              cwd=root, env=env, capture_output=True, text=True, timeout=60, check=True)
+    require(set(FILES) <= set(selector.stdout.splitlines()), 'Windows selector omitted partition files')
     require(TIMESTAMP in nodes, 'Timestamp node missing')
     return [TIMESTAMP] + [node for node in nodes if node != TIMESTAMP]
 
@@ -155,7 +180,7 @@ def timestamp_mismatch(text):
     if match is None:
         raise RuntimeError('No actual True result / numeric timestamp mismatch in rewritten assertion')
     finished, released = map(int, match.groups())
-    require(finished < released, 'Expected a stale result, not another line-310 failure')
+    require(finished < released, 'Expected a stale result, not another line-34 failure')
     return {'finished_at': finished, 'release_lower_bound_integer': released, 'result_ok': True}
 
 
@@ -179,8 +204,8 @@ def classify(path, code, expected_count=1, node=None, red=False):
         # > failure source line, the terminal location AND assertion type count.
         arrows = [line[1:].strip() for line in text.splitlines() if line.startswith('>')]
         require(arrows == [ASSERTION], f'Not the timestamp assertion: {arrows}')
-        require(re.search(r'(?:^|[/\\])test_desktop_update_windows_commit_outcome\.py:310: AssertionError', text) is not None,
-                'Missing exact timestamp assertion location (line 310)')
+        require(re.search(r'(?:^|[/\\])test_desktop_update_windows_commit_release\.py:34: AssertionError', text) is not None,
+                'Missing exact timestamp assertion location (line 34)')
         require('AssertionError' in failure.get('message', ''), 'Not an assertion failure')
         timestamp_mismatch(text)
     return counts
@@ -235,7 +260,62 @@ def run_case(root, folder, node, red=False):
                     'Retained actual result does not match timestamp assertion evidence')
             result['handoff_log'] = str(logs[0])
             result['handoff_log_sha256'] = sha(logs[0].read_bytes())
-            result['release_ack_proof'] = 'Unchanged test passed holders[0].finish() at line 306 and failed only line 310'
+            result['release_ack_proof'] = 'Unchanged test passed holders[0].finish() at line 30 and failed only line 34'
+        result['accepted'] = True
+    except Exception as exc:
+        result['error'] = repr(exc)
+    folder.mkdir(parents=True, exist_ok=True)
+    save(folder / 'result.json', result)
+    print(json.dumps(result), flush=True)
+    return result
+
+
+def cache_guard(root, name):
+    cache = root / 'test_durations.json'
+    data = json.loads(cache.read_text(encoding='utf-8')) if cache.exists() else {}
+    require(isinstance(data, dict) and name not in data, f'Cached timeout scaler entry forbidden: {name}')
+    return {'cache_entry_absent': name, 'effective_file_timeout_seconds': 300}
+
+
+def case_identity(node):
+    parts = node.split('::')
+    return ('.'.join([parts[0].removesuffix('.py').replace('/', '.'), *parts[1:-1]]), parts[-1])
+
+
+def match_inventory(path, expected):
+    _, cases = junit(path)
+    actual = [(c.get('classname'), c.get('name')) for c in cases]
+    wanted = [case_identity(n) for n in expected]
+    require(len(actual) == len(set(actual)) and sorted(actual) == sorted(wanted),
+            f'JUnit inventory mismatch: actual={actual}, expected={wanted}')
+    return list(expected)
+
+
+def aggregate(results, nodes):
+    actual = [n for r in results for n in r.get('nodes', [])]
+    require(len(actual) == len(set(actual)) and sorted(actual) == sorted(nodes),
+            'Missing/duplicate whole-file case inventory')
+    require(len(results) == len(ALL_FILES) and {r['file'] for r in results} == set(ALL_FILES),
+            'Missing/duplicate whole-file executions')
+    return {'collected': len(nodes), 'completed': len(actual), 'unique': len(set(actual)),
+            'passed': sum(len(r['nodes']) for r in results if r['accepted']),
+            'whole_files': len(results), 'retries': 0, 'skipped': 0}
+
+
+def run_file(root, folder, name, nodes):
+    result = {'file': name, 'accepted': False, 'nodes': []}
+    try:
+        env = sandbox(folder / 'sandbox', root)
+        result.update(cache_guard(root, name))
+        command = [str(resolve_native_bash(Path(os.environ['ProgramFiles']))), 'scripts/run_tests.sh',
+                   '-j', '1', '--file-retries', '0', '--file-timeout', '300', '--fail-on-skip', name,
+                   '--', '-vv', '--tb=long', '--basetemp', str(folder / 'tmp'),
+                   '--junitxml', str(folder / 'junit.xml')]
+        result.update(execute(command, root, folder, env))
+        require(not result['outer_timeout'] and result['elapsed_seconds'] < 300,
+                'Whole-file wall exceeded unchanged 300s budget')
+        result['junit'] = classify(folder / 'junit.xml', result['returncode'], expected_count=len(nodes))
+        result['nodes'] = match_inventory(folder / 'junit.xml', nodes)
         result['accepted'] = True
     except Exception as exc:
         result['error'] = repr(exc)
@@ -292,7 +372,7 @@ def mutation(root, output, subject, attrs):
     require(changed == [POWERSHELL], f'Mutation changed unexpected paths: {changed}')
     save(folder / 'mutation.json', {'subject': subject, 'archive_sha256': sha(archive.read_bytes()),
                                   'changed_paths': changed, 'before_sha256': before[POWERSHELL],
-                                  'after_sha256': after[POWERSHELL], 'test_sha256': after[FILES[0]]})
+                                  'after_sha256': after[POWERSHELL], 'test_sha256': after[TIMESTAMP_FILE]})
     return run_case(copy, folder / 'timestamp-red', TIMESTAMP, red=True)
 
 
@@ -327,6 +407,33 @@ class ControllerUnitTests(unittest.TestCase):
             ET.ElementTree(suite).write(path)
             self.assertEqual(classify(path, 0, node='tests/sample.py::TestOuter::TestInner::test_case[param]')['tests'], 1)
 
+    def test_whole_file_inventory_and_cache_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'junit.xml'
+            nodes = ['tests/sample.py::TestOuter::test_case[a]', 'tests/sample.py::TestInner::test_case[b]']
+            suite = ET.Element('testsuite', tests='2', failures='0', errors='0', skipped='0')
+            for node in nodes:
+                classname, name = case_identity(node)
+                ET.SubElement(suite, 'testcase', name=name, classname=classname)
+            ET.ElementTree(suite).write(path)
+            self.assertEqual(match_inventory(path, nodes), nodes)
+            for wrong in (nodes[:1], [nodes[0], nodes[0]], [n.replace('TestInner', 'TestWrong') for n in nodes]):
+                with self.assertRaises(RuntimeError):
+                    match_inventory(path, wrong)
+            self.assertEqual(cache_guard(root, FILES[0])['effective_file_timeout_seconds'], 300)
+            save(root / 'test_durations.json', {FILES[1]: 1000})
+            cache_guard(root, FILES[0])  # Completed other files cannot inflate this file.
+            save(root / 'test_durations.json', {FILES[0]: 1000})
+            with self.assertRaises(RuntimeError):
+                cache_guard(root, FILES[0])
+            results = [{'file': f, 'nodes': [f + '::test_case'], 'accepted': True} for f in ALL_FILES]
+            expected = [r['nodes'][0] for r in results]
+            self.assertEqual(aggregate(results, expected)['whole_files'], 11)
+            for bad in (results[:-1], results + results[:1], results[:-1] + results[:1]):
+                with self.assertRaises(RuntimeError):
+                    aggregate(bad, expected)
+
     def test_mutation_exact_and_guarded(self):
         context = b'Write-Result ($finalCode -eq 0)\nInvoke-MarkerRelease\n# finish time (unless something already consumed it).\n'
         for nl in (b'\n', b'\r\n'):
@@ -349,7 +456,7 @@ class ControllerUnitTests(unittest.TestCase):
             def xml(fail=0, errors=0, skip=0, body='', tests=1, name=TIMESTAMP_NAME):
                 suite = ET.Element('testsuite', tests=str(tests), failures=str(fail), errors=str(errors), skipped=str(skip))
                 case = ET.SubElement(suite, 'testcase', name=name,
-                                     classname=FILES[0].removesuffix('.py').replace('/', '.'))
+                                     classname=TIMESTAMP_FILE.removesuffix('.py').replace('/', '.'))
                 if fail:
                     ET.SubElement(case, 'failure', message='AssertionError').text = body
                 if errors:
@@ -359,12 +466,12 @@ class ControllerUnitTests(unittest.TestCase):
                 ET.ElementTree(suite).write(path)
             xml()
             self.assertEqual(classify(path, 0, node=TIMESTAMP)['tests'], 1)
-            red = '>       ' + ASSERTION + '\nE       assert (True is True and 1 >= 2)\n' + FILES[0] + ':310: AssertionError'
+            red = '>       ' + ASSERTION + '\nE       assert (True is True and 1 >= 2)\n' + TIMESTAMP_FILE + ':34: AssertionError'
             xml(fail=1, body=red)
             self.assertEqual(classify(path, 1, node=TIMESTAMP, red=True)['failures'], 1)
             # Critical trap: passed source contains target assertion, but > is a different failure.
-            for body in (ASSERTION + '\n>       holders[0].finish()\n' + FILES[0] + ':310: AssertionError',
-                         red.replace(':310:', ':309:'), red.replace(ASSERTION, 'assert False'),
+            for body in (ASSERTION + '\n>       holders[0].finish()\n' + TIMESTAMP_FILE + ':34: AssertionError',
+                         red.replace(':34:', ':33:'), red.replace(ASSERTION, 'assert False'),
                          red.replace('True is True', 'False is True'), red.replace('1 >= 2', '2 >= 1')):
                 xml(fail=1, body=body)
                 with self.assertRaises(RuntimeError):
@@ -386,6 +493,7 @@ def main():
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--subject')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--arch', choices=('x64', 'arm64'))
     parser.add_argument('--list', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
@@ -396,46 +504,39 @@ def main():
     require(sys.version_info[:3] == (3, 14, 9), 'Exact Python 3.14.9 required')
     if not args.list:
         require(platform.system() == 'Windows' and os.name == 'nt', 'Native Windows required; no spoofing')
+        require(args.arch is not None and platform.machine().lower() == {'x64': 'amd64', 'arm64': 'arm64'}[args.arch],
+                'Native host architecture must match matrix')
+        require(__import__('struct').calcsize('P') == 8, '64-bit Python required')
+        require(__import__('sysconfig').get_platform() == {'x64': 'win-amd64', 'arm64': 'win-arm64'}[args.arch or ''],
+                'Python must be native to the matrix architecture, not emulated')
     root, output = args.repo.resolve(), args.output.resolve()
     require(not output.is_relative_to(root), 'Evidence must be outside source checkout')
     output.mkdir(parents=True, exist_ok=False)
     attrs, hashes = source_guard(root, args.subject)
     nodes = collect(root, sandbox(output / 'collection-sandbox', root))
     metadata = {'subject': args.subject, 'hashes': hashes, 'nodes': nodes, 'collected': len(nodes),
-                'unique': len(set(nodes)), 'workers': 2, 'retries': 0, 'outer_case_budget_seconds': 300,
+                'unique': len(set(nodes)), 'workers': 2, 'retries': 0, 'effective_file_budget_seconds': 300, 'architecture': args.arch,
                 'python': sys.version, 'executable': sys.executable, 'platform': platform.platform(),
                 'controller_sha256': sha(Path(__file__).read_bytes()), 'validation_only': args.list,
-                'full_file_CI_gate': 'Separate parent-owned original 300-second file gate; not replaced by this diagnostic'}
+                'full_file_CI_gate': 'Canonical whole-file -j1, two simultaneous files, 300s, no retries/skips'}
     save(output / 'metadata.json', metadata)
     if args.list:
         print(json.dumps(metadata, indent=2))
         return 0
     summary = {'subject': args.subject, 'accepted': False}
     try:
-        folder = output / 'fixture'
-        env = sandbox(folder / 'sandbox', root)
-        command = [str(resolve_native_bash(Path(os.environ['ProgramFiles']))), 'scripts/run_tests.sh', '-j', '2', '--file-retries', '0', '--fail-on-skip',
-                   FIXTURE, '--', '-vv', '--tb=long', '--basetemp', str(folder / 'tmp'),
-                   '--junitxml', str(folder / 'junit.xml')]
-        fixture = execute(command, root, folder, env)
-        fixture['junit'] = classify(folder / 'junit.xml', fixture['returncode'], expected_count=5)
-        require(not fixture['outer_timeout'], 'Fixture runner timed out')
-        save(folder / 'result.json', fixture)
-        summary['fixture'] = fixture
-        def indexed_case(pair):
-            index, node = pair
-            return run_case(root, output / f'case-{index:02d}', node)
+        cache = root / 'test_durations.json'
+        require(not cache.exists(), 'Inherited duration cache is forbidden; use a fresh checkout')
+        def whole_file(name):
+            expected = [n for n in nodes if n.startswith(name + '::')]
+            return run_file(root, output / Path(name).stem, name, expected)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(indexed_case, enumerate(nodes)))
-        summary['cases'] = results
-        summary['totals'] = {'collected': len(nodes), 'completed': len(results),
-                             'unique': len({r['node'] for r in results}),
-                             'passed': sum(r['accepted'] for r in results)}
-        require(summary['totals']['collected'] == summary['totals']['completed'] == summary['totals']['unique'] == 31,
-                'Incomplete/duplicate 31-case inventory')
-        # Do the real challenge even if another independent diagnostic case failed.
+            results = list(pool.map(whole_file, ALL_FILES))
+        summary['files'] = results
+        # Always attempt the real challenge after the independent whole-file runs.
         summary['mutation'] = mutation(root, output, args.subject, attrs)
-        require(summary['totals']['passed'] == 31, 'Not all 31 diagnostic cases passed')
+        summary['totals'] = aggregate(results, nodes)
+        require(all(r['accepted'] for r in results), 'Not every canonical whole-file run passed')
         require(summary['mutation']['accepted'], 'Mutation did not produce exact timestamp RED')
         summary['accepted'] = True
     except Exception as exc:
