@@ -4,11 +4,12 @@
  * shares, loopback admin shares, and kernel pseudo-filesystems mounted
  * somewhere a grant can reach.
  */
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createPluginFiles, type PluginFiles } from './plugin-files'
 import { loopbackShare, onPseudoFilesystem, overlapsByIdentity, wslProtectedPath } from './plugin-files-guards'
@@ -28,8 +29,8 @@ const make = (platform?: NodeJS.Platform): PluginFiles =>
     platform
   })
 
-beforeEach(() => {
-  scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-plugin-files-spell-')))
+function createScratch(root = os.tmpdir()) {
+  scratch = fs.realpathSync(fs.mkdtempSync(path.join(root, 'hermes-plugin-files-spell-')))
   userData = path.join(scratch, 'userData')
   hermesHome = path.join(scratch, 'home', '.hermes')
   vault = path.join(scratch, 'home', 'Vault')
@@ -37,7 +38,9 @@ beforeEach(() => {
   fs.mkdirSync(hermesHome, { recursive: true })
   fs.mkdirSync(vault, { recursive: true })
   fs.writeFileSync(path.join(vault, 'a.md'), '# A\n')
-})
+}
+
+beforeEach(() => createScratch())
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -52,14 +55,74 @@ async function grant(files: PluginFiles, folder = vault): Promise<string> {
   return (granted as { folder: { id: string } }).folder.id
 }
 
-// Linux volumes are case-sensitive, so they stand in for a case-sensitive
-// macOS volume here: `Vault` and `vault` are two folders.
+// These attacks require two distinct directory entries, not aliases on the
+// usual case-insensitive APFS volume. Use a private case-sensitive HFS+ sparse
+// image on macOS when needed. This exercises real filesystem semantics, not
+// mocked realpaths or a changed host OS. hdiutil/mount failures fail the suite;
+// they are prerequisites, never skipped security coverage.
 describe('case on a case-sensitive macOS volume', () => {
+  let fixture: string | undefined
+  let mount: string | undefined
+  let caseRoot: string | undefined
+
+  beforeAll(() => {
+    if (!posix) {
+      return
+    }
+
+    const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-case-probe-'))
+
+    try {
+      fs.mkdirSync(path.join(probe, 'Vault'))
+
+      if (!fs.existsSync(path.join(probe, 'vault'))) {
+        return
+      }
+    } finally {
+      fs.rmSync(probe, { recursive: true, force: true })
+    }
+
+    if (process.platform !== 'darwin') {
+      throw new Error('These tests require a case-sensitive temporary filesystem')
+    }
+
+    fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-case-volume-'))
+    const image = path.join(fixture, 'case.sparseimage')
+    const mountpoint = path.join(fixture, 'mount')
+    fs.mkdirSync(mountpoint)
+    execFileSync('hdiutil', ['create', '-size', '64m', '-fs', 'HFSX', '-volname', 'HermesCaseFixture', '-type', 'SPARSE', '-o', image], { stdio: 'pipe', timeout: 30_000 })
+    execFileSync('hdiutil', ['attach', image, '-mountpoint', mountpoint, '-nobrowse', '-noautoopen'], { stdio: 'pipe', timeout: 30_000 })
+    mount = mountpoint
+    caseRoot = mountpoint
+  }, 90_000)
+
+  beforeEach(() => {
+    if (!caseRoot) {
+      return
+    }
+
+    fs.rmSync(scratch, { recursive: true, force: true })
+    createScratch(caseRoot)
+    expect(fs.existsSync(path.join(scratch, 'home', 'vault'))).toBe(false)
+  })
+
+  afterAll(() => {
+    // Do not remove the backing image unless unmounting succeeded.
+    if (mount) {
+      execFileSync('hdiutil', ['detach', mount], { stdio: 'pipe', timeout: 30_000 })
+    }
+
+    if (fixture) {
+      fs.rmSync(fixture, { recursive: true, force: true })
+    }
+  }, 40_000)
+
   it.runIf(posix)('a link from the granted Vault into a sibling vault is outside the folder', async () => {
     const files = make('darwin')
     const id = await grant(files)
     const sibling = path.join(scratch, 'home', 'vault')
     fs.mkdirSync(sibling)
+    expect(fs.statSync(sibling).ino).not.toBe(fs.statSync(vault).ino)
     fs.writeFileSync(path.join(sibling, 'secret.txt'), 'not granted')
     fs.symlinkSync(path.join(sibling, 'secret.txt'), path.join(vault, 'link.txt'))
 

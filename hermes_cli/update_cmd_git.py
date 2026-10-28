@@ -574,15 +574,21 @@ def _print_fetch_failure(stderr: str, *, git_cmd=None, root: Optional[Path] = No
             print(f"  ... ({len(lines) - 15} more lines omitted)")
 
 
-def _probe_fork_bomb(argv: list) -> Optional[bool]:
-    """Run ``<argv> --version``; True/False = guard message seen/absent, None = probe itself failed."""
+def _probe_fork_bomb(argv: list, *, require_version: bool = False) -> Optional[bool]:
+    """Probe the guard; optionally require a successful Git version before reporting False."""
     try:
         from hermes_cli.update_custody import run_git
 
         result = run_git(argv, ["--version"], timeout=15, **_GIT_TEXT_KW)
     except Exception:
         return None
-    return "fork bomb" in ((result.stdout or "") + (result.stderr or "")).lower()
+    if "fork bomb" in ((result.stdout or "") + (result.stderr or "")).lower():
+        return True
+    if require_version and (
+        result.returncode != 0 or not (result.stdout or "").strip().lower().startswith("git version ")
+    ):
+        return None
+    return False
 
 
 def _git_is_trampoline(git_cmd: list) -> bool:
@@ -627,7 +633,15 @@ def _locate_real_git() -> Optional[Path]:
         for base in (r"C:\Program Files", r"C:\Program Files (x86)")
         for arch in ("clangarm64", "mingw64", "mingw32")
     ] + _portable_git_candidates()
-    return next((c for c in candidates if c.exists() and _probe_fork_bomb([str(c)]) is False), None)
+    # Portable/custom Git installs (including PM's locked tool tree) need not live
+    # under Program Files. Only derive git-core siblings; never select a PATH shim.
+    candidates += [
+        Path(entry).parent / arch / "libexec" / "git-core" / "git.exe"
+        for entry in os.get_exec_path()
+        if Path(entry).is_absolute() and Path(entry).name.lower() in ("cmd", "bin")
+        for arch in ("clangarm64", "mingw64", "mingw32")
+    ]
+    return next((c for c in candidates if c.is_file() and _probe_fork_bomb([str(c)], require_version=True) is False), None)
 
 
 def _ensure_non_trampoline_git(git_cmd: list) -> list:

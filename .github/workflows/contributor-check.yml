@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   check-attribution:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ vars.HERMES_CI_LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     outputs:
       review_status: ${{ steps.check-emails.outputs.review_status }}
@@ -29,12 +29,24 @@ jobs:
 
       - name: Check for unmapped contributor emails
         id: check-emails
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
         run: |
-          # Get the merge base between this PR and main
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          # A fork's main may be stale; compare PRs against their actual target.
+          case "$GITHUB_EVENT_NAME" in
+            pull_request|pull_request_target)
+              BASE_REF="${PR_BASE_SHA:?Missing pull request base SHA}"
+              if [[ ! "$BASE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                echo "::error::Invalid pull request base SHA"
+                exit 1
+              fi ;;
+            *) BASE_REF=origin/main ;;
+          esac
+          MERGE_BASE=$(git merge-base "$BASE_REF" HEAD)
 
           # Find any new author emails in this PR's commits
-          NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)
+          NEW_EMAILS=$(git log "${MERGE_BASE}..HEAD" --format='%ae' --no-merges | sort -u)
 
           if [ -z "$NEW_EMAILS" ]; then
             echo "No new commits to check."

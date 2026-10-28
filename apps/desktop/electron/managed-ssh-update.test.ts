@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { exec as execCallback, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -417,6 +417,132 @@ test.runIf(process.platform !== 'win32').each([0, 23])(
     }
   }
 )
+test.runIf(process.platform !== 'win32')(
+  'portable updater survives transport closure with a live creation-bound intent before terminal publication',
+  async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'ssh-updater-'))
+    const launcher = path.join(home, 'fake-updater')
+    const reportPath = path.join(home, 'report.json')
+    const releasePath = path.join(home, 'release')
+    const python = (await exec('command -v python3')).stdout.trim()
+    const bin = path.join(home, 'bin')
+    await mkdir(bin)
+
+    for (const tool of ['sh', 'python3', 'mkdir', 'dirname', 'rm', 'mv', 'env', 'date', 'ps', 'sed', 'awk', 'sleep']) {
+      await symlink((await exec(`command -v ${tool}`)).stdout.trim(), path.join(bin, tool))
+    }
+
+    const isolatedEnv = { ...process.env, HOME: home, HERMES_HOME: home, PATH: bin }
+    await writeFile(
+      launcher,
+      `#!${python}\n` +
+        String.raw`
+import json,os,signal,time
+from pathlib import Path
+home=Path(os.environ['HERMES_HOME'])
+(home/'report.json').write_text(json.dumps({'pid':os.getpid(),'parent':os.getppid(),'session':os.getsid(0),'hupIgnored':signal.getsignal(signal.SIGHUP)==signal.SIG_IGN}))
+while not (home/'release').exists():time.sleep(.025)
+`,
+      { mode: 0o700 }
+    )
+
+    const target = {
+      ssh: { exec: async () => '' },
+      platform: 'Darwin' as const,
+      hermesPath: launcher,
+      hermesHome: home
+    }
+
+    const command = buildPosixManagedUpdateLaunch(target, CORRELATION)
+
+    const transport = spawn('sh', ['-c', `${command}; sleep 30`], {
+      env: isolatedEnv,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+
+    let report: { pid: number; parent: number; session: number; hupIgnored: boolean } | undefined
+    const closed = new Promise(resolve => transport.once('exit', resolve))
+
+    try {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        try {
+          report = JSON.parse(await readFile(reportPath, 'utf8'))
+
+          break
+        } catch {
+          /* The isolated fixture may not have published yet, or may already have exited. */
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+
+      assert.ok(report, 'the real updater must start')
+      const intent = JSON.parse(await readFile(path.join(home, `.update_launch_intent.${CORRELATION}`), 'utf8'))
+      assert.equal(intent.pid, report.parent)
+      assert.equal(report.session, intent.pid)
+      assert.notEqual(intent.pid, transport.pid)
+      assert.equal(report.hupIgnored, true)
+      assert.ok(intent.creation.startsWith(process.platform === 'darwin' ? 'darwin:' : 'linux:'))
+
+      const observe = async () =>
+        parseRemoteUpdateObservation(
+          (await exec(buildRemoteUpdateObservationCommand(target, CORRELATION))).stdout,
+          CORRELATION
+        )
+
+      assert.equal((await observe()).launchIntent, 'present')
+      const intentPath = path.join(home, `.update_launch_intent.${CORRELATION}`)
+      await writeFile(intentPath, JSON.stringify({ ...intent, creation: `${intent.creation}-wrong` }))
+      assert.equal((await observe()).launchIntent, 'dead', 'PID liveness alone is not creation identity')
+      await writeFile(intentPath, JSON.stringify(intent))
+      assert.equal((await observe()).launchIntent, 'present')
+      await assert.rejects(readFile(path.join(home, `.update_exit_code.${CORRELATION}`)), { code: 'ENOENT' })
+      process.kill(-transport.pid!, 'SIGHUP')
+      await closed
+      process.kill(report.pid, 'SIGHUP')
+      assert.equal((await observe()).launchIntent, 'present')
+      assert.ok(process.kill(report.pid, 0))
+      await writeFile(releasePath, '')
+      let terminal = null
+
+      for (let attempt = 0; attempt < 200; attempt++) {
+        terminal = (await observe()).exitCode
+
+        if (terminal !== null) {
+          break
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+
+      assert.equal(terminal, 0)
+      assert.equal((await stat(path.join(home, `.update_exit_code.${CORRELATION}`))).mode & 0o777, 0o600)
+      assert.equal(
+        (await readdir(home)).some(name => name.endsWith('.tmp')),
+        false
+      )
+    } finally {
+      try {
+        process.kill(-transport.pid!, 'SIGTERM')
+      } catch {
+        /* The isolated fixture may not have published yet, or may already have exited. */
+      }
+
+      if (report) {
+        try {
+          process.kill(report.pid, 'SIGKILL')
+        } catch {
+          /* The isolated fixture may not have published yet, or may already have exited. */
+        }
+      }
+
+      await rm(home, { force: true, recursive: true })
+    }
+  },
+  15_000
+)
+
 test('Windows managed launcher starts a hidden child and leaves exit 75 to the external coordinator', () => {
   const command = buildWindowsManagedUpdateLaunch(
     {

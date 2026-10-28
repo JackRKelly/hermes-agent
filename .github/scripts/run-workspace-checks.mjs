@@ -1,4 +1,6 @@
-// Run every workspace check at the same time and report all failures.
+// Run every workspace check and report all failures.
+// Default scheduling is unchanged; the shared-runner CI profile partitions UI
+// files and caps BOTH workspace concurrency and nested Vitest worker pools.
 //
 // The unit of work is a CHECK, and not a workspace. A package that declares
 // `check:*` sub-scripts gives one unit for each sub-script. A package with a
@@ -14,10 +16,13 @@
 // their lines, and a failure is then hard to read.
 //
 // This also runs on a laptop: `node .github/scripts/run-workspace-checks.mjs`.
-// `--concurrency N` sets the limit. `--list` prints the units and exits.
+// `--concurrency N` sets the workspace limit; `--vitest-workers N` also bounds
+// each nested pool. `--partition other|desktop-ui-1/2|desktop-ui-2/2` opts into
+// the shared-runner split. `--list` prints the exact selected commands and exits.
 
 import { execFileSync, spawn } from 'node:child_process'
 import { availableParallelism } from 'node:os'
+import { parseArgs } from 'node:util'
 
 const IS_CI = Boolean(process.env.GITHUB_ACTIONS)
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
@@ -45,11 +50,13 @@ function discoverUnits() {
   return units
 }
 
-/** @param {{pkg: string, script: string}} unit */
-function runUnit(unit) {
+/** @param {{pkg: string, script: string, args?: string[]}} unit
+ * @param {number | undefined} vitestWorkers */
+function runUnit(unit, vitestWorkers) {
   return new Promise((resolve) => {
     const started = Date.now()
-    const child = spawn(NPM, ['run', '--prefix', unit.pkg, unit.script], {
+    const child = spawn(NPM, ['run', '--prefix', unit.pkg, unit.script, ...(unit.args || [])], {
+      ...(vitestWorkers === undefined ? {} : { env: { ...process.env, VITEST_MAX_WORKERS: String(vitestWorkers) } }),
       // Buffer, and do not inherit. Children that share one stdout
       // interleave their lines, and a failure is then hard to read.
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -75,8 +82,31 @@ function runUnit(unit) {
 }
 
 async function main() {
-  const argv = process.argv.slice(2)
-  const units = discoverUnits()
+  const { values } = parseArgs({ options: {
+    list: { type: 'boolean' },
+    partition: { type: 'string', default: 'all' },
+    concurrency: { type: 'string' },
+    'vitest-workers': { type: 'string' },
+  } })
+  const partition = values.partition
+  if (!['all', 'other', 'desktop-ui-1/2', 'desktop-ui-2/2'].includes(partition)) {
+    throw new Error(`Invalid partition: ${partition}`)
+  }
+  const positiveInteger = (name) => {
+    const raw = values[name]
+    if (raw === undefined) return undefined
+    if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      throw new Error(`Invalid --${name}: expected a positive integer`)
+    }
+    return Number(raw)
+  }
+  const requestedConcurrency = positiveInteger('concurrency')
+  const vitestWorkers = positiveInteger('vitest-workers')
+  const discovered = discoverUnits()
+  const isUI = (unit) => unit.pkg === 'apps/desktop' && unit.script === 'check:test:ui'
+  const units = partition === 'all' ? discovered
+    : partition === 'other' ? discovered.filter((unit) => !isUI(unit))
+      : discovered.filter(isUI).map((unit) => ({ ...unit, args: ['--', '--', `--shard=${partition.slice('desktop-ui-'.length)}`] }))
 
   if (units.length === 0) {
     console.error(
@@ -85,17 +115,12 @@ async function main() {
     process.exit(1)
   }
 
-  if (argv.includes('--list')) {
-    for (const u of units) console.log(`${u.pkg} :: ${u.script}`)
+  if (values.list) {
+    for (const u of units) console.log(`${u.pkg} :: ${u.script}${u.args ? ` ${u.args.join(' ')}` : ''}`)
     return
   }
 
-  const flagIdx = argv.indexOf('--concurrency')
-  const concurrency = Math.max(
-    1,
-    flagIdx !== -1 ? Number(argv[flagIdx + 1]) : Math.min(units.length, availableParallelism()),
-  )
-
+  const concurrency = requestedConcurrency ?? Math.min(units.length, availableParallelism())
   console.log(`running ${units.length} checks, up to ${concurrency} at a time:`)
   for (const u of units) console.log(`  ${u.pkg} :: ${u.script}`)
   console.log('')
@@ -108,7 +133,7 @@ async function main() {
     for (;;) {
       const unit = queue.shift()
       if (!unit) return
-      const res = await runUnit(unit)
+      const res = await runUnit(unit, vitestWorkers)
       results.push(res)
       const label = `${res.unit.pkg} :: ${res.unit.script}`
       const secs = (res.ms / 1000).toFixed(1)

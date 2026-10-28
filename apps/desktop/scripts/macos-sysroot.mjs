@@ -54,3 +54,13 @@ export function macosSysroot(env = process.env) {
 export function xcrunClangArgv(sysroot) {
   return sysroot ? ['clang', '-isysroot', sysroot] : ['--sdk', 'macosx', 'clang']
 }
+
+// xcrun resolves clang before clang sees -isysroot. A rejected inherited
+// SDKROOT can therefore poison tool lookup even with a valid -isysroot.
+// Keep lookup and compilation on the same SDK, without mutating process.env.
+export function xcrunClangEnv(sysroot, env = process.env) {
+  const clean = { ...env }
+  if (sysroot) clean.SDKROOT = sysroot
+  else delete clean.SDKROOT
+  return clean
+}
