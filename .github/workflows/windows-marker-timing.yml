@@ -16,6 +16,9 @@ jobs:
   original-cim-kernel-diagnostic:
     runs-on: windows-2025
     timeout-minutes: 25
+    env:
+      # Reviewed final source; original CIM oracle remains independently pinned below.
+      GREEN_SUBJECT: 81f29fbf2ac018f41ec4325a229d2ee3e913222b
     steps:
       - name: Check out diagnostic revision
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -36,6 +39,20 @@ jobs:
           persist-credentials: false
           clean: true
 
+      - name: Require reviewed immutable GREEN subject
+        shell: bash
+        run: |
+          [[ "$GREEN_SUBJECT" =~ ^[0-9a-f]{40}$ ]] || { printf '%s\n' 'Blocked: final GREEN subject is unbound'; exit 1; }
+
+      - name: Check out final GREEN subject separately from original oracle
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.GREEN_SUBJECT }}
+          path: .green-subject
+          persist-credentials: false
+          clean: true
+
       - name: Prepare original locked test dependencies
         id: pm
         uses: ./.github/actions/setup-pm
@@ -48,13 +65,14 @@ jobs:
           save-python-cache: 'false'
           save-node-cache: 'false'
 
-      - name: Original one-case attribution, real no-shell RED, isolated kernel comparison
+      - name: Original attribution, no-shell RED, kernel controls, actual final-source GREEN
         shell: bash
         env:
           DIAGNOSTIC_PYTHON: ${{ steps.pm.outputs.python-path }}
         run: |
           "$DIAGNOSTIC_PYTHON" "$RUNNER_TEMP/windows-marker-timing/controller.py" \
-            --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/windows-marker-timing-evidence"
+            --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/windows-marker-timing-evidence" \
+            --green-repo "$GITHUB_WORKSPACE/.green-subject" --green-subject "$GREEN_SUBJECT"
 
       - name: Retain only same-run diagnostic evidence
         if: always()
@@ -68,6 +86,7 @@ jobs:
             ${{ runner.temp }}/windows-marker-timing-evidence/source-before.json
             ${{ runner.temp }}/windows-marker-timing-evidence/source-after.json
             ${{ runner.temp }}/windows-marker-timing-evidence/host.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/green-source.json
             ${{ runner.temp }}/windows-marker-timing-evidence/harness.json
             ${{ runner.temp }}/windows-marker-timing-evidence/*/process.json
             ${{ runner.temp }}/windows-marker-timing-evidence/*/containment.json

@@ -21,22 +21,39 @@ def require_dead_query(query, pid):
         raise AssertionError(('exited pid accepted', pid))
 
 
-def inaccessible_control(open_process, close_handle, last_error, query, report):
-    handle = open_process()
-    if handle:
-        close_handle(handle)
-        report('control_blocked', control='inaccessible-pid', owner_pid=4,
-               reason='PID 4 grants limited access; inaccessible control unavailable')
-        return False
-    assert last_error() == 5, 'PID 4 control must fail with access denied, not missing pid'
-    try:
-        query(4)
-    except OSError as error:
-        assert error.winerror == 5, error
-    else:
-        raise AssertionError('inaccessible pid returned fabricated identity')
-    report('control_pass', control='inaccessible-pid', owner_pid=4)
-    return True
+def inaccessible_control(pids, open_process, close_handle, last_error, query, report):
+    """Select only an enumerated PID with real limited-query access denied.
+
+    Callbacks allow portable classifier tests, never native evidence substitution.
+    Every granted query-only HANDLE is closed before continuing the read-only scan.
+    """
+    for pid in pids:
+        if pid <= 0:
+            continue  # Idle PID 0 is an invalid-parameter control, not access denied.
+        handle = open_process(pid)
+        if handle:
+            close_handle(handle)
+            if pid == 4:
+                report('control_info', control='inaccessible-pid', owner_pid=pid,
+                       reason='PID 4 grants limited access; scanning other enumerated PIDs')
+            continue
+        native_error = last_error()  # Capture before any other native calls/reporting.
+        report('denied_scan_query', owner_pid=pid, native_winerror=native_error)
+        if native_error != 5:
+            continue  # A disappearing PID or other failure is not the precondition.
+        try:
+            query(pid)
+        except OSError as error:
+            candidate_error = getattr(error, 'winerror', None)
+            assert candidate_error == 5, ('wrong inaccessible error', pid, error)
+        else:
+            raise AssertionError('inaccessible pid returned fabricated identity')
+        report('control_pass', control='inaccessible-pid', owner_pid=pid,
+               native_winerror=native_error, candidate_winerror=candidate_error)
+        return True
+    report('control_blocked', control='inaccessible-pid',
+           reason='No enumerated process denied PROCESS_QUERY_LIMITED_INFORMATION with WinError 5')
+    return False
 
 
 def check_handle_closure(query, live_pid, identity, held_dead, handles, report):
@@ -56,7 +73,7 @@ def check_handle_closure(query, live_pid, identity, held_dead, handles, report):
 
 
 def finish_controls(inaccessible_available, close_check, report):
-    close_check()  # A blocked PID 4 control must not truncate the handle measurements.
+    close_check()  # A blocked denied-process control must not truncate handle measurements.
     report('controls_complete', status='candidate-equality-only-not-acceptance',
            blocked_controls=[] if inaccessible_available else ['inaccessible-pid'])
     return 0 if inaccessible_available else 3
@@ -124,9 +141,10 @@ def main():
         def close_control_handle(handle):
             if not k32.CloseHandle(handle):
                 raise ctypes.WinError(ctypes.get_last_error())
+        import psutil
         accessible_control = inaccessible_control(
-            lambda: k32.OpenProcess(0x1000, False, 4), close_control_handle,
-            ctypes.get_last_error, candidate, emit)
+            sorted(psutil.pids()), lambda pid: k32.OpenProcess(0x1000, False, pid),
+            close_control_handle, ctypes.get_last_error, candidate, emit)
         k32.GetCurrentProcess.restype = wintypes.HANDLE
         k32.GetProcessHandleCount.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
         k32.GetProcessHandleCount.restype = wintypes.BOOL

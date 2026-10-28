@@ -78,30 +78,49 @@ class DiagnosticTests(unittest.TestCase):
             check(lambda pid: '1000.000', 12)
 
 
-    def test_accessible_pid4_is_blocked_not_a_pass_or_exception(self):
-        check = getattr(controls, 'inaccessible_control', None)
-        self.assertTrue(callable(check), 'missing non-truncating inaccessible control')
-        events, closed, queries = [], [], []
+    def test_enumerated_denied_pid_selected_and_granted_handles_closed(self):
+        events, closed, queried, opened = [], [], [], []
         report = lambda event, **fields: events.append((event, fields))
-        self.assertFalse(check(lambda: 123, closed.append, lambda: 0,
-                               queries.append, report))
-        self.assertEqual(closed, [123])
-        self.assertEqual(queries, [])
-        self.assertEqual(events[0][0], 'control_blocked')
-        self.assertIn('grants limited access', events[0][1]['reason'])
-        self.assertFalse(any(event == 'control_pass' for event, _ in events))
-        events.clear()
+        def open_pid(pid):
+            opened.append(pid)
+            return {4: 104, 12: 112, 20: None}[pid]
         def denied(pid):
-            error = OSError('denied')
+            queried.append(pid)
+            error = OSError('classifier fixture only, not native API evidence')
             error.winerror = 5
             raise error
-        self.assertTrue(check(lambda: None, closed.append, lambda: 5, denied, report))
-        self.assertEqual(events[0][0], 'control_pass')
-        with self.assertRaises(AssertionError):
-            check(lambda: None, closed.append, lambda: 87, denied, report)
-        with self.assertRaises(AssertionError):
-            check(lambda: None, closed.append, lambda: 5, lambda pid: 'identity', report)
+        self.assertTrue(controls.inaccessible_control(
+            [4, 12, 20], open_pid, closed.append, lambda: 5, denied, report))
+        self.assertEqual(opened, [4, 12, 20])
+        self.assertEqual(closed, [104, 112])
+        self.assertEqual(queried, [20])
+        self.assertEqual(events[0][0], 'control_info')
+        passed = [fields for event, fields in events if event == 'control_pass']
+        self.assertEqual(passed, [dict(control='inaccessible-pid', owner_pid=20,
+                                      native_winerror=5, candidate_winerror=5)])
 
+    def test_no_denied_pid_is_blocked_and_wrong_errors_cannot_pass(self):
+        events, closed, queried = [], [], []
+        report = lambda event, **fields: events.append((event, fields))
+        self.assertFalse(controls.inaccessible_control(
+            [4, 12], lambda pid: pid, closed.append, lambda: 0, queried.append, report))
+        self.assertEqual(closed, [4, 12])
+        self.assertEqual(queried, [])
+        self.assertEqual(events[-1][0], 'control_blocked')
+        self.assertFalse(any(event == 'control_pass' for event, _ in events))
+        self.assertFalse(controls.inaccessible_control(
+            [], lambda pid: None, closed.append, lambda: 5, queried.append, report))
+        self.assertFalse(controls.inaccessible_control(
+            [20], lambda pid: None, closed.append, lambda: 87, queried.append, report))
+        for error in (OSError('generic'), ProcessLookupError('gone')):
+            def wrong(pid, error=error):
+                raise error
+            with self.assertRaises(AssertionError):
+                controls.inaccessible_control([20], lambda pid: None, closed.append,
+                                              lambda: 5, wrong, report)
+        with self.assertRaises(AssertionError):
+            controls.inaccessible_control([20], lambda pid: None, closed.append,
+                                          lambda: 5, lambda pid: 'identity', report)
 
     def test_closure_measures_success_and_both_held_dead_paths(self):
         from types import SimpleNamespace

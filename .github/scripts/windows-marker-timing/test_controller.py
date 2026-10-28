@@ -23,6 +23,59 @@ class ControllerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 c.classify_red(code, records)
 
+    def test_green_requires_actual_source_identity_no_popen_and_complete_exit_zero(self):
+        sha = '9d19bbd5320e6dcdafa2b6fdd96c54401848e72c1e92ee5459ace3a18e972331'
+        receipt = dict(implementation='patched-source', helper_source_sha256=sha,
+                       helper_module='tests.scripts.desktop_update.test_desktop_update_windows_marker',
+                       helper_path='/portable/archived/' + c.HELPER)
+        data = [dict(event='no_shell_source', **receipt),
+                dict(event='no_shell_start', **receipt),
+                dict(event='no_shell_observed', identity='1700000000.001',
+                     subprocess_executables=[], **receipt),
+                dict(event='no_shell_complete', **receipt)]
+        self.assertTrue(c.classify_green(0, data))
+        self.assertTrue(c.classify_green(0, data, Path('/portable/archived')))
+        with self.assertRaises(RuntimeError):
+            c.classify_green(0, data, Path('/foreign/source'))
+        for code, records in [(1, data), (3, data), (0, data[:-1]),
+                              (0, [dict(r, helper_source_sha256='wrong') for r in data]),
+                              (0, [dict(r, implementation='candidate') for r in data]),
+                              (0, [dict(r, identity='') if r['event'] == 'no_shell_observed' else r for r in data]),
+                              (0, [dict(r, subprocess_executables=['python.exe'])
+                                   if r['event'] == 'no_shell_observed' else r for r in data])]:
+            with self.assertRaises(RuntimeError):
+                c.classify_green(code, records)
+
+    def test_archive_requires_exact_commit_and_preserves_real_git_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = Path(c.__file__).resolve().parents[3]
+            sha = c.git(repo, 'rev-parse', 'HEAD')
+            expected = subprocess.check_output(['git', 'show', sha + ':' + c.HELPER], cwd=repo)
+            c.archive_subject(repo, sha, root / 'archive')
+            self.assertEqual((root / 'archive' / c.HELPER).read_bytes(), expected)
+            for invalid in ('HEAD', sha[:39], sha + ';bad', 'UNBOUND_FINAL_SUBJECT'):
+                with self.assertRaises(RuntimeError):
+                    c.archive_subject(repo, invalid, root / 'bad')
+            with self.assertRaises(RuntimeError):
+                c.archive_subject(repo, sha, repo / 'nested')
+
+    def test_blocked_equality_does_not_truncate_actual_source_green(self):
+        from unittest.mock import patch
+        calls = []
+        def execute(command, repo, folder, env):
+            calls.append(folder.name)
+            return dict(outer_timeout=False, returncode=3 if folder.name == 'native-equality' else 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(c, 'execute', execute), patch.object(c, 'records', return_value=[]), \
+                 patch.object(c, 'classify_red', return_value=True), \
+                 patch.object(c, 'classify_green', return_value=True):
+                failures = c.run_native_diagnostics(root / 'original', root / 'green', root / 'out')
+            self.assertEqual(calls, ['native-red', 'native-equality', 'patched-source-green'])
+            self.assertEqual(len(failures), 1)
+            self.assertIn('native-equality', failures[0])
+
     def test_process_success_failure_and_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name, script, cap, code, timed_out in [

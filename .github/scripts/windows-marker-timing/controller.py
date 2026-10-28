@@ -14,6 +14,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 
@@ -192,6 +194,72 @@ def classify_red(code, data):
     return True
 
 
+def archive_subject(repo, subject, destination):
+    """Export immutable Git bytes locally; never use checkout files or upload source."""
+    require(re.fullmatch(r'[0-9a-f]{40}', subject or '') is not None,
+            '--green-subject must be a reviewed immutable lowercase 40-hex commit')
+    require(git(repo, 'rev-parse', subject + '^{commit}') == subject, 'Wrong GREEN commit')
+    destination = destination.resolve()
+    require(not destination.is_relative_to(repo.resolve()), 'Archive must be outside source checkout')
+    destination.mkdir(parents=True, exist_ok=False)
+    with tempfile.TemporaryFile() as archive:
+        subprocess.run(['git', 'archive', '--format=tar', subject], cwd=repo,
+                       stdout=archive, check=True, timeout=60)
+        archive.seek(0)
+        with tarfile.open(fileobj=archive) as source:
+            source.extractall(destination, filter='data')
+
+
+def classify_green(code, data, repo=None):
+    from native_no_shell import SOURCE_HASHES
+    require(code == 0, 'Actual patched-source GREEN failed')
+    expected = ('no_shell_source', 'no_shell_start', 'no_shell_observed', 'no_shell_complete')
+    selected = [r for r in data if r['event'] in expected]
+    require([r['event'] for r in selected] == list(expected), 'Incomplete/duplicate GREEN receipts')
+    for record in selected:
+        require(record.get('implementation') == 'patched-source' and
+                record.get('helper_source_sha256') == SOURCE_HASHES['patched-source'] and
+                record.get('helper_module') == 'tests.scripts.desktop_update.test_desktop_update_windows_marker' and
+                bool(record.get('helper_path')), 'Wrong actual GREEN source binding')
+    require(len({r['helper_path'] for r in selected}) == 1, 'GREEN source path changed')
+    if repo is not None:
+        require(Path(selected[0]['helper_path']).resolve() == (repo / HELPER).resolve(),
+                'GREEN receipt is not from the archived final subject')
+    observed = selected[2]
+    require(re.fullmatch(r'[1-9][0-9]*\.[0-9]{3}', observed.get('identity', '')) is not None and
+            observed.get('subprocess_executables') == [], 'GREEN requires returned identity and no Popen')
+    return True
+
+
+def run_native_diagnostics(repo, green_repo, out):
+    failures = []
+    for label, script, target, implementation in (
+        ('native-red', 'native_no_shell.py', repo, 'original'),
+        ('native-equality', 'native_controls.py', repo, None),
+        ('patched-source-green', 'native_no_shell.py', green_repo, 'patched-source'),
+    ):
+        folder = out / label
+        command = [sys.executable, str(HERE / script), '--repo', str(target), '--out', str(folder)]
+        if implementation:
+            command += ['--implementation', implementation]
+        try:
+            result = execute(command, target, folder, clean_env(folder / 'sandbox'))
+            require(not result['outer_timeout'], label + ' timed out')
+            data = records(folder)
+            if label == 'native-red':
+                classify_red(result['returncode'], data)
+            elif label == 'patched-source-green':
+                classify_green(result['returncode'], data, target)
+            else:
+                complete = [r for r in data if r['event'] == 'controls_complete']
+                require(result['returncode'] == 0 and len(complete) == 1 and
+                        complete[0].get('blocked_controls') == [],
+                        'Native comparison/control unavailable or failed; inspect raw JSONL/log')
+        except Exception as error:
+            failures.append(label + ': ' + str(error))
+    return failures  # Blocked/failed equality must not suppress final-source GREEN.
+
+
 def classify_timing(code, folder):
     require(code == 0, 'Canonical diagnostic failed')
     tree = ET.parse(folder / 'junit.xml').getroot()
@@ -226,6 +294,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path)
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--green-repo', type=Path)
+    parser.add_argument('--green-subject')
     parser.add_argument('--guard-only', action='store_true')
     parser.add_argument('--worker')
     args = parser.parse_args()
@@ -275,20 +345,28 @@ def main():
         save(timing / 'timing-summary.json', summarize(timing))
         require(not result['outer_timeout'], 'Original diagnostic timed out; retain partial timings')
         classify_timing(result['returncode'], timing)
-        for label, script in [('native-red', 'native_no_shell.py'), ('native-equality', 'native_controls.py')]:
-            folder = out / label
-            command = [sys.executable, str(HERE / script), '--repo', str(repo), '--out', str(folder)]
-            if label == 'native-red':
-                command += ['--implementation', 'original']
-            result = execute(command, repo, folder, clean_env(folder / 'sandbox'))
-            require(not result['outer_timeout'], label + ' timed out')
-            data = records(folder)
-            if label == 'native-red':
-                classify_red(result['returncode'], data)
-            else:
-                require(result['returncode'] == 0 and
-                        sum(r['event'] == 'controls_complete' for r in data) == 1,
-                        'Native comparison/control unavailable or failed; inspect raw JSONL/log')
+        require(args.green_repo is not None and args.green_subject is not None,
+                '--green-repo and reviewed --green-subject required for actual-source GREEN')
+        from native_no_shell import SOURCE_HASHES
+        # Full archived source is temporary, outside both checkouts and upload inventory.
+        with tempfile.TemporaryDirectory(prefix='marker-green-', dir=out.parent) as temporary:
+            green_repo = Path(temporary) / 'source'
+            require(not green_repo.is_relative_to(repo), 'GREEN archive must be outside original checkout')
+            archive_subject(args.green_repo.resolve(), args.green_subject, green_repo)
+            green_hash = digest(green_repo / HELPER)
+            require(green_hash == SOURCE_HASHES['patched-source'], 'Wrong final-subject actual helper bytes')
+            receipt = dict(subject=args.green_subject, helper_source_sha256=green_hash,
+                           helper_path=str(green_repo / HELPER), implementation='patched-source',
+                           status='prepared-not-yet-verified')
+            save(out / 'green-source.json', receipt)
+            failures = run_native_diagnostics(repo, green_repo, out)
+            receipt['after_sha256'] = digest(green_repo / HELPER)
+            require(receipt['after_sha256'] == green_hash, 'Archived GREEN helper bytes changed')
+            receipt['status'] = ('failed' if any(f.startswith('patched-source-green:') for f in failures)
+                                 else 'actual-source-green')
+            save(out / 'green-source.json', receipt)
+            summary['diagnostic_failures'] = failures
+            require(not failures, '; '.join(failures))
         summary['accepted'] = True
         return 0
     except Exception as error:
