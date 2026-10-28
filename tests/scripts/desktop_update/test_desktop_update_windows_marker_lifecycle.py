@@ -15,7 +15,7 @@ import pytest
 
 from tests.installation_launcher_fixture import publish_fixture_launcher
 from tests.scripts.desktop_update.test_desktop_update_windows_marker import (
-    CLI, MARKER, SCRIPT, _creation_time, _dead_pid, _result, _run, sleeper,
+    CLI, MARKER, SCRIPT, _creation_time, _dead_pid, _result, _run,
 )
 
 

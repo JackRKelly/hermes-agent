@@ -17,7 +17,7 @@ from tests.scripts.desktop_update.windows_handoff_support import (
     MARKER, MARKER_PS1, POWERSHELL, _creation_time, _finish, _script,
 )
 from tests.scripts.desktop_update.test_desktop_update_windows_handoff_lineage import (
-    _PASCAL, _RULE_HARNESS, sleeper,
+    _PASCAL, _RULE_HARNESS,
 )
 
 

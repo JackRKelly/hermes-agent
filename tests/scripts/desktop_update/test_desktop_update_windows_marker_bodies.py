@@ -12,7 +12,7 @@ import time
 import pytest
 
 from tests.scripts.desktop_update.test_desktop_update_windows_marker import (
-    MARKER, _BODIES, _creation_time, _run, sleeper,
+    MARKER, _BODIES, _creation_time, _run,
 )
 
 
