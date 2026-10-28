@@ -1,0 +1,77 @@
+name: Windows original marker timing diagnostic
+
+on:
+  push:
+    branches: [ci/windows-marker-timing-20261028]
+
+permissions:
+  contents: read
+
+# One x64 VM; this branch-only diagnostic is not the final native acceptance gate.
+concurrency:
+  group: windows-marker-timing-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  original-cim-kernel-diagnostic:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - name: Check out diagnostic revision
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Preserve self-contained diagnostics before subject checkout
+        shell: bash
+        run: |
+          cp -R .github/scripts/windows-marker-timing "$RUNNER_TEMP/windows-marker-timing"
+          printf 'HERMES_HOME=%s/windows-marker-timing-setup-home\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Check out immutable original acceptance subject
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: 2b682fffaa6c06fb700df0d32e21c0b4ac7370e6
+          persist-credentials: false
+          clean: true
+
+      - name: Prepare original locked test dependencies
+        id: pm
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: git,ripgrep
+          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
+          test-environment: 'true'
+          prune-python-cache: true
+          save-tools-cache: 'false'
+          save-python-cache: 'false'
+          save-node-cache: 'false'
+
+      - name: Original one-case attribution, real no-shell RED, isolated kernel comparison
+        shell: bash
+        env:
+          DIAGNOSTIC_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          "$DIAGNOSTIC_PYTHON" "$RUNNER_TEMP/windows-marker-timing/controller.py" \
+            --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/windows-marker-timing-evidence"
+
+      - name: Retain only same-run diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-marker-timing-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/windows-marker-timing-evidence/summary.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/source-before.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/source-after.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/host.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/harness.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/*/process.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/*/containment.json
+            ${{ runner.temp }}/windows-marker-timing-evidence/*/diagnostic.log
+            ${{ runner.temp }}/windows-marker-timing-evidence/*/junit.xml
+            ${{ runner.temp }}/windows-marker-timing-evidence/*/timing-*.jsonl
+            ${{ runner.temp }}/windows-marker-timing-evidence/*/timing-summary.json
