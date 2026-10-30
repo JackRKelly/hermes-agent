@@ -231,6 +231,35 @@ def classify_green(code, data, repo=None):
     return True
 
 
+def classify_owned_denial(code, data, green_repo):
+    """A detached candidate/blocked scan cannot satisfy actual-source denial."""
+    from native_no_shell import SOURCE_HASHES
+    complete = [r for r in data if r['event'] == 'controls_complete']
+    denied = [r for r in data if r['event'] == 'control_pass' and
+              r.get('control') == 'inaccessible-pid']
+    require(code == 0 and len(complete) == 1 and complete[0].get('blocked_controls') == [] and
+            len(denied) == 1 and not any(r['event'] == 'control_blocked' for r in data),
+            'Native comparison/control unavailable or failed; inspect raw JSONL/log')
+    record = denied[0]
+    require(record.get('fixture') == 'owned-child-current-thread-anonymous' and
+            record.get('helper_source_sha256') == SOURCE_HASHES['patched-source'] and
+            record.get('helper_module') == 'marker_owned_denial_source' and
+            record.get('helper_path') == record.get('failure_path') and
+            Path(record.get('helper_path', '')).resolve() == (green_repo / HELPER).resolve() and
+            record.get('failure_function') == '_creation_time' and
+            type(record.get('failure_line')) is int and record['failure_line'] > 0 and
+            record['failure_line'] == record.get('denied_raise_line'),
+            'Denied helper did not fail in the exact archived source OpenProcess branch')
+    require(record.get('native_winerror') == 5 and record.get('candidate_winerror') == 5 and
+            record.get('query_access') == 0x1000 and record.get('thread_token_before') == 1008 and
+            record.get('thread_token_after') == 1008 and record.get('recovered') is True and
+            type(record.get('owner_pid')) is int and record['owner_pid'] > 0 and
+            record.get('identity_before') == record.get('identity_after') and
+            re.fullmatch(r'[1-9][0-9]*\.[0-9]{3}', record.get('identity_before', '')) is not None,
+            'Missing native denial or recovered live owned-child identity')
+    return True
+
+
 def run_native_diagnostics(repo, green_repo, out):
     failures = []
     for label, script, target, implementation in (
@@ -242,6 +271,8 @@ def run_native_diagnostics(repo, green_repo, out):
         command = [sys.executable, str(HERE / script), '--repo', str(target), '--out', str(folder)]
         if implementation:
             command += ['--implementation', implementation]
+        else:
+            command += ['--denial-repo', str(green_repo)]
         try:
             result = execute(command, target, folder, clean_env(folder / 'sandbox'))
             require(not result['outer_timeout'], label + ' timed out')
@@ -251,10 +282,7 @@ def run_native_diagnostics(repo, green_repo, out):
             elif label == 'patched-source-green':
                 classify_green(result['returncode'], data, target)
             else:
-                complete = [r for r in data if r['event'] == 'controls_complete']
-                require(result['returncode'] == 0 and len(complete) == 1 and
-                        complete[0].get('blocked_controls') == [],
-                        'Native comparison/control unavailable or failed; inspect raw JSONL/log')
+                classify_owned_denial(result['returncode'], data, green_repo)
         except Exception as error:
             failures.append(label + ': ' + str(error))
     return failures  # Blocked/failed equality must not suppress final-source GREEN.

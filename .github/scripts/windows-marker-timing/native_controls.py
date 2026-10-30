@@ -56,6 +56,157 @@ def inaccessible_control(pids, open_process, close_handle, last_error, query, re
     return False
 
 
+class OwnedThreadAPI:
+    """Prebind real native APIs before restricting only this owned process's thread.
+
+    The explicit loader/error/exit seams support portable signature tests only.
+    Native main supplies ctypes.WinDLL/get_last_error and unbuffered os._exit.
+    """
+    def __init__(self, loader, last_error, failfast):
+        from ctypes import wintypes as w
+        k = loader('kernel32', use_last_error=True)
+        a = loader('advapi32', use_last_error=True)
+        for function, arguments, result in (
+            (k.GetCurrentThread, (), w.HANDLE),
+            (k.OpenProcess, (w.DWORD, w.BOOL, w.DWORD), w.HANDLE),
+            (k.CloseHandle, (w.HANDLE,), w.BOOL),
+            (a.OpenThreadToken, (w.HANDLE, w.DWORD, w.BOOL, ctypes.POINTER(w.HANDLE)), w.BOOL),
+            (a.ImpersonateAnonymousToken, (w.HANDLE,), w.BOOL),
+            (a.RevertToSelf, (), w.BOOL),
+        ):
+            function.argtypes, function.restype = arguments, result
+        self.thread = k.GetCurrentThread()
+        self.open_token = a.OpenThreadToken
+        self.anonymous = a.ImpersonateAnonymousToken
+        self.revert = a.RevertToSelf
+        self.open_process, self.close_handle = k.OpenProcess, k.CloseHandle
+        self.last_error, self.failfast = last_error, failfast
+        self.token = w.HANDLE()
+
+    def close(self, handle):
+        if not self.close_handle(handle):
+            raise ctypes.WinError(self.last_error())
+
+    def no_token(self):
+        if not self.open_token(self.thread, 0x0008, True, ctypes.byref(self.token)):
+            return self.last_error()  # ERROR_NO_TOKEN (1008) alone qualifies.
+        self.close(self.token)  # Do not clear or replace a preexisting token.
+        return 0
+
+    def enter(self):
+        if not self.anonymous(self.thread):
+            return False, self.last_error()
+        return True, 0
+
+    def probe(self, pid):
+        handle = self.open_process(0x1000, False, pid)
+        if not handle:
+            return False, self.last_error()  # Capture immediately, before any other API.
+        self.close(handle)
+        return True, 0
+
+
+def prepare_owned_source(repo):
+    """Load the immutable archived final module without replacing the CIM oracle.
+
+    Hash and AST inspection happen BEFORE impersonation; no transformed helper,
+    timing wrapper, monkeypatch or detached candidate is allowed for this control.
+    """
+    import ast
+    import hashlib
+    import importlib.util
+    from native_no_shell import require_source, source_receipt
+
+    path = repo.resolve() / 'tests/scripts/desktop_update/test_desktop_update_windows_marker.py'
+    raw = path.read_bytes()
+    require_source('patched-source', dict(helper_source_sha256=hashlib.sha256(raw).hexdigest()))
+    spec = importlib.util.spec_from_file_location('marker_owned_denial_source', path)
+    source = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(source)
+    receipt = source_receipt(source, repo)
+    require_source('patched-source', receipt)
+    function = next(node for node in ast.parse(raw).body
+                    if isinstance(node, ast.FunctionDef) and node.name == '_creation_time')
+    branches = [node for node in function.body if isinstance(node, ast.If) and
+                ast.unparse(node.test) == 'not handle']
+    assert len(branches) == 1 and len(branches[0].body) == 1, 'wrong failed OpenProcess branch'
+    failure = branches[0].body[0]
+    assert isinstance(failure, ast.Raise) and ast.unparse(failure.exc) == (
+        'ctypes.WinError(ctypes.get_last_error())'), 'wrong failed OpenProcess branch'
+    receipt['denied_raise_line'] = failure.lineno
+    return source._creation_time, failure.lineno, receipt
+
+
+def owned_denial_control(pid, query, denied_line, live, api, report, receipt):
+    """Owned-thread orchestration; injected APIs in portable tests are NOT evidence.
+
+    No reporting, child polling, source inspection or process/thread creation occurs
+    between enter and revert. The unwrapped, warmed actual source helper is queried.
+    """
+    assert api.no_token() == 1008, 'current thread already has a token'
+    assert live(), 'owned child exited before baseline'
+    identity = query(pid)
+    observed_error = None
+    pending = None
+    native_granted, native_error = False, None
+    entered, entry_error = False, None
+    try:
+        entered, entry_error = api.enter()
+        if entered:
+            native_granted, native_error = api.probe(pid)
+            if not native_granted and native_error == 5:
+                try:
+                    query(pid)
+                except OSError as error:
+                    observed_error = error
+    except BaseException as error:
+        pending = error  # Keep in memory; recover before propagating to any reporter.
+    finally:
+        try:
+            reverted = api.revert()
+        except BaseException:
+            reverted = False
+        if not reverted:
+            api.failfast(86)  # Native binding is os._exit: no flushing or cleanup.
+            os._exit(86)  # Defensive fallback if an invalid binding returns.
+    try:
+        recovered_token = api.no_token() == 1008
+    except BaseException:
+        recovered_token = False
+    if not recovered_token:
+        api.failfast(86)
+        os._exit(86)
+    assert live(), 'owned child exited during denial'
+    identity_after = query(pid)
+    assert identity_after == identity, 'owned child identity changed after revert'
+    assert live(), 'owned child exited during recovery'
+    if pending is not None:
+        raise pending
+    if not entered or native_granted or native_error != 5:
+        report('control_blocked', control='inaccessible-pid', owner_pid=pid,
+               fixture='owned-child-current-thread-anonymous', entry_winerror=entry_error,
+               native_granted=native_granted, native_winerror=native_error, recovered=True,
+               reason='Anonymous owned-child limited-query denial unavailable', **receipt)
+        return False
+    assert observed_error is not None, 'denied helper returned an identity'
+    assert getattr(observed_error, 'winerror', None) == 5, 'wrong denied helper error'
+    frame = observed_error.__traceback__
+    assert frame is not None, 'missing failed OpenProcess branch traceback'
+    while frame.tb_next is not None:
+        frame = frame.tb_next
+    assert (frame.tb_frame.f_code is query.__code__ and frame.tb_lineno == denied_line and
+            'handle' in frame.tb_frame.f_locals and not frame.tb_frame.f_locals['handle'] and
+            frame.tb_frame.f_locals.get('pid') == pid), 'not the actual failed OpenProcess branch'
+    report('control_pass', control='inaccessible-pid', owner_pid=pid,
+           fixture='owned-child-current-thread-anonymous', native_winerror=native_error,
+           candidate_winerror=getattr(observed_error, 'winerror', None), recovered=True,
+           identity_before=identity, identity_after=identity_after,
+           thread_token_before=1008, thread_token_after=1008, query_access=0x1000,
+           failure_path=frame.tb_frame.f_code.co_filename, failure_line=frame.tb_lineno,
+           failure_function=frame.tb_frame.f_code.co_name, **receipt)
+    return True
+
+
 def check_handle_closure(query, live_pid, identity, held_dead, handles, report):
     assert [code for _, code in held_dead] == [0, 259], 'both held-dead controls required'
     for child, code in held_dead:
@@ -83,6 +234,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--repo', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--denial-repo', type=Path)
     args = parser.parse_args()
     os.environ['MARKER_TIMING_DIR'] = str(args.out.resolve())
     if sys.flags.optimize or not __debug__:
@@ -138,13 +290,13 @@ def main():
         k32.OpenProcess.restype = wintypes.HANDLE
         k32.CloseHandle.argtypes = (wintypes.HANDLE,)
         k32.CloseHandle.restype = wintypes.BOOL
-        def close_control_handle(handle):
-            if not k32.CloseHandle(handle):
-                raise ctypes.WinError(ctypes.get_last_error())
-        import psutil
-        accessible_control = inaccessible_control(
-            sorted(psutil.pids()), lambda pid: k32.OpenProcess(0x1000, False, pid),
-            close_control_handle, ctypes.get_last_error, candidate, emit)
+        assert args.denial_repo is not None, 'archived final source required for owned denial'
+        denied_query, denied_line, denied_receipt = prepare_owned_source(args.denial_repo)
+        owned_api = OwnedThreadAPI(ctypes.WinDLL, ctypes.get_last_error, os._exit)
+        owned_child = children[0]  # Retained live Popen HANDLE; never a foreign PID.
+        accessible_control = owned_denial_control(
+            owned_child.pid, denied_query, denied_line, lambda: owned_child.poll() is None,
+            owned_api, emit, denied_receipt)
         k32.GetCurrentProcess.restype = wintypes.HANDLE
         k32.GetProcessHandleCount.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
         k32.GetProcessHandleCount.restype = wintypes.BOOL

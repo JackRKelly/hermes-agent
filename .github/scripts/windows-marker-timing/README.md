@@ -57,24 +57,59 @@ total envelope (270 work + 30 owned-tree cleanup); no full-suite budget changes.
    Popen launches**, correct archived path and exit 0. Detached helper equality
    cannot qualify as actual-source GREEN.
 
-### Access-denied precondition, not a waived negative contract
+### Owned-thread access-denied precondition, not a waived negative contract
 
-`psutil.pids()` enumerates actual native PIDs. The control requests only
-`PROCESS_QUERY_LIMITED_INFORMATION` (0x1000), closes every granted HANDLE, and
-captures GetLastError immediately for each failed OpenProcess. PID 0 is not a
-valid denied-process precondition. A readable PID 4 emits `control_info`, never a
-pass. The scan continues until a real enumerated PID actually denies access with
-WinError 5. The unchanged candidate must then raise WinError 5 and return no
-identity. The pass receipt records selected PID, native error and candidate error.
-Other native errors or an empty scan cannot count as success.
+The denied precondition no longer depends on a protected/foreign process being
+unreadable on a particular runner. The controller passes the **already-created
+pinned final source archive** into native equality with `--denial-repo`. Only this
+negative diagnostic uses its actual unwrapped `_creation_time`; the original CIM
+oracle, detached-candidate equality and all other controls are unchanged. The
+archived module is imported under `marker_owned_denial_source` without replacing
+the original oracle's module. Its path, function/code origin and exact approved
+hash are checked before use; no source is rewritten or AST-transformed.
 
-The scan never kills or changes foreign processes and never changes privileges,
-permissions, tokens or UAC. No fake native API is used. If no real denied process
-exists, `control_blocked` and `blocked_controls` remain, handle measurements still
-run, and `native_controls.py` returns 3. The controller still collects patched
-GREEN, retains all raw evidence and returns nonzero overall. GREEN never erases a
-blocked equality/control result. The remaining native diagnostics also continue
-after a RED/equality failure, with individual failures accumulated.
+The fixture retains an existing owned sleeping child's real Popen HANDLE. Before
+impersonation it loads all modules, inspects the exact failed-OpenProcess raise
+line, prebinds pointer-correct kernel32/advapi32 APIs with `use_last_error=True`,
+requires `OpenThreadToken` to fail with **ERROR_NO_TOKEN (1008)**, verifies the child
+is live and obtains its baseline identity from the actual source helper. It never
+replaces an existing thread token. It calls
+`ImpersonateAnonymousToken(GetCurrentThread())` on the diagnostic process's own
+current thread, then independently calls `OpenProcess(0x1000, False, owned_pid)`.
+Only a real NULL HANDLE with immediately captured WinError **5** qualifies. The
+same actual source helper must then raise WinError 5, returning no identity.
+
+No reports, file/console I/O, child polling, subprocesses or thread creation occur
+in the restricted orchestration interval; only the warmed, unchanged helper and
+prebound native calls run. The timing wrapper is deliberately not used here.
+`RevertToSelf` is mandatory in `finally`, including entry/helper/native failures.
+A failed/throwing revert immediately terminates the **owned diagnostic process**
+via `os._exit(86)`, without flushing, reporting or ordinary cleanup. Failure to
+verify ERROR_NO_TOKEN after a successful revert also failfast-terminates before
+postfailure I/O. The controller's unchanged job containment cleans descendants.
+
+After restoring and verifying ERROR_NO_TOKEN, the child must still be live with
+the same actual-source identity. Only then is the exception inspected: its
+innermost traceback must be the exact actual helper's failed-OpenProcess raise,
+with a false `handle` local and the same owned PID. Loader errors, errors from
+GetProcessTimes/other branches, wrong WinErrors, early child exit, identity drift
+and unexpected helper success cannot pass. A pass receipt binds source hash,
+module/path, raise location, limited-query mask, native/helper errors, pre/post
+token errors and matching baseline/recovered identity. The controller requires
+that exact source-bound receipt, one nonblocked completion and exit zero.
+
+Anonymous denial is **not guaranteed**. Failed entry, a granted query HANDLE
+(which is closed), or any native error other than 5 yields `control_blocked`
+**only after recovery**, never a pass. The 192-query handle measurement still
+runs and the diagnostic returns 3. Actual final-source GREEN still runs afterward,
+and never erases a blocked/failed control. A preexisting token or recovery failure
+is a hard failure, not an accepted skip. The legacy portable scan classifier is
+retained for regression coverage but is no longer called by native main.
+
+No process DACLs, foreign-process permissions, host permissions, privileges,
+registry settings, credentials or elevation are changed. The only new security
+context is this temporary anonymous **owned current-thread** context in the
+isolated diagnostic process. Portable injected API fixtures are not native proof.
 
 ## Preserved instrumentation, isolation and containment
 
@@ -129,6 +164,7 @@ passes source guards before/after and `--guard-only`. Wrong-subject rejection is
 also exercised without changing original tracked files.
 
 Follow-up evidence, RED/GREEN logs, source receipts, report and review hash manifest:
-`$LOCAL_EVIDENCE_ROOT/ci-windows-denied-control-followup/`.
-Native denied-process availability, actual Windows final-source GREEN and job
-cleanup remain unexecuted here. No full seven-case/60-case/ARM64 pass is claimed.
+`$LOCAL_EVIDENCE_ROOT/ci-windows-owned-denial-followup/`.
+Anonymous owned-thread denial and recovery on real Windows remain unexecuted
+here. Existing native full-suite/source-GREEN evidence is not replaced by these
+portable tests. No new native, seven-case/60-case/ARM64 pass is claimed.
