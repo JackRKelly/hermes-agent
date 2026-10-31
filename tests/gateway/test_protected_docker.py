@@ -33,13 +33,13 @@ def test_owner_home_probe_preserves_stat_metadata(monkeypatch, exists_semantics,
     exec(_OWNER_HOME_PROBE, namespace)
     actual_stat, actual_exists = Path.stat, Path.exists
     def fixture_stat(path, *args, **kwargs):
-        if str(path) != '/root/.hermes':
+        if path != Path('/root/.hermes'):
             return actual_stat(path, *args, **kwargs)
         if stat_result is not None:
             raise stat_result
         return os.stat_result((0,) * 10)
     def fixture_exists(path, *args, **kwargs):
-        if str(path) != '/root/.hermes':
+        if path != Path('/root/.hermes'):
             return actual_exists(path, *args, **kwargs)
         if isinstance(stat_result, PermissionError):
             if exists_semantics == 'raises-permission':
@@ -197,6 +197,21 @@ def test_real_docker_reviewer_and_hostile_native_tools(tmp_path, docker_runtime)
         container.create({'allowed.txt': b'REVIEW_ORIGINAL\n'})
         original = container.inspect()
         assert original['Mounts'] == []
+        # Supervisor-only cap-less root image inspection, while the newly
+        # started bridge is alive. Never read host credentials or infer image
+        # absence from nonroot inaccessibility. All tool execs stay nonroot.
+        image_probe = '''import json,pathlib
+paths=['/root/.hermes','/root/.docker','/root/.aws','/root/.ssh','/root/.config','/home/guest/.hermes','/home/guest/.docker','/home/guest/.config']
+r={}
+for name in paths:
+ try: pathlib.Path(name).lstat()
+ except FileNotFoundError: r[name]='absent'
+ else: r[name]='present'
+print(json.dumps(r))
+'''
+        image_paths = json.loads(runtime.run(['exec', '--user', '0:0', container.cid,
+            'python', '-I', '-S', '-B', '-c', image_probe])[1])
+        assert image_paths and set(image_paths.values()) == {'absent'}
         import copy
         actual_inspect = container.inspect
         for field, bad in {'ReadonlyRootfs': False, 'CapDrop': [], 'Privileged': True,
@@ -246,6 +261,7 @@ r['caps_empty']=s['CapEff'].strip()=='0000000000000000' and s['CapBnd'].strip()=
 r['no_new_privs']=s['NoNewPrivs'].strip()=='1'
 r['seccomp']=s['Seccomp'].strip()=='2'
 r['no_docker_socket']=not pathlib.Path('/var/run/docker.sock').exists() and not pathlib.Path('/run/docker.sock').exists()
+r['guest_python']=sys.version
 r['owner_home_status']=owner_home_status()
 r['owner_home_denied']=r['owner_home_status'] in ('absent','inaccessible')
 r['no_docker_cli']=subprocess.run(['/bin/bash','-c','command -v docker'],stdout=subprocess.DEVNULL).returncode!=0
@@ -263,22 +279,10 @@ print(json.dumps(r))
         _code, wire = runtime.run(['exec', '--user', '65532:65532', container.cid,
             'python', '-I', '-S', '-B', '-c', script], limit=8192)
         checks = json.loads(wire)
+        guest_python = checks.pop('guest_python')
+        assert isinstance(guest_python, str) and guest_python
         owner_home_status = checks.pop('owner_home_status')
         assert owner_home_status in ('absent', 'inaccessible')
-        # Independently prove guest image absence as root, without reading any
-        # host credentials or treating nonroot inaccessibility as file absence.
-        image_probe = '''import json,pathlib
-paths=['/root/.hermes','/root/.docker','/root/.aws','/root/.ssh','/root/.config','/home/guest/.hermes','/home/guest/.docker','/home/guest/.config']
-r={}
-for name in paths:
- try: pathlib.Path(name).stat()
- except FileNotFoundError: r[name]='absent'
- else: r[name]='present'
-print(json.dumps(r))
-'''
-        image_paths = json.loads(runtime.run(['exec', '--user', '0:0', container.cid,
-            'python', '-I', '-S', '-B', '-c', image_probe])[1])
-        assert image_paths and set(image_paths.values()) == {'absent'}
         assert not any(any(name in key.upper() for name in ('TOKEN', 'SECRET', 'API_KEY', 'AUTH', 'PROXY', 'HERMES_HOME', 'SSH'))
             for key in (entry.split('=', 1)[0] for entry in original['Config']['Env']))
         # Actual guest read request of the nonsecret owner fixture, not just an
@@ -294,7 +298,8 @@ print(json.dumps(status))
             'python', '-I', '-S', '-B', '-c', read_probe])[1])
         assert owner_read_status in ('absent', 'inaccessible')
         runtime.record('denied-path-' + container.name, dict(owner_home_status=owner_home_status,
-            owner_fixture_read_status=owner_read_status, image_paths=image_paths))
+            owner_fixture_read_status=owner_read_status, image_paths=image_paths,
+            image_probe_uid=0, guest_python=guest_python))
         checks['host_sentinel_absent'] = runtime.run(['exec', '--user', '65532:65532', container.cid,
             '/bin/bash', '-c', 'test ! -e "$1"', 'probe', str(sentinel)], missing=True)[0] == 0
         checks['host_pid_absent'] = runtime.run(['exec', '--user', '65532:65532', container.cid,
