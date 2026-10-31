@@ -81,6 +81,7 @@ class ProtectedTurn:
             'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}} for name in TOOL_NAMES)
         self.calls = 0
         self._call_ids = set()
+        self._observation = 0
 
     def _check(self):
         if self.proxy.worker.stop.is_set() or time.monotonic() >= self.deadline:
@@ -89,7 +90,11 @@ class ProtectedTurn:
 
     def _append(self, rows):
         self._check()
-        self.lifecycle.request('append', {'messages': bounded_copy(rows)})
+        payload = {'messages': bounded_copy(rows)}
+        if self.lifecycle.binding.get('owner_observations_v1') is True:
+            self._observation += 1
+            payload['observation'] = self._observation
+        self.lifecycle.request('append', payload)
 
     def dispatch(self, assistant, messages):
         """Shared by the real AIAgent batch entry; never inline/registry fallback."""

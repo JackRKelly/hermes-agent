@@ -190,9 +190,13 @@ class NativeLifecycle(_Endpoint):
         self._check()
         if operation == 'check' and payload == {}:
             return None
-        if operation != 'append' or type(payload) is not dict or set(payload) != {'messages'}:
+        evidence = getattr(self, '_observations', None)
+        if operation == 'append' and evidence is not None:
+            rows = evidence.authorize_append(payload)
+        elif operation == 'append' and type(payload) is dict and set(payload) == {'messages'} and evidence is None:
+            rows = payload['messages']  # legacy synchronous routing fixtures only
+        else:
             raise RuntimeStoreError('protected_capability_denied')
-        rows = payload['messages']
         if (type(rows) is not list or not 1 <= len(rows) <= 8 or any(type(row) is not dict or
                 set(row) - {'role', 'content', 'tool_calls', 'tool_call_id', 'tool_name'} or
                 row.get('role') not in ('user', 'assistant', 'tool') for row in rows)):
@@ -202,6 +206,8 @@ class NativeLifecycle(_Endpoint):
         scope = self._scope
         result = mutate_worker_execution(self._authority.db, epoch=scope['epoch'],
             execution_id=scope['execution_id'], session_id=scope['session_id'], generation=scope['generation'],
-            sequence=self._native_sequence, operation='transcript.append', payload=payload)
+            sequence=self._native_sequence, operation='transcript.append', payload={'messages': rows})
+        if evidence is not None:
+            evidence.commit_append(payload)
         self._check()
         return result

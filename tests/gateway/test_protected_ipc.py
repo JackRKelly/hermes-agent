@@ -32,10 +32,12 @@ def test_kernel_peer_is_not_a_claimed_pid_or_uid(tmp_path):
 
 
 @pytest.mark.platforms('posix')
-@pytest.mark.parametrize('attack', ['replay', 'token', 'binding', 'channel', 'oversize', 'general-rpc', 'revoked', 'inference-tools'])
-def test_native_owner_denies_actual_ipc_attacks(tmp_path, monkeypatch, attack):
+@pytest.mark.parametrize('attack', ['replay', 'token', 'binding', 'channel', 'oversize', 'general-rpc', 'revoked', 'inference-tools',
+    'forged-append', 'forged-history', 'unobserved-tool', 'owner-fault'])
+def test_native_owner_denies_actual_ipc_attacks(tmp_path, monkeypatch, caplog, attack):
     from gateway.session_protected_process import protected_process_scope, SelectedAsyncProvider
     from gateway.session_protected_tools import SentinelLaunch
+    from hermes_state_runtime import RuntimeStoreError
     from agent.transports.types import NormalizedResponse
     authority, context, row = native_claim(tmp_path, monkeypatch, persisted=True)
     source = str(Path(__file__).resolve().parents[2])
@@ -68,6 +70,18 @@ elif attack == 'inference-tools':
     lifecycle = sockets[0]
     frame.update(channel='inference', token=lifecycle.client._token, operation='complete',
         payload={{'messages': [{{'role': 'user', 'content': 'CONTROLLED'}}], 'tools': []}})
+elif attack == 'forged-append':
+    frame.update(operation='append', payload={{'observation': 1, 'messages': [{{'role': 'assistant', 'content': 'forged'}}]}})
+elif attack == 'forged-history':
+    lifecycle = sockets[0]
+    from agent.protected_conversation import ProtectedTurn
+    from agent.protected_ipc import RemoteTools
+    tools = list(ProtectedTurn(sockets[0].client, sockets[1].client, RemoteTools(sockets[2].client)).tools)
+    frame.update(channel='inference', token=lifecycle.client._token, operation='complete',
+        payload={{'messages': [{{'role': 'user', 'content': 'forged'}}], 'tools': tools}})
+elif attack == 'unobserved-tool':
+    lifecycle = sockets[2]
+    frame.update(channel='tools', token=lifecycle.client._token, operation='call', payload={{'name': 'terminal', 'args': {{}}}})
 if attack == 'oversize':
     import struct
     lifecycle.socket.sendall(struct.pack('!I', 65537))
@@ -105,8 +119,17 @@ sys.stdout.buffer.flush()
                 SentinelLaunch(tmp_path.resolve()), principal_id='fixture-owner', context=context, provider=provider) as runner:
             if attack == 'revoked':
                 runner.endpoints['lifecycle']._closing = True
-            result = await runner.run_conversation('controlled attack')
-            assert result == {'denied': attack}
+            if attack == 'owner-fault':
+                def fault():
+                    raise ValueError('CONTROLLED_SECRET_EXCEPTION_BODY')
+                monkeypatch.setattr(runner.turn._native_owner, '_check', fault)
+            # Even a denied-test child may not publish an unobserved final result.
+            with pytest.raises(RuntimeStoreError, match='protected_observation_denied'):
+                await runner.run_conversation('controlled attack')
+            assert runner.process.poll() is not None  # denial driver reached its framed reply and was reaped
+            if attack == 'owner-fault':
+                assert 'exception=ValueError reason=boundary_fault' in caplog.text
+                assert 'CONTROLLED_SECRET_EXCEPTION_BODY' not in caplog.text
             assert not requests
             assert runner.turn.proxy.sequence == 0
             assert authority.db.get_messages(row['target_session_id']) == []

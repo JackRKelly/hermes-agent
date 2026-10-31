@@ -53,6 +53,17 @@ one actual path, rather than two disconnected routing/import fixtures:
    every inference and tool. Policy is re-read and digest-checked. There is no
    worker registration/adoption, card completion, lease renewal, session targeting
    or arbitrary owner RPC on these channels.
+8. The fresh process's owner-private `OwnerObservations` ledger is the transcript
+   source of truth: the owner seeds the exact prompt, accepts only its committed
+   history and fixed tool schema for inference, records the actual normalized
+   provider response, and authorizes only that response's next ordered tool call.
+   Observed tool results are bound to that exact call ID/name. Lifecycle append
+   must supply the next observation correlation and byte-equivalent JSON rows;
+   forged/replayed/out-of-order or unobserved rows refuse before native mutation.
+   The owner constructs the final result from committed evidence, not child stdout.
+   A capability token authenticates a channel, never the truth of child claims.
+   Legacy in-process fixtures below retain their explicitly trusted content path;
+   they must not be used as an untrusted-child boundary.
 
 The existing real public `AIAgent.run_conversation`, outer/inner loop and batch
 interceptions are retained as compatibility/routing controls. They bypass normal
@@ -68,11 +79,23 @@ native Stop revokes endpoints before cancelling/draining the actual call and
 closing the selected client, shuts down IPC, terminates/reaps the fresh child,
 and retires/reaps the native tool worker. The stdout reader is owned/drained,
 server threads are joined, and concurrent eager/scope close shares one close
-operation. Provider close errors remain visible while child cleanup still runs.
+operation. Close waits for an in-flight acquisition, including a late unpublished
+Popen handle, before reaping. Running after close cannot acquire anything. Cleanup
+attempts every resource even after a fault, retains exact failed handles, and
+retries only unfinished resources through `retry_protected_process_closes`.
+The fresh child is signalled through its owned process group, not PID alone.
+Provider close errors remain visible while child cleanup still runs.
 Provider ownership includes failed preflight/acquisition, not just a yielded
 scope. A provider implementation must actually support async cancellation and
 client closure; this source fixture does not establish that contract for every
-SDK or an uncooperative arbitrary coroutine.
+SDK or an uncooperative arbitrary coroutine. Provider revocation wakes IPC future
+waiters immediately; owned children/IPC are reaped before a bounded one-second SDK
+close/drain. An uncooperative task remains retained for explicit owner retry and
+raises `provider_close_timeout`; it cannot block native retirement. A teardown
+fault (including that bounded timeout) takes precedence over `CancelledError`;
+a successful teardown propagates cancellation. This priority reports failed
+cleanup rather than silently claiming it completed. No caller-cancel retry can
+turn the provider-drain bound into an unbounded gather.
 
 `SentinelWorker.close` is serialized and idempotent across threads; a stop-request
 flag is not mistaken for completed pipe teardown/reap. The native registry entry
@@ -164,12 +187,20 @@ HERMES_TEST_FILE_RETRIES=0 HERMES_TEST_FILE_TIMEOUT=120 scripts/run_tests.sh -j 
 ```
 
 The fresh-process full-path tests are explicitly controlled **NO-REAL-PROVIDER**
-fixtures, including the existing transport/SDK-response control. Actual channel
-negatives cover kernel peer mismatch, cross-channel token/binding substitution,
-replay, oversize, revocation, generic RPC and substituted inference tool schemas.
+fixtures, including the existing transport/SDK-response control. A real-listener
+helper test rejects deliberately mismatched expected PID/UID; it is NOT a
+non-child process presenting a valid channel token. Actual channel negatives
+cover cross-channel token/binding substitution,
+replay, oversize, revocation, generic RPC, substituted inference tool schemas,
+forged history/append, unobserved tools and type-only owner fault diagnostics.
+No Linux SO_PEERCRED execution is claimed without separate Linux evidence. The
+macOS LOCAL_PEERPID check is not fd-transfer-resistant audit-token attestation.
 They are not credential, SDK-network-success or privileged containment evidence.
 
-Broad agent/gateway regressions must be bound to the final immutable head. A
+Regressions for all existing named roots (`tests/agent`, `tests/gateway`,
+`tests/tools`, `tests/cron`) must be bound to the final immutable head. The
+reviewer's named `tests/run_agent/` root does not exist in this checkout; the real
+facade suite is `tests/agent/test_run_agent*.py` and is included by `tests/agent`. A
 failed broad run is not a pass: missing optional dependencies, real baseline
 failures and introduced failures must be classified with actual reruns/baseline
 witnesses, not exclusions or changed assertions. Focused passes are not the full

@@ -11,6 +11,7 @@ from dataclasses import asdict
 import hmac
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import socket
@@ -18,65 +19,15 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from agent.protected_ipc import current_uid, encode, receive, verify_peer
 from agent.transports.types import NormalizedResponse
 from gateway.session_protected_capabilities import _Endpoint
+from gateway.session_protected_provider import SelectedAsyncProvider
+from gateway.session_protected_observations import OwnerObservations
 from gateway.session_protected_scope import _drain_owned, protected_turn_scope
 from hermes_state_runtime import RuntimeStoreError
-
-
-class SelectedAsyncProvider:
-    """Pinned owner adapter for an async SDK create method and ProviderTransport.
-
-    Example shape: transport=ChatCompletionsTransport(...),
-    create=explicit_client.chat.completions.create, aclose=explicit_client.close.
-    Construction/authentication is an owner responsibility, outside this API.
-    Async cancellation must be supported by the selected SDK; no to_thread call.
-    """
-    def __init__(self, *, model, provider_id, transport, create, aclose):
-        if (type(model) is not str or not model or type(provider_id) is not str or not provider_id
-                or not callable(create) or not callable(aclose)):
-            raise ValueError('explicit selected async provider required')
-        self.model, self.provider_id, self.transport = model, provider_id, transport
-        self._create, self._aclose = create, aclose
-        self._tasks = set()
-        self._closed = False
-        self._close_task = None
-
-    async def complete(self, messages, tools):
-        if self._closed:
-            raise RuntimeError('protected provider closed')
-        task = asyncio.current_task()
-        self._tasks.add(task)
-        try:
-            kwargs = self.transport.build_kwargs(self.model, messages, tools)
-            response = await self._create(**kwargs)
-            if self._closed:
-                raise RuntimeError('protected provider closed')
-            result = self.transport.normalize_response(response)
-            if type(result) is not NormalizedResponse:
-                raise ValueError('provider did not normalize response')
-            return result
-        finally:
-            self._tasks.discard(task)
-
-    async def _finish_close(self):
-        self._closed = True
-        tasks = tuple(self._tasks)
-        for task in tasks:
-            task.cancel()
-        try:
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-        finally:
-            await self._aclose()
-
-    async def close(self):
-        # One close operation, shielded from eager/scope concurrent cancellation.
-        if self._close_task is None:
-            self._close_task = asyncio.create_task(self._finish_close())
-        await asyncio.shield(self._close_task)
 
 
 class _Tools(_Endpoint):
@@ -91,10 +42,13 @@ class _Tools(_Endpoint):
         if self.turn.proxy.worker.stop.is_set():
             raise RuntimeStoreError('protected_capability_denied')
         self.turn._native_owner._check()
+        evidence = self.turn._native_owner._observations
+        call_id = evidence.before_tool(payload['name'], payload['args'])
         result = self.turn.proxy.invoke(payload['name'], payload['args'])
         self.turn._native_owner._check()
         if self.turn.proxy.worker.stop.is_set():
             raise RuntimeStoreError('protected_capability_denied')
+        evidence.observe_tool(call_id, result)
         return result
 
 
@@ -107,15 +61,36 @@ class ProtectedProcess:
         self._sockets_lock = threading.Lock()
         self._read_task = None
         self._close_task = None
+        self._start_task = None
         self._used = False
+        self._cleaned = set()
+        turn._native_owner._observations = OwnerObservations(list(turn.tools))
         self.imports = []
         self._directory = None
         self.listener = None
         self.endpoints = {'inference': turn._inference_endpoint,
                           'lifecycle': turn._native_owner, 'tools': _Tools(turn)}
 
+    def _receive(self, conn):
+        # BSD timed socket reads need not wake on another thread's close/shutdown.
+        # Poll revocation without resetting the existing five-second frame bound,
+        # including partial frames; receive() retains its accumulated bytes.
+        deadline = time.monotonic() + 5
+        conn.settimeout(.1)
+        def read(size):
+            while not self._closed.is_set():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('protected channel frame deadline')
+                try:
+                    return conn.recv(size)
+                except TimeoutError:
+                    continue
+            raise EOFError('protected channel revoked')
+        return receive(read)
+
     def _serve(self):
         conn = None
+        channel = 'unclaimed'
         try:
             for _ in range(50):
                 if self._closed.is_set():
@@ -133,7 +108,7 @@ class ProtectedProcess:
                 return
             conn.settimeout(5)
             verify_peer(conn, pid=self.process.pid, uid=current_uid())
-            hello = receive(conn.recv)
+            hello = self._receive(conn)
             if type(hello) is not dict or set(hello) != {'channel', 'token'} or type(hello['channel']) is not str:
                 raise RuntimeStoreError('protected_capability_denied')
             endpoint = self.endpoints.get(hello['channel'])
@@ -145,19 +120,23 @@ class ProtectedProcess:
                 if hello['channel'] in self._claimed:
                     raise RuntimeStoreError('protected_capability_denied')
                 self._claimed.add(hello['channel'])
+                channel = endpoint.channel
             for _ in range(64):
                 if self._closed.is_set():
                     return
-                frame = receive(conn.recv)
+                frame = self._receive(conn)
                 value = endpoint.request(frame)
                 if type(value) is NormalizedResponse:
                     value = asdict(value)
                 if self._closed.is_set():
                     return
+                conn.settimeout(5)
                 conn.sendall(encode({'ok': True, 'value': value}))
-        except (Exception, asyncio.CancelledError):  # health: allow BLE001 -- sanitize arbitrary selected SDK errors at the bounded wire boundary; never log secrets
-            # Invalid peer/capability/provider failure closes this endpoint. Never
-            # serialize provider exception bodies, credentials or traceback text.
+        except (Exception, asyncio.CancelledError) as error:  # health: allow BLE001 -- sanitize peer/auth, store, SDK and programming faults at the wire boundary
+            # Type-only owner diagnostic; no exception message, traceback, token,
+            # unauthenticated channel label, request content or credential.
+            logging.getLogger(__name__).warning('protected_endpoint_denied channel=%s exception=%s reason=boundary_fault',
+                channel, type(error).__name__)
             if conn is not None:
                 with suppress(OSError):
                     conn.sendall(encode({'ok': False, 'value': None}))
@@ -166,6 +145,15 @@ class ProtectedProcess:
                 conn.close()
 
     async def _start(self, prompt):
+        if self._closed.is_set():
+            raise RuntimeError('protected conversation closed')
+        if self._start_task is None:
+            self._start_task = asyncio.create_task(self._acquire(prompt))
+        await asyncio.shield(self._start_task)
+        if self._closed.is_set():
+            raise RuntimeError('protected conversation closed')
+
+    async def _acquire(self, prompt):
         self._directory = tempfile.TemporaryDirectory(prefix='pc-')
         path = str(Path(self._directory.name) / 's')
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -175,12 +163,16 @@ class ProtectedProcess:
         self.listener.bind(path)
         self.listener.listen(3)
         source = (await asyncio.to_thread(Path(__file__).resolve)).parents[1]
+        if self._closed.is_set():
+            return
         from gateway.session_worker_spawn import acquire_process
         self.process = await acquire_process(subprocess.Popen,
             [sys.executable, '-I', '-S', '-B', str(source / 'hermes_protected_entry.py')],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env={'LANG': 'C', 'LC_ALL': 'C'}, cwd=self.turn.proxy.launch.workspace,
             close_fds=True, start_new_session=True, bufsize=0)
+        if self._closed.is_set():
+            return
         self._claimed = set()
         for name in self.endpoints:
             from agent.memory_provider import spawn_context_thread
@@ -194,11 +186,14 @@ class ProtectedProcess:
         self.process.stdin.close()
 
     async def run_conversation(self, prompt):
+        if self._closed.is_set():
+            raise RuntimeError('protected conversation closed')
         if self._used:
             raise RuntimeError('protected conversation is single use')
         self._used = True
         if type(prompt) is not str or not prompt or len(prompt.encode()) > 4096:
             raise ValueError('invalid protected prompt')
+        self.turn._native_owner._observations.start(prompt)
         stopper = asyncio.create_task(self.turn.proxy.worker.stop.wait())
         try:
             await self._start(prompt)
@@ -213,7 +208,10 @@ class ProtectedProcess:
             if type(reply) is not dict or set(reply) != {'result', 'imports'}:
                 raise RuntimeError('protected conversation failed')
             self.imports = reply['imports']
-            return reply['result']
+            result = self.turn._native_owner._observations.result()
+            if reply['result'] != result:
+                raise RuntimeStoreError('protected_observation_denied')
+            return result
         except BaseException:
             cancellations = []
             await _drain_owned(asyncio.create_task(self.close()), cancellations)
@@ -225,51 +223,118 @@ class ProtectedProcess:
             with suppress(asyncio.CancelledError):
                 await stopper
 
+    def _reap_process(self):
+        from gateway.session_managed_worker import ManagedWorker
+        control = ManagedWorker(self.process)
+        if self.process.poll() is None:
+            control._signal_group(kill=False)
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            control._signal_group(kill=True)
+            self.process.wait(timeout=2)
+        if self.process.poll() is None:
+            raise RuntimeError('protected child not reaped')
+
     def _reap(self):
-        if self.listener is not None:
-            self.listener.close()
-        with self._sockets_lock:
-            for conn in self.connections:
-                with suppress(OSError):
-                    conn.shutdown(socket.SHUT_RDWR)
-                conn.close()
-        if self.process is not None:
-            if self.process.poll() is None:
-                self.process.terminate()
+        errors = []
+        def attempt(key, action):
+            if key in self._cleaned:
+                return
             try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=2)
+                action()
+                self._cleaned.add(key)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                errors.append(error)
+        if self.listener is not None:
+            attempt('listener', self.listener.close)
+        with self._sockets_lock:
+            connections = tuple(self.connections)
+        for conn in connections:
+            with suppress(OSError):
+                conn.shutdown(socket.SHUT_RDWR)
+            attempt(('socket', id(conn)), conn.close)
+        if self.process is not None:
+            attempt('process', self._reap_process)
         for thread in self.threads:
             if thread.ident is not None:
-                thread.join(timeout=6)
+                attempt(('thread', id(thread)), lambda: self._join_thread(thread))
             if thread.is_alive():
-                raise RuntimeError('protected IPC thread did not exit')
+                errors.append(RuntimeError('protected IPC thread did not exit'))
         if self.process is not None:
-            self.process.stdin.close()
-            self.process.stdout.close()
+            attempt('stdin', self.process.stdin.close)
+            attempt('stdout', self.process.stdout.close)
         if self._directory is not None:
-            self._directory.cleanup()
+            attempt('directory', self._directory.cleanup)
+        if errors:
+            raise errors[0]
 
-    async def _finish_close(self):
-        self._closed.set()
+    @staticmethod
+    def _join_thread(thread):
+        thread.join(timeout=6)
+        if thread.is_alive():
+            raise RuntimeError('protected IPC thread did not exit')
+
+    async def _finish_close(self, retry_provider):
+        errors = []
         self.turn.proxy.worker.stop.set()
-        # Revoke before cancellation; no late response can start a tool.
         for endpoint in self.endpoints.values():
             endpoint._closing = True
+        self.provider.begin_close()
+        # An acquisition already in progress owns its late Popen handle until
+        # assigned here. Never finish close while it can still produce a child.
+        if self._start_task is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await asyncio.shield(self._start_task)
         try:
-            await self.provider.close()
-        finally:
             await asyncio.to_thread(self._reap)
-            if self._read_task is not None:
-                with suppress(Exception):
-                    await asyncio.shield(self._read_task)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            errors.append(error)
+        if self._read_task is not None:
+            done, _ = await asyncio.wait({self._read_task}, timeout=.5)
+            if self._read_task not in done:
+                errors.append(RuntimeError('protected pipe read still pending'))
+            else:
+                with suppress(Exception, asyncio.CancelledError):
+                    self._read_task.result()
+        # The SDK cannot prevent attempts to reap our resources or the enclosing
+        # native reservation. Its own uncooperative residue remains retained.
+        try:
+            await self.provider.close(retry=retry_provider)
+        except (OSError, RuntimeError) as error:
+            errors.append(error)
+        if errors:
+            raise errors[0]
+        _process_closes(self.turn._native_owner._authority).pop(id(self), None)
 
-    async def close(self):
+    async def close(self, *, retry_provider=False):
+        if self._close_task is not None and self._close_task.done():
+            if not self._close_task.cancelled() and self._close_task.exception() is None:
+                return
+            self._close_task = None
         if self._close_task is None:
-            self._close_task = asyncio.create_task(self._finish_close())
+            self._closed.set()
+            _process_closes(self.turn._native_owner._authority)[id(self)] = self
+            self._close_task = asyncio.create_task(self._finish_close(retry_provider))
         await asyncio.shield(self._close_task)
+
+
+def _process_closes(authority):
+    return authority.__dict__.setdefault('_protected_process_closes', {})
+
+
+async def retry_protected_process_closes(authority):
+    """Owner-only retry of exact retained process/provider handles, no new IDs."""
+    errors, cancellations = [], []
+    for runner in tuple(_process_closes(authority).values()):
+        try:
+            await _drain_owned(asyncio.create_task(runner.close(retry_provider=True)), cancellations)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            errors.append(error)
+    if errors:
+        raise errors[0]
+    if cancellations:
+        raise asyncio.CancelledError
 
 
 def _saved_policy(authority, ref, row, launch, principal_id, context, provider):
@@ -313,10 +378,12 @@ async def protected_process_scope(authority, ref, row, launch, *, principal_id, 
             owner._check()
             if json.dumps(tools, sort_keys=True) != json.dumps(list(turn.tools), sort_keys=True):
                 raise RuntimeStoreError('protected_capability_denied')
-            future = asyncio.run_coroutine_threadsafe(provider.complete(messages, tools), loop)
+            owner._observations.before_inference(messages, tools)
+            future = provider.submit(messages, tools, loop)
             try:
                 result = future.result(timeout=5)
                 owner._check()
+                owner._observations.observe_response(result)
                 return result
             finally:
                 if not future.done():
@@ -331,7 +398,7 @@ async def protected_process_scope(authority, ref, row, launch, *, principal_id, 
                             _saved_policy(authority, ref, row, launch, principal_id, context, provider) != policy_digest):
                         raise RuntimeStoreError('protected_owner_policy_mismatch')
                 owner._policy_guard = guard
-                binding = dict(owner.binding, policy_digest=policy_digest, owner_pid=os.getpid(),
+                binding = dict(owner.binding, owner_observations_v1=True, policy_digest=policy_digest, owner_pid=os.getpid(),
                     worker_pid=owner._scope['pid'], worker_birth=owner._scope['birth'])
                 for endpoint in runner.endpoints.values():
                     endpoint.binding = dict(binding)

@@ -55,7 +55,7 @@ def current_uid():
 
 def verify_peer(sock, *, pid, uid):
     if sys.platform == 'linux':
-        peer_pid, peer_uid, _ = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        peer_pid, peer_uid, _ = struct.unpack('iII', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
     elif sys.platform == 'darwin':
         # sys/un.h: SOL_LOCAL=0, LOCAL_PEERPID=0x002. No caller-provided hello identity.
         peer_pid = sock.getsockopt(0, 0x002)
