@@ -90,6 +90,8 @@ class NativeLifecycle(_Endpoint):
         import psutil
         self = cls.__new__(cls)
         self._authority, self._process = authority, process
+        container = getattr(process, '_protected_container', None)
+        self._container_binding = container.attest() if container is not None else None
         # Trusted owner policy input only; never accepted from an inference/tool frame.
         self._context = bounded_copy(context)
         self._card_check()
@@ -109,7 +111,8 @@ class NativeLifecycle(_Endpoint):
         try:
             super(NativeLifecycle, self).__init__({k: self._scope[k] for k in
                 ('profile_id', 'session_id', 'execution_id', 'generation', 'epoch')} |
-                {k: self._context[k] for k in ('board', 'task_id', 'run_id')}, 'lifecycle')
+                {k: self._context[k] for k in ('board', 'task_id', 'run_id')} |
+                ({'docker_tool_v1': self._container_binding} if self._container_binding is not None else {}), 'lifecycle')
             identity = {k: v for k, v in self._scope.items() if k != 'epoch'}
             claim = _claim(self._connection, None, identity)
             adopt_worker_execution(authority.db, epoch=self._scope['epoch'], execution_id=self._scope['execution_id'],
@@ -142,6 +145,11 @@ class NativeLifecycle(_Endpoint):
         from gateway.session_worker import _claim, _verify
         from hermes_state_runtime import _epoch, _admission, _worker_assignment
         scope = self._scope
+        container = getattr(self._process, '_protected_container', None)
+        if container is not None:
+            if (container.attest() != self._container_binding
+                    or self._container_binding['generation'] != str(scope['generation'])):
+                raise RuntimeStoreError('protected_container_binding_mismatch')
         verify_worker_identity(self._process, {'type': 'hello', 'pid': scope['pid'], 'birth': scope['birth'], 'ancestors': []})
         identity = {k: v for k, v in scope.items() if k != 'epoch'}
         _verify(self._connection, None, identity, _claim(self._connection, None, identity))

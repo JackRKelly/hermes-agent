@@ -37,7 +37,7 @@ class _Tools(_Endpoint):
 
     def _invoke(self, operation, payload):
         if (operation != 'call' or type(payload) is not dict or set(payload) != {'name', 'args'}
-                or payload['name'] not in ('read_file', 'terminal') or payload['args'] != {}):
+                or payload['name'] not in ('read_file', 'terminal') or type(payload['args']) is not dict):
             raise RuntimeStoreError('protected_capability_denied')
         if self.turn.proxy.worker.stop.is_set():
             raise RuntimeStoreError('protected_capability_denied')

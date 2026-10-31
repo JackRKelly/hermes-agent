@@ -1,6 +1,13 @@
 # Protected-owner native adapter: source integration and privileged gate
 
 **SOURCE ONLY. Production protected admission remains unconditionally disabled.**
+
+A credentialless Docker TOOL-child alternative is now wired into the same source
+path. See [the Docker contract](protected-docker-tools.md) for digest/closure
+binding, no-bind bounded workspace projection, distinct-UID reviewer enforcement,
+namespace deadlines, leases/recovery and exact limits. Statements below about
+same-UID host sentinel tools describe the retained legacy controls, not the new
+Docker tool boundary. The protected host conversation/provider limits remain.
 Baseline: `75d15c1a53d74ecce6f3cc094cb0bd9bf4238fb4`.
 No installation, live provider request, credential access, profile/state migration,
 card release, root/account/group/ACL/network change or scheduler activation is

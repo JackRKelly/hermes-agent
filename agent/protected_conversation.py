@@ -13,7 +13,28 @@ import time
 from agent.transports.types import NormalizedResponse, ToolCall
 
 MAX_BYTES = 65536
-TOOL_NAMES = ('read_file', 'terminal')  # the existing fixed sentinel child ONLY
+TOOL_NAMES = ('read_file', 'terminal')
+
+
+def tool_arguments(name, raw, docker=False):
+    """Closed SOURCE-only Docker tool subset; no ordinary host registry."""
+    if name not in TOOL_NAMES or type(raw) is not str or len(raw.encode()) > 4096:
+        raise ValueError('unsupported protected tool call')
+    def unique(items):
+        value = dict(items)
+        if len(value) != len(items):
+            raise ValueError('duplicate tool argument')
+        return value
+    args = json.loads(raw, object_pairs_hook=unique)
+    if type(args) is not dict:
+        raise ValueError('invalid protected arguments')
+    if not args:
+        return args
+    key = 'path' if name == 'read_file' else 'command'
+    if (not docker or set(args) != {key} or type(args[key]) is not str
+            or not 1 <= len(args[key].encode()) <= 2048 or '\x00' in args[key]):
+        raise ValueError('unsupported protected arguments')
+    return args
 
 
 def protected_turn_of(agent):
@@ -79,6 +100,13 @@ class ProtectedTurn:
         self.tools = tuple({'type': 'function', 'function': {'name': name,
             'description': 'Fixed nonsecret source sentinel only',
             'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}} for name in TOOL_NAMES)
+        self.docker = 'docker_tool_v1' in lifecycle.binding
+        if self.docker:
+            self.tools = tuple({'type': 'function', 'function': {'name': name,
+                'description': 'Credentialless Docker-only native tool',
+                'parameters': {'type': 'object', 'properties': {
+                    'path' if name == 'read_file' else 'command': {'type': 'string'}},
+                    'additionalProperties': False}}} for name in TOOL_NAMES)
         self.calls = 0
         self._call_ids = set()
         self._observation = 0
@@ -106,20 +134,21 @@ class ProtectedTurn:
             if (type(tc) is not ToolCall or type(tc.id) is not str or not 1 <= len(tc.id) <= 128
                     or tc.id in seen or tc.id in self._call_ids
                     or type(tc.name) is not str or tc.name not in TOOL_NAMES
-                    or tc.provider_data or type(tc.arguments) is not str or tc.arguments.strip() != '{}'):
+                    or tc.provider_data or type(tc.arguments) is not str):
                 raise ValueError('unsupported protected tool call')
+            tool_arguments(tc.name, tc.arguments, self.docker)
             seen.add(tc.id)
             parsed.append(tc)
         # Validate the ENTIRE batch before side effects or publishing its call row.
         self._call_ids.update(seen)
         row = {'role': 'assistant', 'content': assistant.content or '', 'tool_calls': [
-            {'id': tc.id, 'type': 'function', 'function': {'name': tc.name, 'arguments': '{}'}} for tc in parsed]}
+            {'id': tc.id, 'type': 'function', 'function': {'name': tc.name, 'arguments': json.dumps(tool_arguments(tc.name, tc.arguments, self.docker), separators=(',', ':'))}} for tc in parsed]}
         self._append([row])
         messages.append(row)
         for tc in parsed:
             self._check()
             self.calls += 1
-            result = self.proxy.invoke(tc.name, {})
+            result = self.proxy.invoke(tc.name, tool_arguments(tc.name, tc.arguments, self.docker))
             self._check()  # refuse stale/in-flight results, not just stale requests
             row = {'role': 'tool', 'tool_call_id': tc.id, 'tool_name': tc.name, 'content': result}
             self._append([row])

@@ -560,13 +560,17 @@ async def _spawn_registered_worker(authority, ref, row, *, sentinel=None):
         from gateway.session_worker_spawn import acquire_process
         if sentinel is not None:
             from gateway.session_protected_tools import SentinelLaunch
-            if type(sentinel) is not SentinelLaunch:
+            from gateway.session_protected_docker import DockerLaunch
+            if type(sentinel) is DockerLaunch:
+                process = await sentinel.acquire(generation)
+            elif type(sentinel) is SentinelLaunch:
+                argv, env, cwd = sentinel.spawn_inputs()
+                process = await acquire_process(subprocess.Popen, argv, cwd=cwd, env=env,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    bufsize=0, pass_fds=(), **WORKER_POPEN)
+            else:
                 raise ValueError('unsupported protected adapter')
-            argv, env, cwd = sentinel.spawn_inputs()
             log_path = None
-            process = await acquire_process(subprocess.Popen, argv, cwd=cwd, env=env,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                bufsize=0, pass_fds=(), **WORKER_POPEN)
         else:
             env = await asyncio.to_thread(_worker_env, authority)
             cwd = (await asyncio.to_thread(Path(__file__).resolve)).parents[1]

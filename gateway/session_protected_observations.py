@@ -4,9 +4,10 @@ Only owner-observed responses/results authorize rows. Correlations are monotonic
 within this exact lifecycle capability; tokens authenticate transport, not truth.
 Legacy synchronous routing fixtures do not use this ledger or claim this boundary.
 """
+import json
 import threading
 
-from agent.protected_conversation import TOOL_NAMES, bounded_copy
+from agent.protected_conversation import TOOL_NAMES, bounded_copy, tool_arguments
 from agent.transports.types import NormalizedResponse, ToolCall
 from hermes_state_runtime import RuntimeStoreError
 
@@ -18,6 +19,7 @@ def _deny():
 class OwnerObservations:
     def __init__(self, tools):
         self._tools = bounded_copy(tools)
+        self._docker = any(t['function']['description'] == 'Credentialless Docker-only native tool' for t in tools)
         self._messages, self._calls = [], []
         self._ids = set()
         self._pending = None
@@ -78,13 +80,14 @@ class OwnerObservations:
                 for call in calls:
                     if (type(call) is not ToolCall or type(call.id) is not str or not 1 <= len(call.id) <= 128
                             or call.id in seen or call.id in self._ids or call.name not in TOOL_NAMES
-                            or call.provider_data or type(call.arguments) is not str or call.arguments.strip() != '{}'):
+                            or call.provider_data or type(call.arguments) is not str):
                         _deny()
+                    tool_arguments(call.name, call.arguments, self._docker)
                     seen.add(call.id)
                 row = {'role': 'assistant', 'content': response.content or '', 'tool_calls': [
-                    {'id': call.id, 'type': 'function', 'function': {'name': call.name, 'arguments': '{}'}}
+                    {'id': call.id, 'type': 'function', 'function': {'name': call.name, 'arguments': json.dumps(tool_arguments(call.name, call.arguments, self._docker), separators=(',', ':'))}}
                     for call in calls]}
-                self._calls = [(call.id, call.name) for call in calls]
+                self._calls = [(call.id, call.name, tool_arguments(call.name, call.arguments, self._docker)) for call in calls]
                 self._ids.update(seen)
             elif response.finish_reason == 'stop' and response.content:
                 row = {'role': 'assistant', 'content': response.content}
@@ -97,7 +100,7 @@ class OwnerObservations:
     def before_tool(self, name, args):
         with self._lock:
             if (self._pending is not None or self._inflight or self._tool is not None
-                    or not self._calls or name != self._calls[0][1] or args != {}):
+                    or not self._calls or name != self._calls[0][1] or args != self._calls[0][2]):
                 _deny()
             self._tool = self._calls[0]
             return self._tool[0]

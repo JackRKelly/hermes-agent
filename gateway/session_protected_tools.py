@@ -23,6 +23,7 @@ class SentinelWorker(ManagedWorker):
         self.authority = authority
         self.session_id = session_id
         self._close_lock = threading.Lock()
+        self.container = getattr(process, '_protected_container', None)
         self._reaped = False
 
     def close(self):
@@ -31,13 +32,25 @@ class SentinelWorker(ManagedWorker):
         with self._close_lock:
             if self._reaped:
                 return
-            super().close()
+            self.stop.set()
+            try:
+                if self.container is not None:
+                    self.container.close()  # exact namespace before bridge teardown
+            finally:
+                super().close()  # always reap bridge/writer, even on daemon/store faults
+            # A fault above retains this exact worker for owner retry.
             if self.process.poll() is None:
                 raise RuntimeError('sentinel worker could not be reaped')
             self._reaped = True
             workers = getattr(self.authority, '_managed_workers', {})
             if workers.get(self.session_id) is self:
                 workers.pop(self.session_id)
+
+    def export(self, names):
+        if self.container is None:
+            raise ValueError('Docker-only artifact export')
+        self.stop.set()  # revoke tools BEFORE quiescing/export; never resume
+        return self.container.export(names)
 
     def control(self, frame):
         if frame != {'type': 'stop'}:
@@ -122,9 +135,13 @@ class ToolProxy:
     def bind(self):
         if self.bound:
             raise ValueError('already bound')
+        container = getattr(self.worker, 'container', None)
+        if container is not None:
+            self.attestation = container.attest()
         hello = self._receive()
         if (set(hello) != {'op', 'pid', 'fds', 'environment', 'imports'} or hello['op'] != 'hello'
-                or type(hello['pid']) is not int or hello['pid'] != self.worker.process.pid
+                or type(hello['pid']) is not int or hello['pid'] <= 0
+                or (container is None and hello['pid'] != self.worker.process.pid)
                 or hello['fds'] != ['0', '1', '2']
                 or hello['imports'] != list(SOURCE_IMPORTS[:3])
                 or type(hello['environment']) is not list
@@ -132,7 +149,7 @@ class ToolProxy:
                 or set(hello['environment']) - {'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING'}):
             self.worker.close()
             raise ValueError('unexpected sentinel child identity or descriptors')
-        self._send({'op': 'bind', 'pid': self.worker.process.pid, 'adapter': 'sentinel-only-v1'})
+        self._send({'op': 'bind', 'pid': hello['pid'], 'adapter': 'sentinel-only-v1'})
         self.bound = True
         return hello
 
@@ -140,10 +157,15 @@ class ToolProxy:
         if (not self.bound or self.worker.stop.is_set() or self.sequence >= 16
                 or time.monotonic() >= self.deadline):
             raise ValueError('unbound, exhausted or expired tool channel')
-        if type(name) is not str or name not in ('read_file', 'terminal') or type(args) is not dict or args:
-            raise ValueError('unsupported sentinel tool or arguments')
+        from agent.protected_conversation import tool_arguments
+        import json
+        tool_arguments(name, json.dumps(args), getattr(self.worker, 'container', None) is not None)
+        if getattr(self.worker, 'container', None) is not None:
+            if self.worker.container.attest() != self.attestation:
+                self.worker.close()
+                raise ValueError('Docker generation changed')
         self.sequence += 1
-        self._send({'op': 'call', 'sequence': self.sequence, 'name': name, 'args': {}})
+        self._send({'op': 'call', 'sequence': self.sequence, 'name': name, 'args': args})
         frame = self._receive()
         if (set(frame) != {'op', 'sequence', 'result', 'imports'} or frame['op'] != 'result'
                 or type(frame['sequence']) is not int or frame['sequence'] != self.sequence
