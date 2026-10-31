@@ -13,7 +13,7 @@ _FROZEN = False
 _SOURCE = Path(__file__).resolve().parent
 _STDLIB = Path(sysconfig.get_path('stdlib')).resolve()
 _ALLOWED = frozenset({'hermes_protected', 'agent', 'agent.protected_conversation',
-                      'agent.transports', 'agent.transports.types'})
+                      'agent.protected_ipc', 'agent.transports', 'agent.transports.types'})
 
 
 def active():

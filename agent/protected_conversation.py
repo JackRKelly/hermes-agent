@@ -1,9 +1,9 @@
 """Restricted conversation/tool route. No config, hooks, registry or provider discovery.
 
 This is an explicit, bounded subset, not all AIAgent features. Provider dialects
-must enter through Hermes' NormalizedResponse contract. The source fixture uses
-in-process authenticated capabilities; a protected production transport is NOT
-implemented and ordinary managed admission remains disabled.
+must enter through Hermes' NormalizedResponse contract. The fresh process facade
+uses authenticated bounded IPC; legacy routing fixtures also use in-process
+capabilities. Neither path enables ordinary managed production admission.
 """
 import json
 from functools import wraps

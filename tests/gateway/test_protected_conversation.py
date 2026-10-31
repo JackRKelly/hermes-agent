@@ -76,7 +76,7 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
     asyncio.run(exercise())
 
 
-def native_claim(tmp_path, monkeypatch):
+def native_claim(tmp_path, monkeypatch, *, persisted=False):
     """Real isolated card claim, policy and native reservation store (not a daemon)."""
     from hermes_state import SessionDB
     from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
@@ -104,9 +104,20 @@ def native_claim(tmp_path, monkeypatch):
     policy, _ = build_kanban_policy(SimpleNamespace(authority=authority, actor=actor, native_owner=True),
         dict(board='controlled', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock),
         {'model': {'default': 'controlled-no-provider', 'provider': 'custom'}, 'platform_toolsets': {'cli': []}})
-    admitted = admit_session_input(db, epoch=epoch, principal_id='fixture-owner', session_id='owned',
+    session_id = 'owned'
+    if persisted:
+        from gateway.session import SessionStore
+        from gateway.config import GatewayConfig
+        from gateway.session_local import stage_local_session
+        from hermes_state_local import commit_local_session
+        authority.runner.session_store = SessionStore(tmp_path / 'routing', GatewayConfig())
+        staged = stage_local_session(authority, actor, {'request_id': 'controlled-persisted-create'},
+            trusted_policy=policy, trusted_secrets={})
+        commit_local_session(db, epoch=epoch, receipt=staged)
+        session_id = staged['session_id']
+    admitted = admit_session_input(db, epoch=epoch, principal_id='fixture-owner', session_id=session_id,
         request_id='controlled-input', payload={'kanban_card_v1': {'board': 'controlled', 'task_id': task.id, 'run_id': task.current_run_id}})
-    claimed = claim_session_input(db, epoch=epoch, session_id='owned')
+    claimed = claim_session_input(db, epoch=epoch, session_id=session_id)
     return authority, json.loads(policy.kanban_json), admitted | {'generation': claimed['generation']}
 
 

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import selectors
 import sys
+import threading
 import time
 
 from agent.protected_tool_worker import SOURCE_IMPORTS, encode_frame, read_frame
@@ -21,11 +22,19 @@ class SentinelWorker(ManagedWorker):
         super().__init__(process)
         self.authority = authority
         self.session_id = session_id
+        self._close_lock = threading.Lock()
+        self._reaped = False
 
     def close(self):
-        try:
+        # Eager error cleanup and async owner-scope teardown can run concurrently.
+        # Event.closed means stop requested, NOT that pipe teardown/reap has finished.
+        with self._close_lock:
+            if self._reaped:
+                return
             super().close()
-        finally:
+            if self.process.poll() is None:
+                raise RuntimeError('sentinel worker could not be reaped')
+            self._reaped = True
             workers = getattr(self.authority, '_managed_workers', {})
             if workers.get(self.session_id) is self:
                 workers.pop(self.session_id)

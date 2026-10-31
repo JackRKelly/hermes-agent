@@ -1,8 +1,9 @@
 """Trusted SOURCE-only scoped interfaces; no general owner RPC goes to the tool child.
 
-These callable endpoints authenticate channel-specific tokens and exact native
-bindings. They are not separate protected service identities/transports. Real
-admission MUST remain disabled until that transport and protected launcher exist.
+These owner-private endpoints authenticate channel-specific tokens and exact
+native bindings. The fresh conversation transports them through protected_ipc;
+legacy tests call them directly. They are not separate protected OS identities.
+Production admission remains disabled until the protected launcher is reviewed.
 """
 from contextlib import closing
 import hmac
@@ -16,6 +17,14 @@ from types import SimpleNamespace
 
 from agent.protected_conversation import CapabilityClient, bounded_copy
 from hermes_state_runtime import RuntimeStoreError
+
+
+def _retirement_registry(authority):
+    # Owner-private references survive failed acquisition and failed scope teardown.
+    # setdefault installs one registry/lock even when two acquisitions race.
+    registry = authority.__dict__.setdefault('_protected_retirement_state', (threading.Lock(), {}))
+    authority.__dict__.setdefault('_protected_retirements', registry[1])
+    return registry
 
 
 class _Endpoint:
@@ -148,6 +157,9 @@ class NativeLifecycle(_Endpoint):
                         {k: self._context[k] for k in ('board', 'task_id', 'run_id')}):
                 raise RuntimeStoreError('stale_generation')
         self._card_check()
+        guard = getattr(self, '_policy_guard', None)
+        if guard is not None:
+            guard()
 
     def close(self):
         """Retire through the native loss contract; never fabricate completed admission.
@@ -160,12 +172,19 @@ class NativeLifecycle(_Endpoint):
             if self._closed:
                 return
             self._closing = True
+            lock, pending = _retirement_registry(self._authority)
+            key = self._scope['execution_id']
+            with lock:
+                pending[key] = self
             try:
                 lose_admission_worker(self._authority, {'admission_id': self._admission_id}, self._scope)
             except RuntimeStoreError as exc:
                 if str(exc) not in ('stale_generation', 'stale_epoch'):
                     raise
             self._closed = True
+            with lock:
+                if pending.get(key) is self:
+                    pending.pop(key)
 
     def _invoke(self, operation, payload):
         self._check()
