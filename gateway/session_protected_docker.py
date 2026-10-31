@@ -184,6 +184,10 @@ class DockerRuntime:
         killed. Reopen their exact approved runtime to retire them separately.
         """
         import json
+        import re
+        if self.image is None or type(self.source) is not str or not re.fullmatch('[0-9a-f]{64}', self.source):
+            raise ValueError('initialized immutable Docker runtime required')
+        _digest(self.image)
         if self.json(['info', '--format', '{{json .ID}}']) != self.daemon:
             raise ValueError('daemon identity changed')
         report = {'retired': [], 'skipped': [], 'errors': []}
@@ -206,7 +210,7 @@ class DockerRuntime:
                     continue
                 self._reconcile_lease(path, value)
                 report['retired'].append(path.name)
-            except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+            except Exception as exc:  # health: allow BLE001 -- aggregate each private lease anomaly, never swallow BaseException cancellation
                 report['errors'].append({'lease': path.name, 'type': type(exc).__name__})
         self.last_reconciliation = report
         if report['errors']:
@@ -399,7 +403,7 @@ class DockerContainer:
             '--ipc', 'private', '--cgroupns', 'private', '--pids-limit', '48', '--memory', '192m',
             '--memory-swap', '192m', '--cpus', '.5', '--restart', 'no', '--log-driver', 'none',
             '--shm-size', '1m', '--ulimit', 'nofile=128:128', '--ulimit', 'fsize=65536:65536', '--init=false']
-        for key, val in self.labels.items():
+        for key, val in sorted(self.labels.items()):
             args += ['--label', key + '=' + val]
         for key, val in self.tmpfs().items():
             args += ['--tmpfs', key + ':' + val]
@@ -409,8 +413,8 @@ class DockerContainer:
         import json
         import re
         import subprocess
-        self.runtime.verify_image()
         try:
+            self.runtime.verify_image()
             self.save('CREATING')
             self.create_uncertain = True
             cid = self.runtime.run(self.create_args())[1].decode().strip()

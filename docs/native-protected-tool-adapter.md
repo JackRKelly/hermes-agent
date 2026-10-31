@@ -134,15 +134,19 @@ by Python; these are not the new cancellable process entry and must not be used
 as a production provider adapter. The process scope is the integrated source
 entry for the selected async adapter. No production caller is enabled for either.
 
-## Persisted outcomes are deliberately not promoted
+## Conversation/teardown alone never promotes persisted outcomes
 
 A restricted conversation durably appends its user/call/tool/final rows through
 native `transcript.append` receipts. It starts fresh, accepts no prior history,
 and uses bounded single-turn/tool budgets with whole-batch validation and
 turn-wide call-ID replay refusal. Unknown capabilities disable before discovery.
 
-A successful fixture conversation does **not** settle its admission or release a
-card. Its experimental reservation closes through the existing native loss
+A successful fixture conversation **alone** does not settle its admission or
+release a card. The separate, explicit trusted-owner `settle_success` source path
+is described in [protected-docker-tools.md](protected-docker-tools.md#explicit-owner-success-not-closecancel),
+including its durable receipt, canonical card transition, partial-projection
+recovery and no-live-admission gates. Without that explicit owner action, its
+experimental reservation closes through the existing native loss
 contract: unknown admission / terminal worker, not fabricated success. No
 `owner_admitted`, `worker_bound` or privileged-ready event is synthesized. The
 real dispatcher/drain settlement and protected admission cutover remain gated;

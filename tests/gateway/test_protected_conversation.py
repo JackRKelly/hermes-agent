@@ -76,7 +76,7 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
     asyncio.run(exercise())
 
 
-def native_claim(tmp_path, monkeypatch, *, persisted=False):
+def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None):
     """Real isolated card claim, policy and native reservation store (not a daemon)."""
     from hermes_state import SessionDB
     from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
@@ -92,7 +92,7 @@ def native_claim(tmp_path, monkeypatch, *, persisted=False):
     kb.create_board('controlled')
     with closing(connect(board='controlled')) as conn:
         task_id = kb.create_task(conn, title='NO REAL PROVIDER', assignee='default',
-            workspace_kind='dir', workspace_path=str(tmp_path), model_override='controlled-no-provider', provider_override='custom')
+            workspace_kind='dir', workspace_path=str(workspace or tmp_path), model_override='controlled-no-provider', provider_override='custom')
         task = kb.claim_task(conn, task_id)
     db = SessionDB(tmp_path / 'isolated-state.db')
     db.create_session('owned', 'cli')

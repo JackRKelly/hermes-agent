@@ -156,3 +156,100 @@ def test_container_close_fault_still_reaps_bridge_and_retry_keeps_exact_worker()
         if process.poll() is None:
             process.kill()
         process.wait(timeout=3)
+
+
+@pytest.mark.parametrize('fault', [AttributeError, IndexError, __import__('subprocess').TimeoutExpired])
+def test_reconcile_aggregates_anomalous_faults(tmp_path, monkeypatch, fault):
+    runtime = runtime_stub()
+    first = lease(tmp_path, runtime, '1')
+    second = lease(tmp_path, runtime, '2')
+    attempted = []
+    def reconcile(path, value):
+        attempted.append(value['name'])
+        if value['name'] == first:
+            raise fault('inspect', 1) if fault.__name__ == 'TimeoutExpired' else fault('anomaly')
+    monkeypatch.setattr(runtime, '_reconcile_lease', reconcile)
+    with pytest.raises(RuntimeError, match='reconciliation'):
+        runtime.reconcile(tmp_path)
+    assert attempted == [first, second]
+    assert runtime.last_reconciliation == {'retired': [second + '.json'], 'skipped': [],
+        'errors': [{'lease': first + '.json', 'type': fault.__name__}]}
+
+
+def test_foreign_active_lease_is_reported_never_attempted(tmp_path, monkeypatch):
+    runtime = runtime_stub()
+    foreign = lease(tmp_path, runtime, '1', 'STARTED', 'sha256:' + 'f' * 64)
+    monkeypatch.setattr(runtime, '_reconcile_lease', lambda *args: pytest.fail('foreign lease attempted'))
+    assert runtime.reconcile(tmp_path) == {'retired': [], 'skipped': [foreign + '.json'], 'errors': []}
+
+
+@pytest.mark.parametrize('field', ['image', 'source'])
+def test_uninitialized_runtime_cannot_report_success(tmp_path, field):
+    runtime = runtime_stub()
+    setattr(runtime, field, None)
+    with pytest.raises(ValueError, match='initialized'):
+        runtime.reconcile(tmp_path)
+
+
+def test_image_verification_failure_retires_pending_lease(tmp_path):
+    runtime = runtime_stub()
+    c = DockerContainer(runtime, tmp_path / 'leases', 1, 'builder')
+    def refuse():
+        raise ValueError('unapproved image')
+    runtime.verify_image = refuse
+    with pytest.raises(ValueError, match='unapproved image'):
+        c.create({'allowed.txt': b'INPUT'})
+    assert not runtime.pending
+    assert c.retired
+    assert json.loads(c.path.read_text())['state'] == 'RETIRED'
+
+
+@pytest.mark.parametrize('mode', ['recreate', 'name-conflict', 'rejected'])
+def test_creating_recovery_reissues_exact_request_never_starts(tmp_path, mode):
+    runtime = runtime_stub()
+    name = lease(tmp_path, runtime, '1', 'CREATING')
+    path = tmp_path / (name + '.json')
+    original = json.loads(path.read_text())
+    calls, present = [], []
+    cid = 'c' * 64
+    value = dict(Id=cid, Name='/' + name, Image=runtime.image,
+        Config={'Labels': {'hermes.closure': runtime.source, **original['labels']}},
+        State={'Running': False, 'Pid': 0})
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'create':
+            if mode != 'rejected':
+                present.append(value)
+            return (0, cid.encode()) if mode == 'recreate' else (1, b'name conflict or rejection')
+        if args[0] == 'inspect':
+            return (0, json.dumps(present).encode()) if present else (1, b'No such object')
+        if args[0] == 'kill':
+            return 1, b'not running'
+        if args[0] == 'rm':
+            present.clear()
+            return 0, b''
+        pytest.fail('unexpected recovery operation: ' + args[0])
+    runtime.run = run
+    def query(args):
+        if args[0] == 'info':
+            return runtime.daemon
+        code, wire = run(args)
+        if code:
+            raise RuntimeError('Docker inspect rejected')
+        return json.loads(wire)
+    runtime.json = query
+    if mode == 'rejected':
+        with pytest.raises(RuntimeError, match='reconciliation'):
+            runtime.reconcile(tmp_path)
+        assert json.loads(path.read_text()) == original
+        assert runtime.last_reconciliation['errors'] == [{'lease': path.name, 'type': 'RuntimeError'}]
+    else:
+        assert runtime.reconcile(tmp_path)['retired'] == [path.name]
+        assert not present and not runtime.pending
+        assert json.loads(path.read_text())['state'] == 'RETIRED'
+    create = [args for args in calls if args[0] == 'create']
+    assert len(create) == 1
+    c = DockerContainer.__new__(DockerContainer)
+    c.name, c.role, c.labels, c.runtime = name, 'builder', original['labels'], runtime
+    assert create[0] == c.create_args()
+    assert not any(args[0] in ('start', 'exec') for args in calls)

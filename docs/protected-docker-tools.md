@@ -24,8 +24,8 @@ generation, private lease nonce). It carries this separate typed binding in
 `docker_tool_v1`. Guest hello PID/import/FD data are hostile diagnostics, not
 attestation. The owner-held exec stream plus daemon inspection define identity;
 no guest callback can adopt a worker, change a run, settle an admission or promote
-readiness. The source-only test still retires through the existing **unknown**
-admission contract, never fabricated successful Kanban settlement.
+readiness. Scope teardown alone still retires through the existing **unknown**
+admission contract. Explicit successful owner settlement is separate (below).
 
 Docker bindings enable a deliberately small useful subset: `read_file` accepts a
 bounded path and `terminal` accepts a bounded shell command. Empty arguments
@@ -106,12 +106,66 @@ prior lease for retry. A late unstarted container cannot execute tools. Recovery
 is owner-only, never model RPC; it is not a daemon transaction or a guarantee
 against arbitrarily delayed requests beyond the daemon's own request semantics.
 
+## Explicit owner success, not close/cancel
+
+Only the trusted owner may call `await runner.settle_success(artifact_names)`;
+there is no lifecycle/guest operation for it. It requires a completed, observed
+normalized provider result, the exact committed transcript and current native
+admission/session/generation/epoch/card/run/claim. It irreversibly revokes tool
+proxy dispatch before quiescing and exporting named Docker artifacts; Docker
+success requires at least one artifact. Non-Docker controlled text fixtures can
+settle without artifacts. Artifact bytes/hashes and transcript hash are retained
+in a correlation receipt; they are not publication/content approval.
+
+`complete_task` remains the canonical card/run transition. A private owner guard
+runs under its writer lock and checks the live exact claim, then native
+`settle_session_input` atomically commits the terminal outcome, worker retirement,
+result and `protected.success.v1.<admission>` correlation receipt. The card's
+closing run metadata contains the identical receipt. Completion prose/summary is
+fixed owner-authored text plus a receipt digest, never model text; model output
+and exported bytes stay inside receipt metadata, not prose-driven host artifact
+discovery or notifier artifact paths. Only after both have been
+read back/validated may the owner treat the projection as successful. Tests also
+require provider waiters, children, IPC threads, adopted workers and retirement
+registries to drain after scope exit. Merely closing/cancelling still cannot
+manufacture completion. Once both stores committed, durable-only confirmation
+may return the same receipt even after Stop/resource teardown; cancellation
+retains the exact settlement task result for owner readback, never starts a new
+projection after Stop. Lock order is board writer, then owner store. Settlement
+shares the 5-second tool watchdog / 2-second idle export window and can fail
+closed on a slow daemon. The cooperative same-UID SentinelLaunch settlement is
+only a controlled contract fixture; deployment must gate to the approved
+Docker launch, not treat a text-fixture completion as isolation proof.
+
+**This is not an atomic cross-WAL commit.** A board commit fault/crash after the
+owner commit leaves a completed result receipt but an unprojected running card.
+An exact retry by the same still-owned runner projects that receipt without
+replaying inference or export. A stale/reopened/cancelled/expired claim is never
+repaired into success. Recovery after owner loss/epoch change remains a manual
+reconciliation gate; do not label such a partial projection a completed pilot.
+Canonical completion can release child cards, clean managed scratch workspaces
+and expose receipt metadata to downstream context builders. Those are deliberate
+card-release effects and require separate owner acceptance before live use. No
+controller, publisher, SDK construction, profile or production selector is enabled.
+
 ## Verification and remaining gates
 
-Private opt-in tests: `HERMES_DOCKER_BOUNDARY_TEST=1` runs
-`tests/gateway/test_protected_docker.py` against the already running local Desktop
-endpoint and cached pinned base in the test. No registry/network/provider access.
-Ordinary CI skips these deployment-specific tests. `HERMES_DOCKER_EVIDENCE` may
+Portable opt-in tests: `HERMES_DOCKER_BOUNDARY_TEST=1` runs
+`tests/gateway/test_protected_docker.py` using one session-scoped image build. Also
+set all three explicit test-supervisor fields (never forwarded to a guest):
+`HERMES_TEST_DOCKER_EXECUTABLE` (canonical absolute executable, no symlinks),
+`HERMES_TEST_DOCKER_ENDPOINT` (`unix:///` plus canonical existing socket), and
+`HERMES_TEST_DOCKER_BASE_IMAGE` (cached official Debian-based Python Linux image ID, non-Alpine,
+`sha256:` plus 64 lowercase hex). The operator selects/approves the base for the
+actual host architecture; no ARM image reuse on amd64 or platform spoofing.
+For a Linux runner the usual explicit selections are `/usr/bin/docker` and
+`unix:///run/docker.sock`; there are no defaults or ambient context discovery.
+Both values must be fully resolved, including symlinked parent directories
+(`/var/run` commonly resolves to `/run`; Desktop CLI/socket aliases are symlinks).
+Select the real targets explicitly rather than passing an alias.
+Missing/invalid configuration after opt-in FAILS, not skips. No automatic pulls,
+registry/network/provider access or global home/credential config. Opt-out skips
+are not acceptance evidence. Hermetic config/recovery tests run without Docker. `HERMES_DOCKER_EVIDENCE` may
 point to a private test-owned directory for image/lease/attestation/reaping
 receipts; use isolated HOME/HERMES_HOME, never the live profile. Run the canonical
 10 protected test files separately through `scripts/run_tests.sh` (96 existing
@@ -129,7 +183,8 @@ conversation's prior cooperative same-UID limitations also remain.
 Before live admission: independent exact-final-tree review, deployment-specific
 hardening/coverage acceptance (including all daemon crash points), canonical owner
 approval, actual provider SDK/credential-placement and cancellation proof, native
-successful settlement/card contract, publisher
+successful real-provider settlement/card contract (controlled source proof is not
+that gate), publisher
 approval and opposite-vendor crew acceptance. No installation, live-provider,
 publisher or autonomous-crew acceptance is claimed by controlled fixtures.
 
@@ -138,4 +193,6 @@ leaders, not every thread; same-UID `comm`/proc exit races can cause fail-safe e
 PID1 exit; daemon-default attestation is not an exhaustive OCI configuration
 validator; the existing asyncio Stop event has thread wake-up limitations. These need deployment hardening/coverage acceptance, not
 new authority or an admission exception. Absolute/idle timing depends on the
-running VM's clock/scheduler. Artifact content remains untrusted regardless.
+running VM's clock/scheduler. Stage UID can prematurely arm the idle timer;
+export has only the tool watchdog plus idle window; tool errors close the channel.
+Artifact content remains untrusted regardless.

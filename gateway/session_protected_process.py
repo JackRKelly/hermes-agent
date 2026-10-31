@@ -62,6 +62,8 @@ class ProtectedProcess:
         self._read_task = None
         self._close_task = None
         self._start_task = None
+        self._settlement_task = None
+        self._settlement_lock = asyncio.Lock()
         self._used = False
         self._cleaned = set()
         turn._native_owner._observations = OwnerObservations(list(turn.tools))
@@ -223,6 +225,20 @@ class ProtectedProcess:
             with suppress(asyncio.CancelledError):
                 await stopper
 
+    async def settle_success(self, artifact_names=()):
+        """Explicit trusted-owner completion; never invoked by close or child IPC."""
+        from gateway.session_protected_settlement import settle_success
+        async with self._settlement_lock:
+            self._settlement_task = asyncio.create_task(asyncio.to_thread(settle_success, self, artifact_names))
+            try:
+                return await asyncio.shield(self._settlement_task)
+            except asyncio.CancelledError:
+                self.turn.proxy.worker.stop.set()
+                cancellations = []
+                with suppress(Exception):
+                    await _drain_owned(self._settlement_task, cancellations)
+                raise
+
     def _reap_process(self):
         from gateway.session_managed_worker import ManagedWorker
         control = ManagedWorker(self.process)
@@ -281,6 +297,9 @@ class ProtectedProcess:
         for endpoint in self.endpoints.values():
             endpoint._closing = True
         self.provider.begin_close()
+        if self._settlement_task is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await asyncio.shield(self._settlement_task)
         # An acquisition already in progress owns its late Popen handle until
         # assigned here. Never finish close while it can still produce a child.
         if self._start_task is not None:

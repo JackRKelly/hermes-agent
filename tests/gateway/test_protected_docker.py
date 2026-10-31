@@ -9,6 +9,13 @@ import pytest
 import gateway.session_protected_scope
 
 
+@pytest.fixture(scope='session')
+def docker_runtime(tmp_path_factory):
+    from tests.gateway.docker_boundary_config import build_boundary_runtime
+    return build_boundary_runtime(tmp_path_factory.mktemp('docker-runtime'))
+
+
+@pytest.mark.platforms('posix')
 def test_approved_projection_rejects_links_specials_and_quota(tmp_path):
     from gateway.session_protected_docker import approved_inputs
     root = tmp_path / 'input'
@@ -34,10 +41,8 @@ def test_approved_projection_rejects_links_specials_and_quota(tmp_path):
         approved_inputs(root, ('a',) * 33)
 
 
-def test_real_docker_native_roundtrip(tmp_path, monkeypatch):
-    """Explicit opt-in: existing Desktop daemon only, no pulls or live provider."""
-    if os.environ.get('HERMES_DOCKER_BOUNDARY_TEST') != '1':
-        pytest.skip('private existing-daemon Docker acceptance only')
+def test_real_docker_native_roundtrip(tmp_path, monkeypatch, docker_runtime):
+    """Explicit opt-in: selected existing local daemon; no pulls or live provider."""
     import asyncio
     from types import SimpleNamespace
     from gateway.session_protected_docker import DockerRuntime, DockerLaunch
@@ -47,9 +52,7 @@ def test_real_docker_native_roundtrip(tmp_path, monkeypatch):
     from hermes_state_runtime import get_session_admission
     authority, context, admission = native_claim(tmp_path, monkeypatch, persisted=True)
     (tmp_path / 'allowed.txt').write_text('DOCKER_NATIVE\n')
-    runtime = DockerRuntime.build(Path(__file__).resolve().parents[2], tmp_path / 'runtime',
-        docker='/usr/local/bin/docker', endpoint='unix:///Users/jack/.docker/run/docker.sock',
-        base='sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8')
+    runtime = docker_runtime
     calls, captured = [], []
     class Transport:
         def build_kwargs(self, model, messages, tools):
@@ -79,40 +82,62 @@ def test_real_docker_native_roundtrip(tmp_path, monkeypatch):
             assert att['cid'] != str(worker.process.pid)
             assert att['image'] == runtime.image
             assert worker.container.inspect()['HostConfig']['LogConfig']['Type'] == 'none'
-            artifacts = worker.export(('result.txt',))
-            assert artifacts == {'result.txt': b'BUILT'}
+            import base64
+            from hermes_cli import kanban_db as kb
+            exports = []
+            actual_export, actual_end = worker.container.export, kb._end_run
+            def export_once(names):
+                exports.append(names)
+                assert len(exports) == 1, 'retry must use stored artifact bytes'
+                return actual_export(names)
+            def projection_fault(*args, **kwargs):
+                raise OSError('controlled Docker projection fault')
+            monkeypatch.setattr(worker.container, 'export', export_once)
+            monkeypatch.setattr(kb, '_end_run', projection_fault)
+            with pytest.raises(OSError, match='projection'):
+                await runner.settle_success(('result.txt',))
+            monkeypatch.setattr(kb, '_end_run', actual_end)
+            receipt = await runner.settle_success(('result.txt',))
+            assert exports == [('result.txt',)]
+            with pytest.raises(ValueError):
+                await runner.settle_success(('different.txt',))
+            assert base64.b64decode(receipt['artifacts']['result.txt']['body']) == b'BUILT'
+            assert receipt['outcome'] == 'completed'
+            runtime.record('settlement-' + admission['admission_id'], receipt)
             with pytest.raises(ValueError):
                 runner.turn.proxy.invoke('terminal', {'command': 'touch after-cancel'})
         assert captured[0].turn.proxy.worker.container.absent()
         assert authority._managed_workers == {}
         assert len(authority.db.get_messages(admission['target_session_id'])) == 5
-        assert get_session_admission(authority.db, admission_id=admission['admission_id'])['status'] == 'unknown'
+        assert get_session_admission(authority.db, admission_id=admission['admission_id'])['outcome'] == 'completed'
     try:
         asyncio.run(run())
     finally:
         authority.db.close()
 
 
-def test_real_docker_reviewer_and_hostile_native_tools(tmp_path):
-    if os.environ.get('HERMES_DOCKER_BOUNDARY_TEST') != '1':
-        pytest.skip('private existing-daemon Docker acceptance only')
+def test_real_docker_reviewer_and_hostile_native_tools(tmp_path, docker_runtime):
     import json
     import socket
     from gateway.session_protected_docker import DockerRuntime, DockerContainer
-    runtime = DockerRuntime.build(Path(__file__).resolve().parents[2], tmp_path / 'runtime',
-        docker='/usr/local/bin/docker', endpoint='unix:///Users/jack/.docker/run/docker.sock',
-        base='sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8')
+    runtime = docker_runtime
     # Nonsecret owner/FD/socket positive controls never enter the guest projection.
     sentinel = tmp_path / 'owner'
     sentinel.write_text('HOST_ONLY')
     assert sentinel.read_text() == 'HOST_ONLY'
     listener = socket.socket(socket.AF_UNIX)
     socketpath = str(tmp_path.parent / 'docker-negative.sock')
-    listener.bind(socketpath)
-    listener.listen(1)
-    control = socket.socket(socket.AF_UNIX)
-    control.connect(socketpath)
-    accepted, _ = listener.accept()
+    cwd = os.open('.', os.O_RDONLY)
+    try:
+        os.chdir(tmp_path.parent)
+        listener.bind(Path(socketpath).name)  # relative bind avoids AF_UNIX path length limits
+        listener.listen(1)
+        control = socket.socket(socket.AF_UNIX)
+        control.connect(Path(socketpath).name)
+        accepted, _ = listener.accept()
+    finally:
+        os.fchdir(cwd)
+        os.close(cwd)
     accepted.close()
     control.close()
     fd = os.open(sentinel, os.O_RDONLY)
@@ -171,7 +196,7 @@ r['caps_empty']=s['CapEff'].strip()=='0000000000000000' and s['CapBnd'].strip()=
 r['no_new_privs']=s['NoNewPrivs'].strip()=='1'
 r['seccomp']=s['Seccomp'].strip()=='2'
 r['no_docker_socket']=not pathlib.Path('/var/run/docker.sock').exists() and not pathlib.Path('/run/docker.sock').exists()
-r['no_owner_home']=not pathlib.Path('/Users/jack/.hermes').exists()
+r['no_owner_home']=not pathlib.Path('/root/.hermes').exists()
 r['no_docker_cli']=subprocess.run(['/bin/bash','-c','command -v docker'],stdout=subprocess.DEVNULL).returncode!=0
 r['fd_closure']=all(int(x)<=2 for x in os.listdir('/proc/self/fd') if os.path.exists('/proc/self/fd/'+x))
 r['no_provider_env']=not any(any(v in k for v in ('TOKEN','SECRET','API_KEY','HERMES_HOME','SSH','AUTH')) for k in os.environ)
@@ -186,9 +211,8 @@ print(json.dumps(r))
         _code, wire = runtime.run(['exec', '--user', '65532:65532', container.cid,
             'python', '-I', '-S', '-B', '-c', script], limit=8192)
         checks = json.loads(wire)
-        for name in ('host', 'owner-store', 'broker', 'fd'):
-            checks['unmounted_' + name] = runtime.run(['exec', '--user', '65532:65532', container.cid,
-                '/bin/bash', '-c', 'test ! -e "$1"', 'probe', str(sentinel)], missing=True)[0] == 0
+        checks['host_sentinel_absent'] = runtime.run(['exec', '--user', '65532:65532', container.cid,
+            '/bin/bash', '-c', 'test ! -e "$1"', 'probe', str(sentinel)], missing=True)[0] == 0
         checks['host_pid_absent'] = runtime.run(['exec', '--user', '65532:65532', container.cid,
             '/bin/bash', '-c', 'test ! -e /proc/' + str(os.getpid())], missing=True)[0] == 0
         checks['host_socket_absent'] = runtime.run(['exec', '--user', '65532:65532', container.cid,
@@ -203,7 +227,7 @@ print(json.dumps(r))
             '/bin/grep', '-R', 'REVIEW_ORIGINAL', '/workspace'])[1]
         checks['review_original_after_patch'] = runtime.run(['exec', '--user', '65532:65532', container.cid,
             '/bin/cat', '/workspace/allowed.txt'])[1] == b'REVIEW_ORIGINAL\n'
-        assert len(checks) >= 37
+        assert len(checks) >= 34
         assert all(checks.values()), {k: v for k, v in checks.items() if not v}
     finally:
         os.close(fd)
@@ -212,14 +236,10 @@ print(json.dumps(r))
     assert container.absent()
 
 
-def test_real_docker_deadline_setsids_and_output_flood(tmp_path):
-    if os.environ.get('HERMES_DOCKER_BOUNDARY_TEST') != '1':
-        pytest.skip('private existing-daemon Docker acceptance only')
+def test_real_docker_deadline_setsids_and_output_flood(tmp_path, docker_runtime):
     import time
     from gateway.session_protected_docker import DockerRuntime, DockerContainer
-    runtime = DockerRuntime.build(Path(__file__).resolve().parents[2], tmp_path / 'runtime',
-        docker='/usr/local/bin/docker', endpoint='unix:///Users/jack/.docker/run/docker.sock',
-        base='sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8')
+    runtime = docker_runtime
     c = DockerContainer(runtime, tmp_path / 'leases', 10, 'builder')
     try:
         c.create({'allowed.txt': b'deadline'})
@@ -243,14 +263,10 @@ def test_real_docker_deadline_setsids_and_output_flood(tmp_path):
     assert c.absent()
 
 
-def test_real_docker_idle_eof_tears_down_namespace(tmp_path):
-    if os.environ.get('HERMES_DOCKER_BOUNDARY_TEST') != '1':
-        pytest.skip('private existing-daemon Docker acceptance only')
+def test_real_docker_idle_eof_tears_down_namespace(tmp_path, docker_runtime):
     import time
     from gateway.session_protected_docker import DockerRuntime, DockerContainer
-    runtime = DockerRuntime.build(Path(__file__).resolve().parents[2], tmp_path / 'runtime',
-        docker='/usr/local/bin/docker', endpoint='unix:///Users/jack/.docker/run/docker.sock',
-        base='sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8')
+    runtime = docker_runtime
     c = DockerContainer(runtime, tmp_path / 'leases', 15, 'reviewer')
     try:
         process = c.create({'allowed.txt': b'EOF'})
@@ -266,9 +282,7 @@ def test_real_docker_idle_eof_tears_down_namespace(tmp_path):
     assert c.absent()
 
 
-def test_real_supervisor_sigkill_leaves_only_hard_deadline(tmp_path):
-    if os.environ.get('HERMES_DOCKER_BOUNDARY_TEST') != '1':
-        pytest.skip('private existing-daemon Docker acceptance only')
+def test_real_supervisor_sigkill_leaves_only_hard_deadline(tmp_path, docker_runtime):
     import json
     import selectors
     import subprocess
@@ -276,13 +290,11 @@ def test_real_supervisor_sigkill_leaves_only_hard_deadline(tmp_path):
     import time
     from gateway.session_protected_docker import DockerRuntime
     root = Path(__file__).resolve().parents[2]
-    runtime = DockerRuntime.build(root, tmp_path / 'runtime', docker='/usr/local/bin/docker',
-        endpoint='unix:///Users/jack/.docker/run/docker.sock',
-        base='sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8')
+    runtime = docker_runtime
     script = f'''import sys,json,time
 sys.path.insert(0,{str(root)!r})
 from gateway.session_protected_docker import DockerRuntime,DockerContainer
-r=DockerRuntime('/usr/local/bin/docker','unix:///Users/jack/.docker/run/docker.sock',{str(tmp_path / 'supervisor')!r}, {runtime.image!r},{runtime.source!r})
+r=DockerRuntime({runtime.docker!r},{runtime.endpoint!r},{str(tmp_path / 'supervisor')!r}, {runtime.image!r},{runtime.source!r})
 c=DockerContainer(r,{str(tmp_path / 'leases')!r},14,'builder')
 c.create({{'allowed.txt':b'CRASH'}})
 r.run(['exec','--user','65532:65532',c.cid,'python','-I','-S','-c',"import subprocess;subprocess.Popen(['/bin/sleep','90'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"])
@@ -314,20 +326,15 @@ time.sleep(90)
         supervisor.wait(timeout=3)
         supervisor.stdout.close()
         supervisor.stderr.close()
-        if cid is not None:
-            runtime.reconcile(tmp_path / 'leases')
+        runtime.reconcile(tmp_path / 'leases')
 
 
 @pytest.mark.parametrize('mode', ['cancel-acquire', 'store-fault', 'recover', 'late-create'])
-def test_real_docker_acquisition_and_recovery(tmp_path, monkeypatch, mode):
-    if os.environ.get('HERMES_DOCKER_BOUNDARY_TEST') != '1':
-        pytest.skip('private existing-daemon Docker acceptance only')
+def test_real_docker_acquisition_and_recovery(tmp_path, monkeypatch, mode, docker_runtime):
     import asyncio
     import threading
     from gateway.session_protected_docker import DockerRuntime, DockerContainer, DockerLaunch
-    runtime = DockerRuntime.build(Path(__file__).resolve().parents[2], tmp_path / 'runtime',
-        docker='/usr/local/bin/docker', endpoint='unix:///Users/jack/.docker/run/docker.sock',
-        base='sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8')
+    runtime = docker_runtime
     (tmp_path / 'allowed.txt').write_text('CANCEL')
     if mode == 'cancel-acquire':
         entered, release = threading.Event(), threading.Event()
@@ -392,13 +399,9 @@ def test_real_docker_acquisition_and_recovery(tmp_path, monkeypatch, mode):
 
 
 @pytest.mark.parametrize('attack', ['symlink', 'fifo', 'hardlink', 'oversize', 'case-collision', 'tmpfs-full', 'pids-full', 'stderr-flood'])
-def test_real_docker_artifact_and_resource_negatives(tmp_path, attack):
-    if os.environ.get('HERMES_DOCKER_BOUNDARY_TEST') != '1':
-        pytest.skip('private existing-daemon Docker acceptance only')
+def test_real_docker_artifact_and_resource_negatives(tmp_path, attack, docker_runtime):
     from gateway.session_protected_docker import DockerRuntime, DockerContainer
-    runtime = DockerRuntime.build(Path(__file__).resolve().parents[2], tmp_path / 'runtime',
-        docker='/usr/local/bin/docker', endpoint='unix:///Users/jack/.docker/run/docker.sock',
-        base='sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8')
+    runtime = docker_runtime
     c = DockerContainer(runtime, tmp_path / 'leases', 13, 'builder')
     try:
         c.create({'allowed.txt': b'QUOTA'})
@@ -422,4 +425,49 @@ def test_real_docker_artifact_and_resource_negatives(tmp_path, attack):
                     c.export(('A', 'a') if attack == 'case-collision' else ('evil',))
     finally:
         c.close()
+    assert c.absent()
+
+
+@pytest.mark.parametrize('mode', ['recreate', 'name-conflict', 'rejected'])
+def test_real_creating_recovery_faults(tmp_path, monkeypatch, docker_runtime, mode):
+    import json
+    from gateway.session_protected_docker import DockerContainer
+    runtime = docker_runtime
+    c = DockerContainer(runtime, tmp_path / 'leases', 16, 'builder')
+    c.save('CREATING')
+    runtime.pending.clear()  # restart: no in-process handles/CID
+    actual = runtime.run
+    calls, conflicts = [], []
+    def fault(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'create':
+            assert args == c.create_args()
+            if mode == 'name-conflict':
+                actual(args)  # exact original arrives immediately before retry
+                result = actual(args, **kwargs)
+                conflicts.append(result[0])
+                return result
+            if mode == 'rejected':
+                args = list(args)
+                args[-3] = 'sha256:' + '0' * 64  # real --pull=never rejection
+        return actual(args, **kwargs)
+    monkeypatch.setattr(runtime, 'run', fault)
+    try:
+        if mode == 'rejected':
+            with pytest.raises(RuntimeError, match='reconciliation'):
+                runtime.reconcile(c.directory)
+            assert json.loads(c.path.read_text())['state'] == 'CREATING'
+            assert runtime.last_reconciliation['errors'] == [{'lease': c.path.name, 'type': 'RuntimeError'}]
+            assert c.absent()
+        else:
+            report = runtime.reconcile(c.directory)
+            assert report == {'retired': [c.path.name], 'skipped': [], 'errors': []}
+            assert json.loads(c.path.read_text())['state'] == 'RETIRED'
+            assert c.absent()
+            if mode == 'name-conflict':
+                assert conflicts and conflicts[0] != 0
+        assert not any(args[0] in ('start', 'exec') for args in calls)
+    finally:
+        monkeypatch.setattr(runtime, 'run', actual)
+        runtime.reconcile(c.directory)
     assert c.absent()
