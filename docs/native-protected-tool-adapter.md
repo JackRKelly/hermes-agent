@@ -82,7 +82,8 @@ server threads are joined, and concurrent eager/scope close shares one close
 operation. Close waits for an in-flight acquisition, including a late unpublished
 Popen handle, before reaping. Running after close cannot acquire anything. Cleanup
 attempts every resource even after a fault, retains exact failed handles, and
-retries only unfinished resources through `retry_protected_process_closes`.
+retries only unfinished resources on a later `close()` or an owner-only
+`retry_protected_process_closes` sweep.
 The fresh child is signalled through its owned process group, not PID alone.
 Provider close errors remain visible while child cleanup still runs.
 Provider ownership includes failed preflight/acquisition, not just a yielded
@@ -94,7 +95,11 @@ close/drain. An uncooperative task remains retained for explicit owner retry and
 raises `provider_close_timeout`; it cannot block native retirement. A teardown
 fault (including that bounded timeout) takes precedence over `CancelledError`;
 a successful teardown propagates cancellation. This priority reports failed
-cleanup rather than silently claiming it completed. No caller-cancel retry can
+cleanup rather than silently claiming it completed. An SDK `aclose` that itself
+raises cancellation is reported as the fault `provider_close_cancelled`, never
+as cancellation of the owner; explicit retry can replace that cancelled SDK
+close task. The outer scope's provider-close fault takes priority if both it and
+a process-cleanup fault occur; retained resource handles still require retry. No caller-cancel retry can
 turn the provider-drain bound into an unbounded gather.
 
 `SentinelWorker.close` is serialized and idempotent across threads; a stop-request
@@ -183,7 +188,7 @@ Use an isolated developer interpreter, disposable HOME/HERMES_HOME and scratch
 TMPDIR, and retain the canonical wrapper's real platform skips and fixed budgets:
 
 ```
-HERMES_TEST_FILE_RETRIES=0 HERMES_TEST_FILE_TIMEOUT=120 scripts/run_tests.sh -j 4 tests/gateway/test_protected_conversation.py tests/gateway/test_protected_turn_scope.py tests/gateway/test_protected_turn_validation.py tests/gateway/test_protected_tool_adapter.py tests/gateway/test_protected_fresh_process.py tests/gateway/test_protected_ipc.py tests/gateway/test_protected_retirement_retry.py
+HERMES_TEST_FILE_RETRIES=0 HERMES_TEST_FILE_TIMEOUT=120 scripts/run_tests.sh -j 4 tests/gateway/test_protected_conversation.py tests/gateway/test_protected_turn_scope.py tests/gateway/test_protected_turn_validation.py tests/gateway/test_protected_tool_adapter.py tests/gateway/test_protected_fresh_process.py tests/gateway/test_protected_ipc.py tests/gateway/test_protected_retirement_retry.py tests/gateway/test_protected_process_close.py tests/gateway/test_protected_observations.py tests/gateway/test_protected_provider_close_fault.py
 ```
 
 The fresh-process full-path tests are explicitly controlled **NO-REAL-PROVIDER**

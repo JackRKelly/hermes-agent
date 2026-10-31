@@ -12,6 +12,11 @@ class ProviderCloseTimeout(RuntimeError):
         super().__init__('provider_close_timeout')
 
 
+class ProviderCloseCancelled(RuntimeError):
+    def __init__(self):
+        super().__init__('provider_close_cancelled')
+
+
 class SelectedAsyncProvider:
     """Pinned SDK create + ProviderTransport + async SDK close, owner-constructed.
 
@@ -82,6 +87,10 @@ class SelectedAsyncProvider:
         _, unfinished = await asyncio.wait(pending, timeout=CLOSE_SECONDS)
         if unfinished:
             raise ProviderCloseTimeout()
+        if self._sdk_close_task.cancelled():
+            # SDK self-cancellation is a failed close, not owner cancellation.
+            # Keep the exact task for explicit retry and let the sweep continue.
+            raise ProviderCloseCancelled()
         self._sdk_close_task.result()
 
     async def close(self, *, retry=False):

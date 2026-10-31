@@ -132,7 +132,7 @@ def test_cancelled_sdk_close_is_retained_and_explicitly_retryable():
                 raise asyncio.CancelledError
         provider = SelectedAsyncProvider(model='controlled-no-provider', provider_id='custom',
             transport=Transport(), create=create, aclose=close)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(RuntimeError, match='provider_close_cancelled'):
             await provider.close()
         await provider.close(retry=True)
         await provider.close()
