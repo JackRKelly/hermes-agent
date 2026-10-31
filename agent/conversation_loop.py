@@ -1774,6 +1774,7 @@ def _run_conversation_turn(
     return result
 
 
+@protected_turn_entry
 def run_conversation(
     agent,
     user_message: Any,

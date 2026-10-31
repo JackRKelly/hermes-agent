@@ -26,6 +26,7 @@ class _Endpoint:
         self._deadline = time.monotonic() + 5
         self._lock = threading.Lock()
         self._closed = False
+        self._closing = False
 
     def client(self):
         return CapabilityClient(self.request, self._token, self.binding, self.channel)
@@ -33,7 +34,7 @@ class _Endpoint:
     def request(self, frame):
         frame = bounded_copy(frame)
         with self._lock:
-            if (self._closed or type(frame) is not dict or set(frame) != {'channel', 'token', 'binding', 'sequence', 'operation', 'payload'}
+            if (self._closed or self._closing or type(frame) is not dict or set(frame) != {'channel', 'token', 'binding', 'sequence', 'operation', 'payload'}
                     or type(frame['token']) is not str or not hmac.compare_digest(frame['token'], self._token)
                     or frame['channel'] != self.channel or json.dumps(frame['binding'], sort_keys=True) != json.dumps(self.binding, sort_keys=True)
                     or type(frame['sequence']) is not int or frame['sequence'] != self._sequence + 1
@@ -89,16 +90,17 @@ class NativeLifecycle(_Endpoint):
         if admitted is None or admitted['payload'].get('kanban_card_v1') != expected:
             raise RuntimeStoreError('protected_card_binding_mismatch')
         hello = {'type': 'hello', 'pid': process.pid, 'birth': worker_birth(psutil.Process(process.pid)), 'ancestors': [os.getpid()]}
-        self._scope = reserve_admission_worker(authority, admission_id=admission_id, process=process,
-            principal_id=principal_id, hello=hello)
         self._admission_id = admission_id
         self._connection = SimpleNamespace(authority=authority,
             actor=SimpleNamespace(subject=principal_id, profile_id=authority.profile_id, capabilities={'worker:adopt'}))
         self._native_sequence = 0
-        super(NativeLifecycle, self).__init__({k: self._scope[k] for k in
-            ('profile_id', 'session_id', 'execution_id', 'generation', 'epoch')} |
-            {k: self._context[k] for k in ('board', 'task_id', 'run_id')}, 'lifecycle')
+        self._lock, self._closed = threading.Lock(), False
+        self._scope = reserve_admission_worker(authority, admission_id=admission_id, process=process,
+            principal_id=principal_id, hello=hello)
         try:
+            super(NativeLifecycle, self).__init__({k: self._scope[k] for k in
+                ('profile_id', 'session_id', 'execution_id', 'generation', 'epoch')} |
+                {k: self._context[k] for k in ('board', 'task_id', 'run_id')}, 'lifecycle')
             identity = {k: v for k, v in self._scope.items() if k != 'epoch'}
             claim = _claim(self._connection, None, identity)
             adopt_worker_execution(authority.db, epoch=self._scope['epoch'], execution_id=self._scope['execution_id'],
@@ -157,12 +159,13 @@ class NativeLifecycle(_Endpoint):
         with self._lock:
             if self._closed:
                 return
-            self._closed = True
+            self._closing = True
             try:
                 lose_admission_worker(self._authority, {'admission_id': self._admission_id}, self._scope)
             except RuntimeStoreError as exc:
                 if str(exc) not in ('stale_generation', 'stale_epoch'):
                     raise
+            self._closed = True
 
     def _invoke(self, operation, payload):
         self._check()

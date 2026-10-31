@@ -18,7 +18,7 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
     from gateway.session_protected_tools import SentinelLaunch, ToolProxy
     from gateway.session_protected_capabilities import NativeLifecycle, ScopedInference
     from agent.protected_conversation import ProtectedTurn
-    from agent.conversation_loop import _run_conversation_turn
+
     from run_agent import AIAgent
 
     (tmp_path / 'allowed.txt').write_text('CONTROLLED_NO_PROVIDER\n')
@@ -27,9 +27,10 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
         worker, process = await _spawn_registered_worker(authority, SimpleNamespace(session_id='owned'),
             {'generation': admission['generation']}, sentinel=SentinelLaunch(tmp_path.resolve()))
         proxy = ToolProxy(worker, SentinelLaunch(tmp_path.resolve()))
+        lifecycle = None
         try:
-            proxy.bind()
-            lifecycle = NativeLifecycle.reserve(authority, admission_id=admission['admission_id'],
+            await asyncio.to_thread(proxy.bind)
+            lifecycle = await asyncio.to_thread(NativeLifecycle.reserve, authority, admission_id=admission['admission_id'],
                 principal_id='fixture-owner', process=process, context=context)
             requests = []
             def controlled_inference(messages, tools):
@@ -43,7 +44,11 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
             agent._protected_turn = ProtectedTurn(inference.client(), lifecycle.client(), proxy)
             # If ordinary dispatch/inline routes are reached, this fixture fails immediately.
             agent._execute_tool_calls_sequential = lambda *a, **k: pytest.fail('host dispatch reached')
-            result = _run_conversation_turn(agent, 'Read the nonsecret sentinel')
+            for target in ('agent.background_review.cancel_background_review_for_live_turn',
+                    'agent.turn_finalizer.settle_held_final', 'agent.turn_context.export_current_turn_boundary',
+                    'tools.vision_tools_history_budget.native_turn_images'):
+                monkeypatch.setattr(target, lambda *a, **k: pytest.fail('ordinary pre/post phase reached'))
+            result = await asyncio.to_thread(agent.run_conversation, 'Read the nonsecret sentinel')
             assert result['final_response'] == 'CONTROLLED_DONE'
             assert result['api_calls'] == 2 and result['completed']
             assert len(requests) == 2 and requests[0][1] == requests[1][1]
@@ -57,13 +62,15 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
                 assert kb.get_task(conn, context['task_id']).status == 'running'
             from hermes_state_runtime import get_session_admission
             assert get_session_admission(authority.db, admission_id=admission['admission_id'])['status'] == 'started'
-            lifecycle.close()
+            await asyncio.to_thread(lifecycle.close)
             assert get_session_admission(authority.db, admission_id=admission['admission_id'])['status'] == 'unknown'
             with authority.db._read_ctx() as conn:
                 assert conn.execute('SELECT status FROM worker_executions').fetchone()[0] == 'terminal'
             with pytest.raises(Exception, match='protected_capability_denied'):
                 lifecycle.client().request('check', {})
         finally:
+            if lifecycle is not None:
+                await asyncio.to_thread(lifecycle.close)
             worker.close()
             authority.db.close()
     asyncio.run(exercise())
@@ -90,8 +97,9 @@ def native_claim(tmp_path, monkeypatch):
     db = SessionDB(tmp_path / 'isolated-state.db')
     db.create_session('owned', 'cli')
     epoch = begin_runtime_epoch(db, instance_id='controlled-owner')
-    authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), pending_stop_causes={},
-        _require_admission_open=lambda: None)
+    from gateway.session_authority import SessionAuthority
+    authority = SessionAuthority(SimpleNamespace(_draining=False), db=db, epoch=epoch,
+        profile_id=str(tmp_path), instance_id='controlled-owner')
     actor = Principal('fixture-owner', str(tmp_path), frozenset({'session:create'}), 'transport')
     policy, _ = build_kanban_policy(SimpleNamespace(authority=authority, actor=actor, native_owner=True),
         dict(board='controlled', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock),
@@ -183,9 +191,10 @@ def test_native_fences_reject_inflight_model_result_before_any_tool(tmp_path, mo
         worker, process = await _spawn_registered_worker(authority, SimpleNamespace(session_id='owned'),
             {'generation': admission['generation']}, sentinel=SentinelLaunch(tmp_path.resolve()))
         proxy = ToolProxy(worker, SentinelLaunch(tmp_path.resolve()))
+        owner = None
         try:
-            proxy.bind()
-            owner = NativeLifecycle.reserve(authority, admission_id=admission['admission_id'],
+            await asyncio.to_thread(proxy.bind)
+            owner = await asyncio.to_thread(NativeLifecycle.reserve, authority, admission_id=admission['admission_id'],
                 principal_id='fixture-owner', process=process, context=context)
             def controlled_inference(messages, tools):
                 if invalidate == 'card':
@@ -207,11 +216,13 @@ def test_native_fences_reject_inflight_model_result_before_any_tool(tmp_path, mo
                 return NormalizedResponse(None, [ToolCall('never-execute', 'terminal', '{}')], 'tool_calls')
             turn = ProtectedTurn(ScopedInference(controlled_inference, owner.binding).client(), owner.client(), proxy)
             with pytest.raises((RuntimeStoreError, RuntimeError)):
-                turn.run('CONTROLLED_NEGATIVE')
+                await asyncio.to_thread(turn.run, 'CONTROLLED_NEGATIVE')
             assert proxy.sequence == 0
             assert process.poll() is not None
             assert len(authority.db.get_messages('owned')) == 1
         finally:
+            if owner is not None:
+                await asyncio.to_thread(owner.close)
             worker.close()
             authority.db.close()
     asyncio.run(exercise())

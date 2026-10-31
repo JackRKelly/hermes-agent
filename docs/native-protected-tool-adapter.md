@@ -13,8 +13,8 @@ owner and untrusted tool child remain separate authorities. This direction is
 accepted for source design, **not isolation or deployment acceptance**.
 
 This source adds a **restricted conversation subset** at the actual
-`agent.conversation_loop._run_conversation_turn` and
-`AIAgent._execute_tool_calls` boundaries. It is not a replacement scheduler or
+public `AIAgent.run_conversation`, outer and inner conversation-loop entries,
+and `AIAgent._execute_tool_calls` boundaries. It is not a replacement scheduler or
 control plane. `ProtectedTurn` consumes Hermes' actual `NormalizedResponse` /
 `ToolCall` provider interface. Its frozen two-tool schema exposes only the
 existing zero-argument nonsecret `read_file` and `terminal` source sentinels.
@@ -25,7 +25,7 @@ segmented and inline-resolver entry points explicitly refuse protected agents.
 
 The restricted route runs BEFORE the ordinary turn's credential refresh,
 transforms, hooks, context construction, auxiliary calls and prelude. It never
-loads memory, delegation, MCP, browser, skill or provider plugins. Ordinary
+invokes memory, delegation, MCP, browser, skill or provider plugins. Ordinary
 managed workers do not select this source route; their existing path is retained.
 
 ## Bootstrap/import freeze
@@ -66,8 +66,12 @@ has only `complete`, with a preselected trusted callable; no provider name,
 credential, URL, tool execution or configuration operation exists. Lifecycle
 has only `check` and bounded `append`, mapped to native `transcript.append`
 receipts. No child reserve/adopt, card complete, lease renewal, session targeting
-or general RPC crosses the interface. Cleanup uses native loss/revocation,
-never a fabricated completed admission. The managed scope owns process reap.
+or general RPC crosses the interface. The owner-owned `protected_turn_scope`
+performs blocking bind/reservation and teardown off-loop, shields acquisition
+through cancellation, and always attempts native retirement and reaps the
+worker. A turn error eagerly closes its child; the enclosing owner scope still
+retires its reservation. Cleanup uses native loss/revocation, never a fabricated
+completed admission. Failed storage cleanup remains retryable but denies work.
 
 The source test uses authenticated **in-process callable interfaces**, NOT
 separately protected service identities or a production transport. The inference
@@ -85,7 +89,10 @@ not atomically couple the two SQLite databases, eliminate the last-check/tool
 race or prove cancellation of an already executing arbitrary tool descendant.
 A successful restricted turn does NOT settle its admission or complete/release
 a card. Closing its experimental reservation records the native loss outcome
-(unknown admission / terminal worker), not success.
+(unknown admission / terminal worker), not success. On a replaced generation or
+epoch the old owner does not overwrite state; ordinary new-owner recovery owns
+that disposition. The subset starts fresh, accepts no prior history, and a failed
+tool round can retain a call row without a result until unknown/discard recovery.
 
 ## Actual subprocess path retained
 
@@ -100,6 +107,12 @@ fixed `allowed.txt` is read, with no-follow/oversize refusal. File, high-FD,
 directory and Unix-listener negative controls prove cooperative exec sanitation,
 NOT protected kernel admission.
 
+The original tool child's name-level module assertion still does NOT detect a
+stdlib-named repository shadow; the new origin-based freeze is a separate
+inference-side negative control, not a fix to that carried tool-child limitation.
+Writable bytecode caches also remain runtime inputs: `-B` suppresses writes,
+not reads. Neither source assertion is immutable-runtime attestation.
+
 ## Exact technical gap (no administrator command is ready)
 
 The full `run_agent` / `conversation_loop` import closure still loads ordinary
@@ -107,7 +120,8 @@ bootstrap, tool discovery and broad phase helpers. Therefore a genuinely frozen
 fresh interpreter **refuses importing the ordinary AIAgent implementation**.
 The controlled integration fixture imports the existing ordinary modules first,
 constructs an uninitialized AIAgent carrying only the restricted route, and
-exercises the real loop/batch methods plus actual child/DB contracts. That is
+exercises the real public facade and loop/batch methods plus an actual
+SessionAuthority, card/claim, reservation/adoption, child and DB contracts. That is
 routing evidence, **not proof that the full AIAgent constructor can safely run
 with provider capability**. The fresh-process import-freeze test is a separate
 negative control and must not be represented as the same end-to-end process.
@@ -125,6 +139,12 @@ Before production, select one bounded source completion:
 4. Implement/review the single-purpose root-owned fixed entry and protected
    registry with immutable interpreter/stdlib/source/dependencies/policy.
 
+The reused native adoption claim currently checks same-UID process ownership;
+it cannot be reused unchanged for a separate-UID tool child. Replace that proof
+with protected launcher/registry attestation before an identity split. Trusted
+callables and agent-class dispatch must be pinned, with no subclass or instance
+override accepted by the future protected facade.
+
 Only that candidate can define the privileged sentinel gate. Real/effective/
 saved IDs, nonempty nonzero supplementary groups, memberd opt-out, privilege-
 regain negatives, ACL/read-only reviewer identity, filesystem/service/network/
@@ -138,12 +158,26 @@ Run the canonical wrapper with an isolated developer interpreter and scratch
 HOME/HERMES_HOME/TMPDIR:
 
 ```
-scripts/run_tests.sh tests/gateway/test_protected_conversation.py tests/gateway/test_protected_tool_adapter.py
+scripts/run_tests.sh tests/gateway/test_protected_conversation.py tests/gateway/test_protected_turn_scope.py tests/gateway/test_protected_turn_validation.py tests/gateway/test_protected_tool_adapter.py
 ```
 
-The registered `linux-contract-probe.yml` path is a narrowly scoped manual
+The separate `ci/native-protected-controller-20261031` branch carries the
+registered `linux-contract-probe.yml` path as a narrowly scoped manual
 no-provider diagnostic: one Linux and one macOS job, exact source-SHA checkout,
-source/tree/hash evidence, canonical tests and `scripts/check`. The diagnostic
+source ancestry/expected-tree/hash evidence, full agent/gateway canonical tests
+and `scripts/check`. No diagnostic-controller workflow is present in the source
+PR's final tree, preventing an accidental default-branch workflow replacement.
+The diagnostic
 controller/ref and tested source SHA are separate evidence fields. A diagnostic
 pass is not an assertion that an empty PR check rollup is green. No default-
 branch, full-ci, Windows, publish, deployment or secret workflow change is needed.
+
+Current external CI blocker: GitHub's permissions API reports Actions enabled,
+but dispatching the individually enabled registered workflow returned HTTP 422,
+`Actions has been disabled for this repository.` The authenticated Actions UI
+shows a fork-wide disabled-workflows gate. Its global re-enable button would
+also expose unrelated inherited workflows/schedules and was NOT clicked. The
+single diagnostic workflow was restored to its original disabled state. Zero
+new source-bound runs/checks exist; Linux evidence is absent and CI is NOT green.
+Fork-wide activation is a separate owner authorization/safe-containment gate,
+not permission to change main or run the full inherited CI/publish graph.

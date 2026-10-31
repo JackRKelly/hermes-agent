@@ -10,10 +10,18 @@ from functools import wraps
 import inspect
 import time
 
-from agent.transports.types import NormalizedResponse
+from agent.transports.types import NormalizedResponse, ToolCall
 
 MAX_BYTES = 65536
 TOOL_NAMES = ('read_file', 'terminal')  # the existing fixed sentinel child ONLY
+
+
+def protected_turn_of(agent):
+    """Only an explicit, exact instance-owned turn selects this private route."""
+    value = getattr(agent, '__dict__', {}).get('_protected_turn')
+    if value is not None and type(value) is not ProtectedTurn:
+        raise RuntimeError('protected dispatch must use the frozen proxy batch entry')
+    return value
 
 
 def protected_turn_entry(ordinary):
@@ -22,11 +30,12 @@ def protected_turn_entry(ordinary):
 
     @wraps(ordinary)
     def enter(agent, user_message, *args, **kwargs):
-        protected = getattr(agent, '_protected_turn', None)
+        protected = protected_turn_of(agent)
         if protected is None:
             return ordinary(agent, user_message, *args, **kwargs)
         bound = signature.bind(agent, user_message, *args, **kwargs)
-        if any(value is not None for key, value in bound.arguments.items() if key not in ('agent', 'user_message')):
+        allowed = {next(iter(signature.parameters)), 'user_message'}
+        if any(value is not None for key, value in bound.arguments.items() if key not in allowed):
             raise ValueError('unsupported protected conversation option')
         return protected.run(user_message, lambda response, rows: agent._execute_tool_calls(response, rows, ''))
 
@@ -61,7 +70,8 @@ class ProtectedTurn:
     couple the two SQLite databases or prove in-flight kernel cancellation.
     """
     def __init__(self, inference, lifecycle, proxy):
-        if inference.binding != lifecycle.binding or inference.channel != 'inference' or lifecycle.channel != 'lifecycle':
+        if (json.dumps(inference.binding, sort_keys=True) != json.dumps(lifecycle.binding, sort_keys=True)
+                or inference.channel != 'inference' or lifecycle.channel != 'lifecycle'):
             raise ValueError('protected capability binding mismatch')
         self.inference, self.lifecycle, self.proxy = inference, lifecycle, proxy
         self._used = False
@@ -70,6 +80,7 @@ class ProtectedTurn:
             'description': 'Fixed nonsecret source sentinel only',
             'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}} for name in TOOL_NAMES)
         self.calls = 0
+        self._call_ids = set()
 
     def _check(self):
         if self.proxy.worker.stop.is_set() or time.monotonic() >= self.deadline:
@@ -87,13 +98,15 @@ class ProtectedTurn:
             raise ValueError('protected tool budget exceeded')
         parsed, seen = [], set()
         for tc in calls:
-            if (type(tc.id) is not str or not 1 <= len(tc.id) <= 128 or tc.id in seen
+            if (type(tc) is not ToolCall or type(tc.id) is not str or not 1 <= len(tc.id) <= 128
+                    or tc.id in seen or tc.id in self._call_ids
                     or type(tc.name) is not str or tc.name not in TOOL_NAMES
                     or tc.provider_data or type(tc.arguments) is not str or tc.arguments.strip() != '{}'):
                 raise ValueError('unsupported protected tool call')
             seen.add(tc.id)
             parsed.append(tc)
         # Validate the ENTIRE batch before side effects or publishing its call row.
+        self._call_ids.update(seen)
         row = {'role': 'assistant', 'content': assistant.content or '', 'tool_calls': [
             {'id': tc.id, 'type': 'function', 'function': {'name': tc.name, 'arguments': '{}'}} for tc in parsed]}
         self._append([row])
