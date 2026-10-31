@@ -8,16 +8,28 @@ profile, account, credential, canonical board or dispatcher is changed.
 
 `gateway.session_managed_worker._spawn_registered_worker` has an explicit
 source-test-only `SentinelLaunch` input. It uses the **real** cancellation-safe
-`acquire_process`, native worker registry, `ManagedWorker` lifetime and Stop latch.
+`acquire_process`, native worker registry and `ManagedWorker` lifetime. The
+per-worker Stop event/writer is reused; canonical authorization, admission
+settlement and the pre-spawn generation latch are not exercised. An owner-owned
+`sentinel_scope` closes/reaps and deregisters on every exit. A cancelled sentinel
+spawn propagates cancellation without fabricating an admission settlement.
 There is no environment variable, profile option, plugin, launcher setting or
 admission registry that enables it. A row carrying `protected_tools_v1` is rejected
 before the profile environment or ordinary bootstrap is constructed, including
-when a sentinel object is also supplied. Normal managed sessions are unchanged;
-this patch does NOT retroactively isolate them.
+when a sentinel object is also supplied. The ordinary managed path is intended to retain its existing behavior, covered
+by the enclosing regression suite, not a proof of unchanged behavior everywhere.
+This patch does NOT retroactively isolate normal managed sessions.
 
 The actual `agent/managed_worker.py` executable recognizes exactly one fixed
-sentinel argv before PM bootstrap and any profile, provider, agent, hook or MCP
-import. `-I -S`, fixed source-owned entry, fresh locale-only environment,
+sentinel argv before PM bootstrap and any profile, provider-client, AIAgent, hook or MCP
+import. The agent package itself still imports `agent.jiter_preload`, which
+attempts the optional parser import; `-S` excludes installed dependencies, and
+the actual child fails if any third-party module is present. The exact
+non-stdlib module list is checked at hello and after every tool call. Both package
+initializers and that preload module are part of the source review closure.
+This is an assertion about this pinned test source, not protection from mutable
+source code. The same fixed argv also selects this source-test entry with `-m`;
+it is not an isolation permission. `-I -S -B`, fixed source-owned entry, fresh locale-only environment,
 `close_fds=True`, empty `pass_fds`, private process group and explicit stdio are
 used. The sentinel entry refuses root. The test workspace is same-UID and
 user-writable: it is **not** a protected production runtime input.
@@ -64,7 +76,8 @@ controlled non-provider caller of the real managed-child seam, not inference.
 Real owner/test process -> real registered managed child -> native file primitive
 and real `/bin/cat`. Real inherited file, high-numbered FD, directory and Unix
 listener are present; the file's deliberate exec-inheritance control succeeds.
-The actual child enumerates only stdio and receives no profile environment.
+The actual child enumerates only stdio and receives no profile environment. These are cooperative same-UID reports of
+Popen sanitation, not kernel attestation or an isolation boundary.
 Symlink and oversized sentinel reads fail. Unknown tools and arbitrary terminal
 arguments are rejected with no host fallback. Stop acknowledges and the actual
 managed child is reaped; subsequent proxy work is refused.
@@ -87,7 +100,8 @@ channels. Then implement/review the single-purpose root-owned native entry and
 protected registry with immutable full runtime input checks. Only that frozen
 candidate can define the privileged sentinel protocol. Nonempty/nonzero groups,
 memberd opt-out, irreversible IDs and all host/service/descendant negatives stay
-mandatory and unproven. No Python setuid helper, account/group change, live
+mandatory and unproven. There is no safe administrator handoff or
+privileged acceptance protocol yet. No Python setuid helper, account/group change, live
 admission, deployment or pilot release is supplied.
 
 ## Reproduction

@@ -548,6 +548,9 @@ def _stopped_before_spawn(authority, ref, row):
 async def _spawn_registered_worker(authority, ref, row, *, sentinel=None):
     """Spawn the turn's child and register it for Stops: ``(worker, process)``, or None when the spawn was cancelled (the
     interrupted result is already recorded). The generation stays marked spawning until registration."""
+    if sentinel is not None and (ref.session_id in getattr(authority, '_managed_workers', {})
+            or ref.session_id in getattr(authority, '_managed_spawning', {})):
+        raise ValueError('sentinel worker already owned')
     spawning = _mark_spawning(authority, ref, row)
     generation = row.get('generation')
     try:
@@ -575,6 +578,8 @@ async def _spawn_registered_worker(authority, ref, row, *, sentinel=None):
     except asyncio.CancelledError:
         # acquire_process owns late-child cleanup; no bootstrap or reservation was sent.
         spawning.pop(ref.session_id, None)
+        if sentinel is not None:
+            raise  # a source sentinel is not a canonical admission and has no settlement
         _interrupted_before_bootstrap(authority, row, _latched_stop_cause(authority, ref.session_id, generation))
         return None
     except BaseException:
@@ -582,7 +587,7 @@ async def _spawn_registered_worker(authority, ref, row, *, sentinel=None):
         raise
     if sentinel is not None:
         from gateway.session_protected_tools import SentinelWorker
-        worker = SentinelWorker(process)
+        worker = SentinelWorker(process, authority, ref.session_id)
         worker.writer.start()
     else:
         worker = ManagedWorker(process)

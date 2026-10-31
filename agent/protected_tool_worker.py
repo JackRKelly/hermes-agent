@@ -3,6 +3,17 @@ import json
 
 MAX_FRAME = 8192
 OPS = {'hello', 'bind', 'call', 'result', 'cancel', 'cancelled'}
+SOURCE_IMPORTS = ('agent', 'agent.jiter_preload', 'agent.protected_tool_worker',
+                  'tools', 'tools.file_operations_native')
+
+
+def source_imports():
+    import sys
+    names = sorted(name for name in sys.modules
+        if name != '__main__' and name.split('.')[0] not in sys.stdlib_module_names)
+    if set(names) - set(SOURCE_IMPORTS):
+        raise ValueError('unexpected non-stdlib import')
+    return names
 
 
 def _unique(pairs):
@@ -89,7 +100,7 @@ def sentinel_main():
                 if exc.errno != errno.EBADF:
                     raise
         send({'op': 'hello', 'pid': os.getpid(), 'fds': sorted(fds),
-              'environment': sorted(os.environ)})
+              'environment': sorted(os.environ), 'imports': source_imports()})
         binding = read_frame(sys.stdin.buffer)
         if binding != {'op': 'bind', 'pid': os.getpid(), 'adapter': 'sentinel-only-v1'}:
             raise ValueError('invalid sentinel binding')
@@ -104,7 +115,8 @@ def sentinel_main():
                     or type(frame['name']) is not str or frame['name'] not in tools
                     or type(frame['args']) is not dict or frame['args']):
                 raise ValueError('invalid sentinel tool call')
-            send({'op': 'result', 'sequence': sequence, 'result': tools[frame['name']]()})
+            result = tools[frame['name']]()
+            send({'op': 'result', 'sequence': sequence, 'result': result, 'imports': source_imports()})
         return 0
     except (ValueError, EOFError, OSError):
         return 1

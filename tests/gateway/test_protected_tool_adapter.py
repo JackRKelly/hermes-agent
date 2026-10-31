@@ -59,7 +59,10 @@ class ProtectedToolAdapterTests(unittest.TestCase):
                         self.assertNotIn('HERMES_HOME', hello['environment'])
                         self.assertNotIn('SENTINEL_PROVIDER_AUTH', hello['environment'])
                         self.assertLessEqual(set(hello['environment']), {'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING'})
+                        self.assertEqual(hello['imports'], ['agent', 'agent.jiter_preload', 'agent.protected_tool_worker'])
                         self.assertEqual(proxy.invoke('read_file', {}), '1|SENTINEL_ONLY')
+                        self.assertEqual(proxy.last_imports, ['agent', 'agent.jiter_preload', 'agent.protected_tool_worker',
+                            'tools', 'tools.file_operations_native'])
                         self.assertEqual(proxy.invoke('terminal', {}), 'SENTINEL_ONLY\n')
                         for name in ('write_file', 'patch', 'delegate_task', 'browser', 'execute_code', 'tool_call', 'mcp'):
                             with self.assertRaises(ValueError):
@@ -72,6 +75,8 @@ class ProtectedToolAdapterTests(unittest.TestCase):
                     finally:
                         worker.close()
                     self.assertIsNotNone(process.returncode)
+                    self.assertEqual(authority._managed_workers, {})
+                    self.assertEqual(authority._managed_spawning, {})
                 asyncio.run(exercise())
             finally:
                 os.close(fd)
@@ -119,6 +124,68 @@ class ProtectedToolAdapterTests(unittest.TestCase):
                     finally:
                         worker.close()
             asyncio.run(exercise())
+
+    @pytest.mark.platforms("posix")
+    def test_owner_scope_reaps_and_deregisters_on_validation_error(self):
+        from gateway.session_protected_tools import SentinelLaunch, sentinel_scope
+        with tempfile.TemporaryDirectory() as directory:
+            authority = SimpleNamespace(pending_stop_causes={})
+            async def exercise():
+                with self.assertRaises(ValueError):
+                    async with sentinel_scope(authority, SimpleNamespace(session_id='scope-error'),
+                            {'generation': 1}, SentinelLaunch(Path(directory).resolve())) as proxy:
+                        process = proxy.worker.process
+                        proxy.bind()
+                        proxy.invoke('delegate_task', {})
+                self.assertEqual(authority._managed_workers, {})
+                self.assertEqual(authority._managed_spawning, {})
+                self.assertIsNotNone(process.returncode)
+            asyncio.run(exercise())
+
+    @pytest.mark.platforms("posix")
+    def test_cancel_during_actual_spawn_does_not_settle_an_admission(self):
+        from unittest.mock import patch
+        import subprocess
+        import threading
+        from gateway import session_managed_worker as managed
+        from gateway.session_protected_tools import SentinelLaunch
+        original = subprocess.Popen
+        entered, release = (threading.Event() for _ in range(2))
+        children = []
+        def spawn(*args, **kwargs):
+            child = original(*args, **kwargs)
+            children.append(child)
+            entered.set()
+            assert release.wait(5)
+            return child
+        with tempfile.TemporaryDirectory() as directory:
+            authority = SimpleNamespace(pending_stop_causes={})
+            async def exercise():
+                task = asyncio.create_task(managed._spawn_registered_worker(authority,
+                    SimpleNamespace(session_id='cancel-spawn'), {'generation': 1},
+                    sentinel=SentinelLaunch(Path(directory).resolve())))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                task.cancel()
+                try:
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                finally:
+                    release.set()
+                await asyncio.to_thread(children[0].wait, 5)
+                self.assertEqual(authority._managed_spawning, {})
+                self.assertEqual(getattr(authority, '_managed_workers', {}), {})
+                self.assertFalse(hasattr(authority, 'pending_results'))
+            try:
+                with patch.object(managed.subprocess, 'Popen', spawn):
+                    asyncio.run(exercise())
+            finally:
+                release.set()
+                for child in children:
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait(timeout=5)
+                    for stream in (child.stdin, child.stdout):
+                        stream.close()
 
     def test_strict_channel_rejects_duplicate_unknown_and_oversize(self):
         from agent.protected_tool_worker import read_frame
