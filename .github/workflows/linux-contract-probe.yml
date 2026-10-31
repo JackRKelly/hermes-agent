@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$HOME" "$HERMES_HOME"
-          scripts/run_tests.sh tests/agent/ tests/gateway/ tests/tools/test_file_operations.py 2>&1 | tee "$RUNNER_TEMP/native-proof/tests.log"
+          scripts/run_tests.sh tests/gateway/test_managed_worker_*.py tests/gateway/test_managed_spawn_cancellation.py tests/gateway/test_protected_tool_adapter.py tests/gateway/test_protected_conversation.py tests/gateway/test_protected_turn_scope.py tests/gateway/test_protected_turn_validation.py tests/gateway/test_worker_admission_reservation.py tests/tools/test_file_operations.py tests/agent/test_run_agent.py tests/agent/test_tool_call_incremental_persistence.py tests/agent/test_inline_tool_executors_memory_args.py tests/agent/test_memory_provider_caller_profile.py tests/agent/test_conversation_loop_interpreter_shutdown.py tests/agent/test_tool_call_guardrail_runtime.py 2>&1 | tee "$RUNNER_TEMP/native-proof/tests.log"
       - name: Upload source-bound evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
