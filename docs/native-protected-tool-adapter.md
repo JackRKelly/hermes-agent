@@ -71,7 +71,10 @@ performs blocking bind/reservation and teardown off-loop, shields acquisition
 through cancellation, and always attempts native retirement and reaps the
 worker. A turn error eagerly closes its child; the enclosing owner scope still
 retires its reservation. Cleanup uses native loss/revocation, never a fabricated
-completed admission. Failed storage cleanup remains retryable but denies work.
+completed admission. Failed storage cleanup denies work and is retryable through
+the direct lifecycle handle. The scope currently propagates a retirement storage
+failure and drops that handle; same-epoch recovery/retry delivery is not yet
+provided. This source scope is fixture-only until that residual is addressed.
 
 The source test uses authenticated **in-process callable interfaces**, NOT
 separately protected service identities or a production transport. The inference
@@ -80,6 +83,11 @@ actual provider response type. No live provider SDK/auth success is claimed.
 These interfaces validate/recheck deadlines; a synchronous trusted callable can
 still block while executing. Hard transport I/O deadlines, peer identity,
 FD transfer, cancellation and per-service credential placement remain required.
+Cancelling an awaiting coroutine does not stop an already running `to_thread`
+inference callable; the fixture checks reject its late result but do not cancel
+that call or close the inference endpoint. Concurrent eager/scope child teardown
+also remains a hardening gap. No non-fixture caller or stronger cancellation
+acceptance is authorized by these interfaces.
 
 Before tools, the lifecycle owner durably appends the exact assistant call row;
 results/final text use the same scoped native receipts. Native/card fencing is
@@ -164,7 +172,9 @@ scripts/run_tests.sh tests/gateway/test_protected_conversation.py tests/gateway/
 The separate `ci/native-protected-controller-20261031` branch carries the
 registered `linux-contract-probe.yml` path as a narrowly scoped manual
 no-provider diagnostic: one Linux and one macOS job, exact source-SHA checkout,
-source ancestry/expected-tree/hash evidence, full agent/gateway canonical tests
+source ancestry/expected-tree/hash evidence, 51 focused native and ordinary-agent
+regression files (including public turn, tool persistence/inline, memory profile,
+guardrail, and unchanged managed-worker cases)
 and `scripts/check`. No diagnostic-controller workflow is present in the source
 PR's final tree, preventing an accidental default-branch workflow replacement.
 The diagnostic
@@ -181,3 +191,10 @@ single diagnostic workflow was restored to its original disabled state. Zero
 new source-bound runs/checks exist; Linux evidence is absent and CI is NOT green.
 Fork-wide activation is a separate owner authorization/safe-containment gate,
 not permission to change main or run the full inherited CI/publish graph.
+
+A separate broader local agent/gateway diagnostic is not green: compaction
+snapshot failures and the absent optional ACP dependency also reproduce on the
+pinned baseline (in a checkout differing only by the controller workflow).
+Those are not hidden as passes or silently repaired in this source slice. The
+focused diagnostic is deliberately bounded to the changed and adjacent contracts;
+it does not represent the full suite or production-provider coverage.
