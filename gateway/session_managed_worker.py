@@ -545,29 +545,56 @@ def _stopped_before_spawn(authority, ref, row):
     return True
 
 
-async def _spawn_registered_worker(authority, ref, row):
+async def _spawn_registered_worker(authority, ref, row, *, sentinel=None):
     """Spawn the turn's child and register it for Stops: ``(worker, process)``, or None when the spawn was cancelled (the
     interrupted result is already recorded). The generation stays marked spawning until registration."""
+    if sentinel is not None and (ref.session_id in getattr(authority, '_managed_workers', {})
+            or ref.session_id in getattr(authority, '_managed_spawning', {})):
+        raise ValueError('sentinel worker already owned')
     spawning = _mark_spawning(authority, ref, row)
     generation = row.get('generation')
     try:
-        env = await asyncio.to_thread(_worker_env, authority)
-        cwd = (await asyncio.to_thread(Path(__file__).resolve)).parents[1]
+        if 'protected_tools_v1' in row:
+            from gateway.session_protected_tools import production_plan
+            production_plan(row['protected_tools_v1'])
         from gateway.session_worker_spawn import acquire_process
-        from gateway.session_managed_worker_log import worker_log_path
-        log_path = worker_log_path(authority.profile_id)
-        process = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
-            cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL if log_path is None else subprocess.PIPE, **WORKER_POPEN)
+        if sentinel is not None:
+            from gateway.session_protected_tools import SentinelLaunch
+            from gateway.session_protected_docker import DockerLaunch
+            if type(sentinel) is DockerLaunch:
+                process = await sentinel.acquire(generation)
+            elif type(sentinel) is SentinelLaunch:
+                argv, env, cwd = sentinel.spawn_inputs()
+                process = await acquire_process(subprocess.Popen, argv, cwd=cwd, env=env,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    bufsize=0, pass_fds=(), **WORKER_POPEN)
+            else:
+                raise ValueError('unsupported protected adapter')
+            log_path = None
+        else:
+            env = await asyncio.to_thread(_worker_env, authority)
+            cwd = (await asyncio.to_thread(Path(__file__).resolve)).parents[1]
+            from gateway.session_managed_worker_log import worker_log_path
+            log_path = worker_log_path(authority.profile_id)
+            process = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
+                cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL if log_path is None else subprocess.PIPE, **WORKER_POPEN)
     except asyncio.CancelledError:
         # acquire_process owns late-child cleanup; no bootstrap or reservation was sent.
         spawning.pop(ref.session_id, None)
+        if sentinel is not None:
+            raise  # a source sentinel is not a canonical admission and has no settlement
         _interrupted_before_bootstrap(authority, row, _latched_stop_cause(authority, ref.session_id, generation))
         return None
     except BaseException:
         spawning.pop(ref.session_id, None)
         raise
-    worker = ManagedWorker(process)
+    if sentinel is not None:
+        from gateway.session_protected_tools import SentinelWorker
+        worker = SentinelWorker(process, authority, ref.session_id)
+        worker.writer.start()
+    else:
+        worker = ManagedWorker(process)
     if log_path is not None:
         worker.drain_stderr(log_path)
     workers = getattr(authority, '_managed_workers', None)

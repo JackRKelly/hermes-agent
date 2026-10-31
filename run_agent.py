@@ -135,6 +135,7 @@ from agent.codex_responses_adapter import (
     _summarize_user_message_for_log,
 )
 from agent.tool_guardrails import ToolGuardrailDecision, append_toolguard_guidance, toolguard_synthetic_result
+from agent.protected_conversation import protected_turn_of
 from hermes_cli.observability.shared_metrics_harness import record_guardrail_decision, record_guardrail_warnings
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens
 
@@ -1310,6 +1311,9 @@ class AIAgent(
         The segment planner splits the batch into runs of parallel-safe calls (read-only, non-overlapping file
         targets, opted-in MCP) separated by sequential barriers, run in emission order.
         """
+        protected = protected_turn_of(self)
+        if protected is not None:
+            return protected.dispatch(assistant_message, messages)
         tool_calls = assistant_message.tool_calls
         args = (assistant_message, messages, effective_task_id, api_call_count)
         self._executing_tools = True  # allow _vprint during tool execution even with stream consumers
