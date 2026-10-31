@@ -1,113 +1,149 @@
-# Native tool-child adapter: controlled source slice
+# Protected-owner native adapter: source implementation and remaining gate
 
-Status: **source review only; production admission is unconditionally disabled**.
-Baseline: `75d15c1a53d74ecce6f3cc094cb0bd9bf4238fb4`. No installed source,
-profile, account, credential, canonical board or dispatcher is changed.
+**SOURCE ONLY. Production protected admission is unconditionally disabled.**
+Baseline: `75d15c1a53d74ecce6f3cc094cb0bd9bf4238fb4`.
+No deployment, canonical profile/state, credentials, accounts, root commands,
+card release, admission or scheduler activation is authorized by this artifact.
 
-## Actual integrated boundary
+## Accepted direction versus implemented scope
 
-`gateway.session_managed_worker._spawn_registered_worker` has an explicit
-source-test-only `SentinelLaunch` input. It uses the **real** cancellation-safe
-`acquire_process`, native worker registry and `ManagedWorker` lifetime. The
-per-worker Stop event/writer is reused; canonical authorization, admission
-settlement and the pre-spawn generation latch are not exercised. An owner-owned
-`sentinel_scope` closes/reaps and deregisters on every exit. A cancelled sentinel
-spawn propagates cancellation without fabricating an admission settlement.
-There is no environment variable, profile option, plugin, launcher setting or
-admission registry that enables it. A row carrying `protected_tools_v1` is rejected
-before the profile environment or ordinary bootstrap is constructed, including
-when a sentinel object is also supplied. The ordinary managed path is intended to retain its existing behavior, covered
-by the enclosing regression suite, not a proof of unchanged behavior everywhere.
-This patch does NOT retroactively isolate normal managed sessions.
+The conversation loop may live in a protected inference process ONLY if that
+process cannot execute untrusted local code. Provider capability, lifecycle
+owner and untrusted tool child remain separate authorities. This direction is
+accepted for source design, **not isolation or deployment acceptance**.
 
-The actual `agent/managed_worker.py` executable recognizes exactly one fixed
-sentinel argv before PM bootstrap and any profile, provider-client, AIAgent, hook or MCP
-import. The agent package itself still imports `agent.jiter_preload`, which
-attempts the optional parser import; `-S` excludes installed dependencies, and
-the actual child fails if any third-party module is present. The exact
-non-stdlib module list is checked at hello and after every tool call. Both package
-initializers and that preload module are part of the source review closure.
-This is an assertion about this pinned test source, not protection from mutable
-source code. The same fixed argv also selects this source-test entry with `-m`;
-it is not an isolation permission. `-I -S -B`, fixed source-owned entry, fresh locale-only environment,
-`close_fds=True`, empty `pass_fds`, private process group and explicit stdio are
-used. The sentinel entry refuses root. The test workspace is same-UID and
-user-writable: it is **not** a protected production runtime input.
+This source adds a **restricted conversation subset** at the actual
+`agent.conversation_loop._run_conversation_turn` and
+`AIAgent._execute_tool_calls` boundaries. It is not a replacement scheduler or
+control plane. `ProtectedTurn` consumes Hermes' actual `NormalizedResponse` /
+`ToolCall` provider interface. Its frozen two-tool schema exposes only the
+existing zero-argument nonsecret `read_file` and `terminal` source sentinels.
+It does not provide arbitrary file/terminal support or the full AIAgent feature
+set. Unknown tools/args, extra conversation options and incomplete responses
+fail closed, with no ordinary registry/inline fallback. Sequential, concurrent,
+segmented and inline-resolver entry points explicitly refuse protected agents.
 
-The parent uses a proxy with a frozen two-name allowlist. The child independently
-checks its closed bootstrap and every request. Only `read_file({})` and
-`terminal({})` exist; both read the fixed non-secret `allowed.txt`. No caller can
-choose a path, executable, environment, command, UID, provider or RPC method.
-The file operation reuses the built-in native regular-file primitive with an
-explicit final-component no-follow mode and a 4097-byte bounded read. It does not
-fall back to the shell. The terminal consumer runs real `/bin/cat` on those
-bounded bytes, not arbitrary shell text or a reopened caller-selected path.
+The restricted route runs BEFORE the ordinary turn's credential refresh,
+transforms, hooks, context construction, auxiliary calls and prelude. It never
+loads memory, delegation, MCP, browser, skill or provider plugins. Ordinary
+managed workers do not select this source route; their existing path is retained.
 
-Frames have an 8192-byte pre-buffer bound, duplicate-key rejection, exact schemas,
-monotonic request sequence, at most 16 tool requests and a five-second channel
-lifetime. Bootstrap PID is checked against the actual Popen child. Stop uses the
-native latch/writer and the tool channel's sole cancellation operation; the proxy
-refuses later tools. No provider/lifecycle channel exists in this slice; there is
-no general owner RPC, canonical DB access or fake `owner_admitted`/`worker_bound`
-event. The native reservation/claim transaction is **not** exercised or replaced.
+## Bootstrap/import freeze
 
-## Comparison with the accepted authority split
+`hermes_protected.freeze()` is an irreversible cooperative source latch, usable
+only in a fresh `-I -S -B` interpreter before bootstrap/config/agent imports. It
+rejects prior third-party/source discovery and unexpected import machinery.
+A closed source-module list admits only the restricted conversation and shared
+provider types. Other modules (including `run_agent`, `model_tools`,
+`agent.tool_executor`, plugins/hooks, auxiliary/memory/delegation/MCP/browser,
+canonical state and owner RPC) are denied BEFORE execution. The agent package
+skips its normal optional parser preload under this latch. Stdlib acceptance
+uses the resolved spec origin, not a name allowlist; a workspace stdlib shadow
+is rejected before its sentinel side effect executes.
 
-This is the executable tool-side tracer, not an alternate admission foundation.
-The proposed refinement keeps inference and lifecycle in distinct protected
-services and places the native tool proxy between inference and a credentialless
-tool child. It preserves the accepted separation of provider, canonical owner
-and execution identities. It changes the location of the conversation loop:
-the accepted ADR describes a credentialless inference/tool child using a separate
-inference service; the refinement would retain the conversation loop with the
-protected inference owner and proxy all tools. That refinement still requires
-explicit architectural acceptance before any production adapter is implemented.
+**This is not a Python sandbox.** Same-UID writable source/interpreter/stdlib,
+explicit loaders, native calls, debugging and arbitrary already-trusted callback
+code are not confined by an import finder. Production needs immutable runtime
+inputs and kernel-enforced identities. No env/profile/client switch enables
+this latch or promotes readiness.
 
-Inspection found that `AIAgent` cannot simply receive a replacement
-`model_tools.handle_function_call`: `model_tools` performs discovery at import;
-`agent/tool_executor.py` has inline tool routes before registry dispatch; agent
-construction, hooks, auxiliary models, memory and provider plugins have their
-own local execution paths. **This patch does not instantiate AIAgent or pretend
-that replacing one callback disables those paths.** The sentinel owner is a
-controlled non-provider caller of the real managed-child seam, not inference.
+## Native lifecycle and inference interfaces
 
-## What the tests prove (and do not)
+`NativeLifecycle.reserve` uses the REAL existing
+`reserve_admission_worker`, producer claim digest and native adoption contract.
+The live direct Popen child, PID/birth, principal, admission, session,
+generation and owner epoch are checked. A real isolated Kanban policy/claim
+supplies a trusted owner-side DB/context; its board/task/run must equal the
+admission's durable `kanban_card_v1`. The card and run must still be running,
+current, unexpired and carry the exact claim lock.
 
-Real owner/test process -> real registered managed child -> native file primitive
-and real `/bin/cat`. Real inherited file, high-numbered FD, directory and Unix
-listener are present; the file's deliberate exec-inheritance control succeeds.
-The actual child enumerates only stdio and receives no profile environment. These are cooperative same-UID reports of
-Popen sanitation, not kernel attestation or an isolation boundary.
-Symlink and oversized sentinel reads fail. Unknown tools and arbitrary terminal
-arguments are rejected with no host fallback. Stop acknowledges and the actual
-managed child is reaped; subsequent proxy work is refused.
+Canonical DB/context, claim lock, native adoption secret and general worker RPC
+remain lifecycle-owner-private. They NEVER enter the tool child's fixed
+stdin/stdout protocol. A different random token authenticates each inference
+and lifecycle endpoint; channel, complete binding, strictly typed monotonic
+sequence, payload size, operation count and deadline are enforced. Inference
+has only `complete`, with a preselected trusted callable; no provider name,
+credential, URL, tool execution or configuration operation exists. Lifecycle
+has only `check` and bounded `append`, mapped to native `transcript.append`
+receipts. No child reserve/adopt, card complete, lease renewal, session targeting
+or general RPC crosses the interface. Cleanup uses native loss/revocation,
+never a fabricated completed admission. The managed scope owns process reap.
 
-This does **not** prove OS filesystem confinement, a read-only reviewer identity,
-service/network/debug denial, root-owned immutable code/interpreter/dependencies,
-protected caller/registry admission, saved-ID/group/memberd properties, or
-cancellation of arbitrary/detached tool descendants. `/bin/cat` is bounded and
-has no children; no broader descendant claim follows. The previously recorded
-positive inherited-FD bypass and broad scratch-policy negatives remain valid.
+The source test uses authenticated **in-process callable interfaces**, NOT
+separately protected service identities or a production transport. The inference
+callable is explicitly a **controlled NO-REAL-PROVIDER fixture**, returning the
+actual provider response type. No live provider SDK/auth success is claimed.
+These interfaces validate/recheck deadlines; a synchronous trusted callable can
+still block while executing. Hard transport I/O deadlines, peer identity,
+FD transfer, cancellation and per-service credential placement remain required.
 
-## Exact next gate
+Before tools, the lifecycle owner durably appends the exact assistant call row;
+results/final text use the same scoped native receipts. Native/card fencing is
+rechecked before and after inference and each tool. This rejects a result after
+card replacement, generation/epoch loss, admission revocation or Stop. It does
+not atomically couple the two SQLite databases, eliminate the last-check/tool
+race or prove cancellation of an already executing arbitrary tool descendant.
+A successful restricted turn does NOT settle its admission or complete/release
+a card. Closing its experimental reservation records the native loss outcome
+(unknown admission / terminal worker), not success.
 
-Do not request an administrator command from this artifact. First decide the
-conversation-loop placement above. If accepted, the next implementation must
-supply a protected inference entry with import-time discovery/inline/auxiliary
-execution disabled, bind the proxy to native owner reservation/card provenance,
-and route only reviewed provider/lifecycle adapters through separate bounded
-channels. Then implement/review the single-purpose root-owned native entry and
-protected registry with immutable full runtime input checks. Only that frozen
-candidate can define the privileged sentinel protocol. Nonempty/nonzero groups,
-memberd opt-out, irreversible IDs and all host/service/descendant negatives stay
-mandatory and unproven. There is no safe administrator handoff or
-privileged acceptance protocol yet. No Python setuid helper, account/group change, live
-admission, deployment or pilot release is supplied.
+## Actual subprocess path retained
 
-## Reproduction
+The original seven tests remain. Real
+`gateway.session_managed_worker._spawn_registered_worker` -> fixed
+`agent/managed_worker.py --sentinel-tools-v1` -> native regular-file primitive
+and real `/bin/cat` still use cancellation-safe acquisition, native registry,
+owner scope, per-worker Stop event/writer and reap/deregistration. `-I -S -B`,
+locale-only environment, stdio-only descriptors, empty pass-fds and a private
+process group are enforced. Frames are strict/bounded/replay-resistant; only
+fixed `allowed.txt` is read, with no-follow/oversize refusal. File, high-FD,
+directory and Unix-listener negative controls prove cooperative exec sanitation,
+NOT protected kernel admission.
 
-Use the canonical `scripts/run_tests.sh tests/gateway/test_protected_tool_adapter.py`
-with an isolated test interpreter and scratch HOME/HERMES_HOME/TMPDIR. No real
-provider is invoked. Native process tests run on POSIX; platform skips are not
-privileged acceptance. Run the enclosing managed-worker and file-operation
-regressions separately and record exact head, test counts and skips.
+## Exact technical gap (no administrator command is ready)
+
+The full `run_agent` / `conversation_loop` import closure still loads ordinary
+bootstrap, tool discovery and broad phase helpers. Therefore a genuinely frozen
+fresh interpreter **refuses importing the ordinary AIAgent implementation**.
+The controlled integration fixture imports the existing ordinary modules first,
+constructs an uninitialized AIAgent carrying only the restricted route, and
+exercises the real loop/batch methods plus actual child/DB contracts. That is
+routing evidence, **not proof that the full AIAgent constructor can safely run
+with provider capability**. The fresh-process import-freeze test is a separate
+negative control and must not be represented as the same end-to-end process.
+
+Before production, select one bounded source completion:
+1. Move the restricted loop/batch entry behind an import-pure public facade,
+   with no ordinary bootstrap/import closure; keep optional AIAgent semantics
+   explicitly unsupported rather than restoring fail-open hooks.
+2. Supply separate authenticated, bounded inference and lifecycle IPC adapters
+   with pinned peer identity; move real provider client construction behind the
+   reviewed inference service interface. Do not forward generic owner RPC.
+3. Connect that facade to the existing native owner's protected reservation,
+   pre-spawn Stop latch and immutable launch plan; bind the trusted policy from
+   the owner's persisted admission, never inference/tool-authored context.
+4. Implement/review the single-purpose root-owned fixed entry and protected
+   registry with immutable interpreter/stdlib/source/dependencies/policy.
+
+Only that candidate can define the privileged sentinel gate. Real/effective/
+saved IDs, nonempty nonzero supplementary groups, memberd opt-out, privilege-
+regain negatives, ACL/read-only reviewer identity, filesystem/service/network/
+debug denial and arbitrary/detached-descendant cancellation remain unimplemented
+and unproven. No sudo command, account/group change or virtual readiness marker
+is supplied. Effective leaf limit remains **250**, not an asserted 10.
+
+## Reproduction and CI
+
+Run the canonical wrapper with an isolated developer interpreter and scratch
+HOME/HERMES_HOME/TMPDIR:
+
+```
+scripts/run_tests.sh tests/gateway/test_protected_conversation.py tests/gateway/test_protected_tool_adapter.py
+```
+
+The registered `linux-contract-probe.yml` path is a narrowly scoped manual
+no-provider diagnostic: one Linux and one macOS job, exact source-SHA checkout,
+source/tree/hash evidence, canonical tests and `scripts/check`. The diagnostic
+controller/ref and tested source SHA are separate evidence fields. A diagnostic
+pass is not an assertion that an empty PR check rollup is green. No default-
+branch, full-ci, Windows, publish, deployment or secret workflow change is needed.

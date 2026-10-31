@@ -1588,6 +1588,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """Execute tool calls concurrently; results are appended in original call order.
     ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
     segmented dispatcher owns turn-end work)."""
+    if getattr(agent, '_protected_turn', None) is not None:
+        raise RuntimeError('protected dispatch must use the frozen proxy batch entry')
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
@@ -1684,6 +1686,8 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     """Pick the execute callable for one sequential call and start its spinner. Precedence:
     inline agent-level tools, delegate_task, context-engine tools, memory-provider tools,
     then the registry."""
+    if getattr(agent, '_protected_turn', None) is not None:
+        raise RuntimeError('protected dispatch must use the frozen proxy batch entry')
     function_name, function_args, effective_task_id, tool_call_id, middleware_trace = (
         ref.name, ref.args, ref.task_id, ref.call_id, ref.trace,
     )
@@ -1865,6 +1869,8 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
 
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
+    if getattr(agent, '_protected_turn', None) is not None:
+        raise RuntimeError('protected dispatch must use the frozen proxy batch entry')
     from types import SimpleNamespace
     from agent.terminal_approval_batch import terminal_approval_batch, terminal_approval_runs
     for calls in terminal_approval_runs(agent, assistant_message.tool_calls):
@@ -1880,6 +1886,8 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
     """Execute tool calls sequentially (single calls or interactive tools). ``finalize=False``
     skips end-of-batch budget enforcement and /steer injection (the segmented dispatcher
     owns turn-end work)."""
+    if getattr(agent, '_protected_turn', None) is not None:
+        raise RuntimeError('protected dispatch must use the frozen proxy batch entry')
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
     tool_calls = assistant_message.tool_calls
 
@@ -1940,6 +1948,8 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
     boundaries exactly as fully-sequential execution. Turn-end work (budget + /steer) runs
     once here (segments run with ``finalize=False``); each segment executor checks the
     interrupt flag up front, so an interrupt drains later segments with one result per call."""
+    if getattr(agent, '_protected_turn', None) is not None:
+        raise RuntimeError('protected dispatch must use the frozen proxy batch entry')
     from types import SimpleNamespace
 
     if segments is None:

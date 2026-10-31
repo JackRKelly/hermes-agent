@@ -1310,6 +1310,9 @@ class AIAgent(
         The segment planner splits the batch into runs of parallel-safe calls (read-only, non-overlapping file
         targets, opted-in MCP) separated by sequential barriers, run in emission order.
         """
+        protected = getattr(self, '_protected_turn', None)
+        if protected is not None:
+            return protected.dispatch(assistant_message, messages)
         tool_calls = assistant_message.tool_calls
         args = (assistant_message, messages, effective_task_id, api_call_count)
         self._executing_tools = True  # allow _vprint during tool execution even with stream consumers

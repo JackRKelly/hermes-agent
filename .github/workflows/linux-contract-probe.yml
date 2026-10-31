@@ -1,0 +1,84 @@
+name: Native protected source-bound diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Immutable source commit in this fork (40 lowercase hex)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-protected-source-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  source-contracts:
+    name: No-provider source (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Validate immutable source input
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          repository: JackRKelly/hermes-agent
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind source evidence before setup
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CONTROLLER_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/native-proof"
+          printf 'controller=%s\nsource=%s\ntree=%s\n' "$CONTROLLER_SHA" "$SOURCE_SHA" "$(git rev-parse HEAD^{tree})" > "$RUNNER_TEMP/native-proof/binding.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/native-proof/source-blobs.txt"
+      - uses: ./.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+          archive-inputs: 'false'
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+      - name: Exact source health
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HERMES_PYTHON" scripts/check --commit "$SOURCE_SHA" --base 75d15c1a53d74ecce6f3cc094cb0bd9bf4238fb4 2>&1 | tee "$RUNNER_TEMP/native-proof/health.log"
+      - name: Canonical no-provider source contracts
+        env:
+          HOME: ${{ runner.temp }}/native-source-home
+          HERMES_HOME: ${{ runner.temp }}/native-source-home/hermes
+          TMPDIR: ${{ runner.temp }}
+          HERMES_TEST_FILE_RETRIES: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME" "$HERMES_HOME"
+          scripts/run_tests.sh tests/gateway/test_protected_conversation.py tests/gateway/test_protected_tool_adapter.py tests/gateway/test_worker_admission_reservation.py tests/gateway/test_managed_spawn_cancellation.py tests/gateway/test_managed_worker_group_close.py tests/tools/test_file_operations.py 2>&1 | tee "$RUNNER_TEMP/native-proof/tests.log"
+      - name: Upload source-bound evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-source-${{ matrix.os }}-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/native-proof
+          if-no-files-found: error
+          retention-days: 7
