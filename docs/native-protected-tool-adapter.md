@@ -99,7 +99,11 @@ cleanup rather than silently claiming it completed. An SDK `aclose` that itself
 raises cancellation is reported as the fault `provider_close_cancelled`, never
 as cancellation of the owner; explicit retry can replace that cancelled SDK
 close task. The outer scope's provider-close fault takes priority if both it and
-a process-cleanup fault occur; retained resource handles still require retry. No caller-cancel retry can
+a process-cleanup fault occur; retained resource handles still require retry.
+Other SDK exception types normalize to fixed `provider_close_failed` at that
+boundary, so they cannot abort a retry sweep before later retained runners.
+Existing OSError/RuntimeError close faults retain their typed owner-only contract;
+no exception body crosses the wire. No caller-cancel retry can
 turn the provider-drain bound into an unbounded gather.
 
 `SentinelWorker.close` is serialized and idempotent across threads; a stop-request

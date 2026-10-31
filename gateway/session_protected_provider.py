@@ -17,6 +17,11 @@ class ProviderCloseCancelled(RuntimeError):
         super().__init__('provider_close_cancelled')
 
 
+class ProviderCloseFailed(RuntimeError):
+    def __init__(self):
+        super().__init__('provider_close_failed')
+
+
 class SelectedAsyncProvider:
     """Pinned SDK create + ProviderTransport + async SDK close, owner-constructed.
 
@@ -75,10 +80,15 @@ class SelectedAsyncProvider:
         for task in tuple(self._tasks):
             task.cancel()
 
+    async def _close_sdk(self):
+        # Include a decorated SDK method's synchronous invocation in the task's
+        # normalized fault boundary, as well as exceptions raised while awaiting.
+        await self._aclose()
+
     async def _finish_close(self):
         self.begin_close()
         if self._sdk_close_task is None:
-            self._sdk_close_task = asyncio.create_task(self._aclose())
+            self._sdk_close_task = asyncio.create_task(self._close_sdk())
             # A late SDK fault stays on the retained task, never becomes an
             # unhandled loop traceback containing a provider/credential body.
             self._sdk_close_task.add_done_callback(
@@ -91,7 +101,13 @@ class SelectedAsyncProvider:
             # SDK self-cancellation is a failed close, not owner cancellation.
             # Keep the exact task for explicit retry and let the sweep continue.
             raise ProviderCloseCancelled()
-        self._sdk_close_task.result()
+        error = self._sdk_close_task.exception()
+        if error is not None:
+            if isinstance(error, (OSError, RuntimeError)):
+                raise error
+            # Normalize the arbitrary SDK exception universe at this boundary.
+            # The original stays on the retained task, never in a wire payload.
+            raise ProviderCloseFailed() from None
 
     async def close(self, *, retry=False):
         if self._close_task is not None and self._close_task.done():

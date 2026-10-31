@@ -11,9 +11,14 @@ from tests.gateway.test_protected_conversation import native_claim
 from tests.gateway.test_protected_process_close import Transport
 
 
+class SDKCloseError(Exception):
+    pass
+
+
 @pytest.mark.platforms('posix')
 @pytest.mark.parametrize('join_fault', [False, True])
-def test_sdk_cancelled_close_is_fault_after_owned_children_reaped(tmp_path, monkeypatch, join_fault):
+@pytest.mark.parametrize('error_type', [asyncio.CancelledError, SDKCloseError])
+def test_sdk_cancelled_close_is_fault_after_owned_children_reaped(tmp_path, monkeypatch, join_fault, error_type):
     from agent.transports.types import NormalizedResponse
     from gateway.session_protected_process import SelectedAsyncProvider, protected_process_scope, retry_protected_process_closes
     from gateway.session_protected_tools import SentinelLaunch
@@ -26,7 +31,7 @@ def test_sdk_cancelled_close_is_fault_after_owned_children_reaped(tmp_path, monk
         async def close():
             calls.append(True)
             if len(calls) == 1:
-                raise asyncio.CancelledError
+                raise error_type
         provider = SelectedAsyncProvider(model='controlled-no-provider', provider_id='custom',
             transport=Transport(), create=create, aclose=close)
         async def owned():
@@ -44,7 +49,7 @@ def test_sdk_cancelled_close_is_fault_after_owned_children_reaped(tmp_path, monk
                             raise RuntimeError('controlled join fault')
                     monkeypatch.setattr(thread, 'join', fail_once)
         task = asyncio.create_task(owned())
-        with pytest.raises(RuntimeError, match='provider_close_cancelled|controlled join fault'):
+        with pytest.raises(RuntimeError, match='provider_close_cancelled|provider_close_failed|controlled join fault'):
             await task
         assert not task.cancelled()
         runner = captured[0]
@@ -62,7 +67,8 @@ def test_sdk_cancelled_close_is_fault_after_owned_children_reaped(tmp_path, monk
 
 
 @pytest.mark.platforms('posix')
-def test_cancelled_sdk_close_does_not_abort_other_retained_resource_retries(tmp_path, monkeypatch):
+@pytest.mark.parametrize('error_type', [asyncio.CancelledError, SDKCloseError])
+def test_cancelled_sdk_close_does_not_abort_other_retained_resource_retries(tmp_path, monkeypatch, error_type):
     from agent.transports.types import NormalizedResponse
     from gateway.session_protected_process import SelectedAsyncProvider, protected_process_scope, retry_protected_process_closes
     from gateway.session_protected_tools import SentinelLaunch
@@ -78,15 +84,15 @@ def test_cancelled_sdk_close_does_not_abort_other_retained_resource_retries(tmp_
         authority._protected_process_closes = registry
     async def exercise():
         captured, joins = [], [[], []]
-        sdk_calls = []
+        sdk_calls, sdk_ready = [], [False]
         async def create(**kwargs):
             return NormalizedResponse('CONTROLLED_FINAL', None, 'stop')
         for index, (directory, authority, context, row) in enumerate(claims):
             async def close(index=index):
                 if index == 0:
                     sdk_calls.append(True)
-                    if len(sdk_calls) <= 2:
-                        raise asyncio.CancelledError
+                    if not sdk_ready[0]:
+                        raise error_type
             provider = SelectedAsyncProvider(model='controlled-no-provider', provider_id='custom',
                 transport=Transport(), create=create, aclose=close)
             async def owned():
@@ -103,16 +109,17 @@ def test_cancelled_sdk_close_does_not_abort_other_retained_resource_retries(tmp_
                             raise RuntimeError('controlled join fault')
                     monkeypatch.setattr(thread, 'join', fail_once)
             task = asyncio.create_task(owned())
-            with pytest.raises(RuntimeError, match='provider_close_cancelled|controlled join fault'):
+            with pytest.raises(RuntimeError, match='provider_close_cancelled|provider_close_failed|controlled join fault'):
                 await task
             assert not task.cancelled()
         assert len(registry) == 2
-        with pytest.raises(RuntimeError, match='provider_close_cancelled'):
+        with pytest.raises(RuntimeError, match='provider_close_cancelled|provider_close_failed'):
             await retry_protected_process_closes(claims[0][1])
         # First retry still faults; the SECOND real runner was nonetheless retried.
         assert joins[1] == [True, True]
         assert captured[1] not in registry.values()
         assert captured[0] in registry.values()
+        sdk_ready[0] = True
         await retry_protected_process_closes(claims[0][1])
         assert not registry
         assert sdk_calls == [True, True, True]

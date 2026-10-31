@@ -141,6 +141,30 @@ def test_cancelled_sdk_close_is_retained_and_explicitly_retryable():
 
 
 @pytest.mark.platforms('posix')
+def test_synchronous_sdk_close_invocation_fault_is_normalized_and_retryable():
+    from gateway.session_protected_process import SelectedAsyncProvider
+    async def exercise():
+        calls = []
+        async def create(**kwargs):
+            pytest.fail('close fixture must never invoke a provider')
+        async def done():
+            pass
+        def close():
+            calls.append(True)
+            if len(calls) == 1:
+                raise LookupError('CONTROLLED_SDK_BODY')
+            return done()
+        provider = SelectedAsyncProvider(model='controlled-no-provider', provider_id='custom',
+            transport=Transport(), create=create, aclose=close)
+        with pytest.raises(RuntimeError, match='^provider_close_failed$'):
+            await provider.close()
+        assert isinstance(provider._sdk_close_task.exception(), LookupError)
+        await provider.close(retry=True)
+        assert calls == [True, True]
+    asyncio.run(exercise())
+
+
+@pytest.mark.platforms('posix')
 def test_run_after_close_cannot_spawn(tmp_path, monkeypatch):
     from gateway.session_protected_process import protected_process_scope, SelectedAsyncProvider
     from gateway.session_protected_tools import SentinelLaunch
