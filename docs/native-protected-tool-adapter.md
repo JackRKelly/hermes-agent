@@ -1,6 +1,8 @@
 # Protected-owner native adapter: source integration and privileged gate
 
-**SOURCE ONLY. Production protected admission remains unconditionally disabled.**
+**SOURCE ONLY; no live admission is activated.** The [native async admission bridge](protected-native-admission.md)
+adds conditional owner-only construction with signed policy and durable request
+accounting. Strict unproven budgets still deny; row/config flags grant nothing.
 
 A credentialless Docker TOOL-child alternative is now wired into the same source
 path. See [the Docker contract](protected-docker-tools.md) for digest/closure

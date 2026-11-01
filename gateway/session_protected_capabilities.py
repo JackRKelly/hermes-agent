@@ -141,6 +141,17 @@ class NativeLifecycle(_Endpoint):
                 raise RuntimeStoreError('stale_kanban_claim')
 
     def _check(self):
+        self._check_native()
+        guard = getattr(self, '_policy_guard', None)
+        if guard is not None:
+            guard()
+
+    def _check_native(self):
+        """Canonical/process/claim proof without re-entering an external ledger.
+
+        Owner-only broker readback uses this while holding its own transaction;
+        all worker-facing operations still call _check plus the policy guard.
+        """
         from gateway.session_worker_reservation import verify_worker_identity
         from gateway.session_worker import _claim, _verify
         from hermes_state_runtime import _epoch, _admission, _worker_assignment
@@ -165,9 +176,6 @@ class NativeLifecycle(_Endpoint):
                         {k: self._context[k] for k in ('board', 'task_id', 'run_id')}):
                 raise RuntimeStoreError('stale_generation')
         self._card_check()
-        guard = getattr(self, '_policy_guard', None)
-        if guard is not None:
-            guard()
 
     def close(self):
         """Retire through the native loss contract; never fabricate completed admission.

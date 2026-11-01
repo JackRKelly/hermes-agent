@@ -1,7 +1,9 @@
 # Credentialless Docker tool child (source only)
 
-**Live admission remains disabled.** `production_plan` still unconditionally
-refuses. Nothing here installs a profile, admits/releases a card, enables a
+**Live admission is not activated by this source artifact.** `production_plan`
+now requires an owner-installed, persisted and signed [native admission bridge](protected-native-admission.md);
+unknown/strict subscription accounting still refuses before auth or requests.
+Nothing here installs a profile, admits/releases a live card, enables a
 provider, publishes artifacts, changes macOS identities/groups or configures
 Docker Desktop. This is an explicit VM alternative to the original host-native
 identity contract, not a relaxation of that contract.

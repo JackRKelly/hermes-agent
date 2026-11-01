@@ -554,9 +554,12 @@ async def _spawn_registered_worker(authority, ref, row, *, sentinel=None):
     spawning = _mark_spawning(authority, ref, row)
     generation = row.get('generation')
     try:
-        if 'protected_tools_v1' in row:
+        if 'protected_tools_v1' in row and sentinel is None:
+            # Protected execution owns its acquisition through the native bridge;
+            # ordinary bootstrap must never receive that row or its credentials.
             from gateway.session_protected_tools import production_plan
-            production_plan(row['protected_tools_v1'])
+            production_plan(authority, ref, row)
+            raise RuntimeStoreError('protected_native_execute_required')
         from gateway.session_worker_spawn import acquire_process
         if sentinel is not None:
             from gateway.session_protected_tools import SentinelLaunch
@@ -619,6 +622,20 @@ async def admit_managed(authority, ref, row, policy):
 
 
 async def execute_managed(authority, ref, row, policy):
+    bridge = getattr(authority, '_protected_admission_bridge', None)
+    if 'protected_tools_v1' in row or bridge is not None:
+        # Owner capability lookup precedes ALL ordinary refs, plugins, bootstrap,
+        # credentials-to-child and host tool routes. JSON can only request denial.
+        from gateway.session_protected_tools import production_plan
+        plan = production_plan(authority, ref, row)
+        payload = row.get('payload', {})
+        if type(payload.get('text')) is not str or payload.get('attachments_v1'):
+            raise RuntimeStoreError('protected_native_payload_denied')
+        return await plan.execute(payload['text'])
+    return await _execute_ordinary_managed(authority, ref, row, policy)
+
+
+async def _execute_ordinary_managed(authority, ref, row, policy):
     from gateway.run_turn_progress import publish_worker_tool_event
     # This route never passes the inbound prepare step, so the worker would read ``@`` tokens as typed.
     from gateway.session_context_refs import managed_turn_text, refused_turn_result

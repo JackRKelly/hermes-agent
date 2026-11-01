@@ -61,9 +61,10 @@ class SentinelWorker(ManagedWorker):
         super().control({'op': 'cancel'})
 
 
-def production_plan(request):
-    """No config or client request can enable this unfinished authority boundary."""
-    raise RuntimeError('protected tool admission disabled: protected launcher and inference adapter required')
+def production_plan(authority, ref, row):
+    """Resolve only an owner-installed, persisted/signed native capability."""
+    from gateway.session_protected_admission import production_plan as trusted_plan
+    return trusted_plan(authority, ref, row)
 
 
 @dataclass(frozen=True)

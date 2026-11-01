@@ -751,7 +751,7 @@ class ResponsesApiTransport(ProviderTransport):
 
         from agent.codex_responses_adapter import responses_endpoint_quirks
 
-        endpoint = responses_endpoint_quirks(params.get("base_url"))
+        endpoint = params.get("endpoint") or responses_endpoint_quirks(params.get("base_url"))
         is_codex_backend = params.get("is_codex_backend") is True
         is_xai_responses = params.get("is_xai_responses") is True
         # Foundry 400s on encrypted-reasoning replay only in the post-tool follow-up turn.
@@ -900,6 +900,7 @@ class ResponsesApiTransport(ProviderTransport):
         msg, finish_reason = _normalize_codex_response(
             response, issuer_kind=kwargs.get("issuer_kind") or self._last_issuer_kind,
             issuer_model=kwargs.get("issuer_model") or self._last_issuer_model,
+            untrusted_completed_issuers=kwargs.get("untrusted_completed_issuers"),
         )
 
         tool_calls = None

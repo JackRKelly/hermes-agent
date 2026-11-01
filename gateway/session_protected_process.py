@@ -1,9 +1,9 @@
 """SOURCE owner integration: fresh frozen conversation, authenticated Unix IPC.
 
-Production admission is still unconditionally disabled. The owner supplies ONE
+Admission requires the separately signed native owner bridge. The owner supplies ONE
 already-selected async provider SDK method + Hermes ProviderTransport + close
 method; no discovery, fallback, key lookup or URL/model selection comes from IPC.
-Tests use NO-REAL-PROVIDER async fixtures. This is not cross-UID containment.
+Tests use controlled fixtures/loopback SDKs, never live providers. This is not cross-UID containment.
 """
 import asyncio
 from contextlib import asynccontextmanager, suppress
@@ -413,6 +413,9 @@ async def protected_process_scope(authority, ref, row, launch, *, principal_id, 
             try:
                 owner = turn._native_owner
                 def guard():
+                    admission_guard = getattr(provider, '_admission_guard', None)
+                    if admission_guard is not None:
+                        admission_guard()
                     if (turn.proxy.worker.stop.is_set() or
                             _saved_policy(authority, ref, row, launch, principal_id, context, provider) != policy_digest):
                         raise RuntimeStoreError('protected_owner_policy_mismatch')

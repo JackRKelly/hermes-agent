@@ -76,7 +76,8 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
     asyncio.run(exercise())
 
 
-def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None):
+def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None,
+                 provider='custom', model='controlled-no-provider', text=None, max_retries=None):
     """Real isolated card claim, policy and native reservation store (not a daemon)."""
     from hermes_state import SessionDB
     from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
@@ -92,7 +93,8 @@ def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None):
     kb.create_board('controlled')
     with closing(connect(board='controlled')) as conn:
         task_id = kb.create_task(conn, title='NO REAL PROVIDER', assignee='default',
-            workspace_kind='dir', workspace_path=str(workspace or tmp_path), model_override='controlled-no-provider', provider_override='custom')
+            workspace_kind='dir', workspace_path=str(workspace or tmp_path), model_override=model,
+            provider_override=provider, max_retries=max_retries)
         task = kb.claim_task(conn, task_id)
     db = SessionDB(tmp_path / 'isolated-state.db')
     db.create_session('owned', 'cli')
@@ -103,7 +105,7 @@ def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None):
     actor = Principal('fixture-owner', str(tmp_path), frozenset({'session:create'}), 'transport')
     policy, _ = build_kanban_policy(SimpleNamespace(authority=authority, actor=actor, native_owner=True),
         dict(board='controlled', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock),
-        {'model': {'default': 'controlled-no-provider', 'provider': 'custom'}, 'platform_toolsets': {'cli': []}})
+        {'model': {'default': model, 'provider': provider}, 'platform_toolsets': {'cli': []}})
     session_id = 'owned'
     if persisted:
         from gateway.session import SessionStore
@@ -116,7 +118,8 @@ def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None):
         commit_local_session(db, epoch=epoch, receipt=staged)
         session_id = staged['session_id']
     admitted = admit_session_input(db, epoch=epoch, principal_id='fixture-owner', session_id=session_id,
-        request_id='controlled-input', payload={'kanban_card_v1': {'board': 'controlled', 'task_id': task.id, 'run_id': task.current_run_id}})
+        request_id='controlled-input', payload={'kanban_card_v1': {'board': 'controlled', 'task_id': task.id, 'run_id': task.current_run_id},
+            **({'text': text} if text is not None else {})})
     claimed = claim_session_input(db, epoch=epoch, session_id=session_id)
     return authority, json.loads(policy.kanban_json), admitted | {'generation': claimed['generation']}
 

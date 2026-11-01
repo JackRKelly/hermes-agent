@@ -1266,7 +1266,7 @@ def _untrusted_completed_issuers() -> frozenset:
 
 def _normalize_codex_response(
     response: Any, *, issuer_kind: Optional[str] = None, issuer_model: Optional[str] = None,
-    recover_leaked_tool_call: bool = True,
+    recover_leaked_tool_call: bool = True, untrusted_completed_issuers: Optional[frozenset] = None,
 ) -> tuple[Any, str]:
     """Normalize a Responses API object to ``(assistant_message, finish_reason)``.
     ``issuer_kind`` / ``issuer_model`` are stamped onto captured reasoning items for provenance replay drops.
@@ -1341,7 +1341,8 @@ def _normalize_codex_response(
     # response.status — forcing incomplete there stalls for minutes on a final state.
     reasoning_only = (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text
     trusted_final = (
-        response_status == "completed" and issuer_kind not in _untrusted_completed_issuers()
+        response_status == "completed" and issuer_kind not in (
+            _untrusted_completed_issuers() if untrusted_completed_issuers is None else untrusted_completed_issuers)
     )
     if tool_calls:
         finish_reason = "tool_calls"

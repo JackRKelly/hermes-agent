@@ -1,4 +1,4 @@
-"""Strict owner-only Docker tool boundary. Never used by production_plan.
+"""Strict owner-only Docker tool boundary; selected only by a trusted native bridge.
 
 Docker Desktop, its administrators, daemon/kernel and immutable image producer are
 trusted. This is a VM alternative, NOT a change to the macOS group contract.
