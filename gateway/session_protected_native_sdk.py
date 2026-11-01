@@ -13,6 +13,7 @@ import json
 from urllib.parse import urlsplit
 
 from gateway.session_protected_provider import SelectedAsyncProvider
+from gateway.session_protected_timing import PilotTiming
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class NativeSDKPolicy:
     max_output_tokens: int = 1024
     request_seconds: float = 5.0
     response_bytes: int = 65536
+    pilot_timing: PilotTiming | None = None
 
     def validate(self):
         if self.accounting == 'strict':
@@ -33,9 +35,15 @@ class NativeSDKPolicy:
             raise RuntimeError('strict_budget_unproven')
         if self.accounting != 'subscription_request_bound':
             raise RuntimeError('protected_accounting_policy_denied')
+        ceiling = 5
+        if self.pilot_timing is not None:
+            if type(self.pilot_timing) is not PilotTiming:
+                raise RuntimeError('protected_pilot_timing_denied')
+            self.pilot_timing.validate()
+            ceiling = self.pilot_timing.request_seconds
         if (self.provider not in ('openai-codex', 'anthropic') or not self.model or not self.session_id
                 or type(self.max_output_tokens) is not int or not 1 <= self.max_output_tokens <= 1024
-                or type(self.request_seconds) not in (int, float) or not 0 < self.request_seconds <= 5
+                or type(self.request_seconds) not in (int, float) or not 0 < self.request_seconds <= ceiling
                 or type(self.response_bytes) is not int or not 1024 <= self.response_bytes <= 65536):
             raise RuntimeError('protected_sdk_policy_denied')
         endpoint = urlsplit(self.base_url)
@@ -69,6 +77,8 @@ def construct_native_sdk(policy, *, resolve, ledger):
     if type(policy) is not NativeSDKPolicy:
         raise RuntimeError('protected_sdk_policy_denied')
     policy.validate()  # BEFORE credentials, SDK construction, or any network
+    if policy.pilot_timing is not None and not callable(getattr(ledger, 'remaining_seconds', None)):
+        raise RuntimeError('protected_pilot_deadline_required')
     if ledger is None or not all(callable(getattr(ledger, k, None)) for k in ('reserve', 'reconcile', 'freeze')):
         raise RuntimeError('protected_request_ledger_required')
     try:
@@ -197,7 +207,13 @@ def construct_native_sdk(policy, *, resolve, ledger):
                 raise RuntimeError('protected_request_reservation_denied')
             if policy.provider == 'openai-codex':
                 kwargs['stream'] = True  # native Codex requires the SSE Responses path
-            async with asyncio.timeout(policy.request_seconds):
+            seconds = policy.request_seconds
+            if policy.pilot_timing is not None:
+                seconds = min(seconds, ledger.remaining_seconds())
+                if seconds <= 0:
+                    raise RuntimeError('protected_pilot_deadline_expired')
+                kwargs['timeout'] = seconds
+            async with asyncio.timeout(seconds):
                 response = await create(**kwargs)
                 if policy.provider == 'openai-codex':
                     response = await _completed_response(response)

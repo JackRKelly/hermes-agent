@@ -237,6 +237,7 @@ class DockerRuntime:
             c.name, c.labels, c.cid = value['name'], value['labels'], value['cid']
             c.role, c.process, c.retired, c.lock = value['labels']['hermes.tool.role'], None, False, threading.RLock()
             c.cancelled = threading.Event()
+            c.deadline = None  # retirement only: never renew a recovered pilot
             c.create_uncertain = c.cid is None and value['state'] != 'PENDING_CREATE'
             self.pending[c.name] = c
         c.close()
@@ -312,11 +313,13 @@ class DockerRuntime:
 
 class DockerContainer:
     """One private durable lease, fixed policy and exact daemon-owned object."""
-    def __init__(self, runtime, directory, generation, role):
+    deadline = None  # legacy/recovered leases have no operational pilot clock
+    def __init__(self, runtime, directory, generation, role, *, deadline=None):
         import secrets
         if type(generation) is not int or generation < 1 or role not in ('builder', 'reviewer'):
             raise ValueError('invalid Docker lease')
         self.runtime, self.role = runtime, role
+        self.deadline = deadline
         self.directory = Path(directory)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.directory.is_symlink() or stat.S_IMODE(self.directory.stat().st_mode) != 0o700:
@@ -353,9 +356,12 @@ class DockerContainer:
             os.close(fd)
         self.runtime.record(self.name + '-' + state, value)
 
-    def inspect(self):
+    def inspect(self, *, seconds=None):
         if self.cid is None:
             raise ValueError('unacquired container')
+        if seconds is not None:
+            import json
+            return json.loads(self.runtime.run(['inspect', self.cid], seconds=seconds)[1])[0]
         return self.runtime.json(['inspect', self.cid])[0]
 
     def matches(self, value):
@@ -365,8 +371,10 @@ class DockerContainer:
     def labels_with_image_labels(self):
         return {'hermes.closure': self.runtime.source, **self.labels}
 
-    def attest(self, *, running=True):
-        value = self.inspect()
+    def attest(self, *, running=True, seconds=None):
+        if self.deadline is not None:
+            seconds = min(20 if seconds is None else seconds, self.deadline.remaining())
+        value = self.inspect() if seconds is None else self.inspect(seconds=seconds)
         h, c = value['HostConfig'], value['Config']
         expected_tmpfs = self.tmpfs()
         if (not self.matches(value) or c['User'] != '65533:65533' or not h['ReadonlyRootfs']
@@ -380,7 +388,7 @@ class DockerContainer:
                 or h['SecurityOpt'] != ['no-new-privileges=true'] or h['Tmpfs'] != expected_tmpfs
                 or h['LogConfig'] != {'Type': 'none', 'Config': {}} or h['RestartPolicy']['Name'] != 'no'
                 or h['ShmSize'] != 1048576 or h['Init'] is not False or h['AutoRemove']
-                or c['Cmd'] != ['deadline', '30'] or c['WorkingDir'] != '/'
+                or c['Cmd'] != self.deadline_args() or c['WorkingDir'] != '/'
                 or c['Env'] != self.runtime.image_config['Env']
                 or c['Entrypoint'] != self.runtime.image_config['Entrypoint']
                 or c['Image'] != self.runtime.image or c['Tty'] or c['OpenStdin']
@@ -407,7 +415,19 @@ class DockerContainer:
             args += ['--label', key + '=' + val]
         for key, val in self.tmpfs().items():
             args += ['--tmpfs', key + ':' + val]
-        return [*args, self.runtime.image, 'deadline', '30']
+        return [*args, self.runtime.image, *self.deadline_args()]
+
+    def deadline_args(self):
+        if self.deadline is None:
+            return ['deadline', '30']
+        return ['deadline-pilot', '30', repr(self.deadline.namespace_expires_at)]
+
+    def _active_run(self, args, **kwargs):
+        # Operational commands cannot reset the turn/controller clock. Cleanup
+        # deliberately uses the existing separately bounded exact-CID path.
+        if self.deadline is not None:
+            kwargs['seconds'] = min(kwargs.get('seconds', 20), self.deadline.remaining())
+        return self.runtime.run(args, **kwargs)
 
     def create(self, inputs):
         import json
@@ -417,7 +437,7 @@ class DockerContainer:
             self.runtime.verify_image()
             self.save('CREATING')
             self.create_uncertain = True
-            cid = self.runtime.run(self.create_args())[1].decode().strip()
+            cid = self._active_run(self.create_args())[1].decode().strip()
             if not re.fullmatch('[0-9a-f]{64}', cid):
                 raise ValueError('invalid daemon CID')
             self.cid = cid
@@ -427,22 +447,23 @@ class DockerContainer:
             self.save('ATTESTED')
             if self.cancelled.is_set():
                 raise RuntimeError('Docker acquisition cancelled')
-            self.runtime.run(['start', self.cid])
+            self._active_run(['start', self.cid])
             self.save('STARTED')
             # All stages are image-baked; only bounded explicit bytes enter as JSON frames.
             for name, body in inputs.items():
                 import base64
                 frame = json.dumps({'path': name, 'body': base64.b64encode(body).decode()}).encode() + b'\n'
-                self.runtime.run(['exec', '-i', '--user', '65532:65532' if self.role == 'builder' else '65534:65534',
+                self._active_run(['exec', '-i', '--user', '65532:65532' if self.role == 'builder' else '65534:65534',
                     self.cid, 'python', '-I', '-S', '-B', '/opt/hermes/agent/protected_docker_guest.py', 'stage'], data=frame, limit=8192)
             if self.role == 'reviewer':
-                self.runtime.run(['exec', '--user', '65534:65534', self.cid, 'python', '-I', '-S', '-B',
+                self._active_run(['exec', '--user', '65534:65534', self.cid, 'python', '-I', '-S', '-B',
                     '/opt/hermes/agent/protected_docker_guest.py', 'seal'], limit=8192)
             self.attest()
             if self.cancelled.is_set():
                 raise RuntimeError('Docker acquisition cancelled')
             self.process = subprocess.Popen(self.runtime.command(['exec', '-i', '--user', '65532:65532', '-w', '/workspace',
-                self.cid, 'python', '-I', '-S', '-B', '/opt/hermes/agent/protected_docker_guest.py', 'tools']),
+                self.cid, 'python', '-I', '-S', '-B', '/opt/hermes/agent/protected_docker_guest.py',
+                'tools-pilot' if self.deadline is not None else 'tools']),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
                 close_fds=True, start_new_session=True, env=self.runtime.env)
             # Host PID binds the native bridge reservation, NOT the guest principal.
@@ -464,13 +485,13 @@ class DockerContainer:
             # Stop EVERY tool-UID process, including setsid children. The trusted
             # stopper is excluded by kill(-1); it immediately exits. Distinct UID
             # verifier/exporter cannot be attacked by a stopped tool process.
-            self.runtime.run(['exec', '--user', '65532:65532', self.cid,
+            self._active_run(['exec', '--user', '65532:65532', self.cid,
                 '/bin/bash', '--noprofile', '--norc', '-c', 'kill -STOP -1'])
-            self.runtime.run(['exec', '--user', '65533:65533', self.cid, 'python', '-I', '-S', '-B',
+            self._active_run(['exec', '--user', '65533:65533', self.cid, 'python', '-I', '-S', '-B',
                 '/opt/hermes/agent/protected_docker_guest.py', 'quiescent'], limit=8192)
             result, total = {}, 0
             for name in names:
-                _code, wire = self.runtime.run(['exec', '-i', '--user', '65534:65534', self.cid,
+                _code, wire = self._active_run(['exec', '-i', '--user', '65534:65534', self.cid,
                     'python', '-I', '-S', '-B', '/opt/hermes/agent/protected_docker_guest.py', 'export'],
                     data=json.dumps({'path': name}).encode() + b'\n', limit=8192)
                 def unique(items):
@@ -545,7 +566,8 @@ class DockerLaunch:
     async def acquire(self, generation):
         import asyncio
         inputs = approved_inputs(self.workspace, self.paths)
-        container = DockerContainer(self.runtime, self.leases, generation, self.role)
+        container = DockerContainer(self.runtime, self.leases, generation, self.role,
+            deadline=getattr(self, '_pilot_deadline', None))
         task = asyncio.create_task(asyncio.to_thread(container.create, inputs))
         try:
             return await asyncio.shield(task)

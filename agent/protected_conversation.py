@@ -97,6 +97,14 @@ class ProtectedTurn:
         self.inference, self.lifecycle, self.proxy = inference, lifecycle, proxy
         self._used = False
         self.deadline = time.monotonic() + 5
+        timing = lifecycle.binding.get('protected_timing_v1')
+        if timing is not None:
+            import math
+            if (type(timing) is not dict or set(timing) != {'deadline', 'turn_seconds'}
+                    or timing['turn_seconds'] != 25 or type(timing['deadline']) not in (int, float)
+                    or not math.isfinite(timing['deadline']) or not 0 < timing['deadline'] - time.monotonic() <= 25):
+                raise ValueError('invalid protected timing binding')
+            self.deadline = timing['deadline']
         self.tools = tuple({'type': 'function', 'function': {'name': name,
             'description': 'Fixed nonsecret source sentinel only',
             'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}} for name in TOOL_NAMES)

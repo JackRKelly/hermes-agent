@@ -33,6 +33,8 @@ from hermes_state_runtime import RuntimeStoreError
 class _Tools(_Endpoint):
     def __init__(self, turn):
         super().__init__(turn.lifecycle.binding, 'tools')
+        if 'protected_timing_v1' in turn.lifecycle.binding:
+            self._deadline = turn.deadline
         self.turn = turn
 
     def _invoke(self, operation, payload):
@@ -55,6 +57,7 @@ class _Tools(_Endpoint):
 class ProtectedProcess:
     def __init__(self, turn, provider):
         self.turn, self.provider = turn, provider
+        self._timing = turn.lifecycle.binding.get('protected_timing_v1')
         self.process = None
         self.threads, self.connections = [], []
         self._closed = threading.Event()
@@ -77,7 +80,8 @@ class ProtectedProcess:
         # BSD timed socket reads need not wake on another thread's close/shutdown.
         # Poll revocation without resetting the existing five-second frame bound,
         # including partial frames; receive() retains its accumulated bytes.
-        deadline = time.monotonic() + 5
+        timing = getattr(self, '_timing', None)
+        deadline = timing['deadline'] if timing is not None else time.monotonic() + 5
         conn.settimeout(.1)
         def read(size):
             while not self._closed.is_set():
@@ -200,7 +204,9 @@ class ProtectedProcess:
         try:
             await self._start(prompt)
             self._read_task = asyncio.create_task(asyncio.to_thread(receive, self.process.stdout.read))
-            done, _ = await asyncio.wait({self._read_task, stopper}, timeout=5,
+            timing = self.turn.lifecycle.binding.get('protected_timing_v1')
+            seconds = max(0, timing['deadline'] - time.monotonic()) if timing is not None else 5
+            done, _ = await asyncio.wait({self._read_task, stopper}, timeout=seconds,
                 return_when=asyncio.FIRST_COMPLETED)
             if self.turn.proxy.worker.stop.is_set():
                 raise RuntimeError('protected conversation stopped')
@@ -391,6 +397,7 @@ async def protected_process_scope(authority, ref, row, launch, *, principal_id, 
     try:
         policy_digest = await asyncio.to_thread(_saved_policy, authority, ref, row, launch, principal_id, context, provider)
         loop = asyncio.get_running_loop()
+        deadline = getattr(provider, '_protected_deadline', None)
         def complete(messages, tools):
             # Enforce the frozen schema on the OWNER too, not only in the child.
             # The channel cannot smuggle provider-hosted tools or a discovery schema.
@@ -400,7 +407,7 @@ async def protected_process_scope(authority, ref, row, launch, *, principal_id, 
             owner._observations.before_inference(messages, tools)
             future = provider.submit(messages, tools, loop)
             try:
-                result = future.result(timeout=5)
+                result = future.result(timeout=deadline.remaining() if deadline is not None else 5)
                 owner._check()
                 owner._observations.observe_response(result)
                 return result
@@ -408,7 +415,7 @@ async def protected_process_scope(authority, ref, row, launch, *, principal_id, 
                 if not future.done():
                     future.cancel()
         async with protected_turn_scope(authority, ref, row, launch, principal_id=principal_id,
-                context=context, complete=complete) as turn:
+                context=context, complete=complete, deadline=deadline) as turn:
             runner = ProtectedProcess(turn, provider)
             try:
                 owner = turn._native_owner

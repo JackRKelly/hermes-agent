@@ -131,14 +131,16 @@ def docker_tool(name, args):
         process.stdout.close()
 
 
-def sentinel_main(*, docker=False):
+def sentinel_main(*, docker=False, pilot=False):
     import os
     import sys
     import threading
     if sys.platform not in ("darwin", "linux") or 0 in (os.getuid(), os.geteuid()):  # windows-footgun: ok — short-circuit POSIX guard
         return 1
     # A fixed hard lifetime bounds silent/partial bootstrap and control frames.
-    watchdog = threading.Timer(5, lambda: os._exit(1))
+    if pilot and not docker:
+        raise ValueError('Docker-only owner pilot')
+    watchdog = threading.Timer(25 if pilot else 5, lambda: os._exit(1))
     watchdog.daemon = True
     watchdog.start()
     def send(frame):

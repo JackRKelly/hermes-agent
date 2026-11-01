@@ -1,7 +1,7 @@
 """Trusted-native bridge: real scratch authority/board, signed fixtures, no live auth."""
 import asyncio
 import base64
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 import hashlib
 import json
@@ -37,6 +37,68 @@ def test_untrusted_row_cannot_enable_native_bridge():
     with pytest.raises(ValueError, match='protected_owner_bridge_required'):
         production_plan(SimpleNamespace(), SimpleNamespace(session_id='untrusted'),
                         dict(protected_tools_v1={'enabled': True, 'accounting': 'subscription_request_bound'}))
+
+
+@pytest.mark.parametrize('pilot', [False, True])
+@pytest.mark.parametrize('provider', ['anthropic', 'openai-codex'])
+def test_two_delayed_real_sdk_calls_docker_turn_requires_signed_pilot(tmp_path, monkeypatch, docker_runtime, pilot, provider):
+    import time
+    from gateway.session_protected_native_sdk import NativeSDKPolicy
+    from gateway.session_protected_timing import PilotTiming
+    from gateway.session_protected_docker import DockerLaunch
+    from tests.gateway.test_protected_conversation import native_claim
+    authority, _context, row = native_claim(tmp_path, monkeypatch, persisted=True,
+        provider=provider, model='claude-opus-5-5' if provider == 'anthropic' else 'controlled-model',
+        text='CONTROLLED_DELAYED_TURN', max_retries=0)
+    (tmp_path / 'allowed.txt').write_text('CONTROLLED_ARTIFACT\n')
+    async def run():
+        state = dict(requests=[], received=asyncio.Event(), disconnected=asyncio.Event(),
+            tool_roundtrip=True, signed_thinking=provider == 'anthropic')
+        peers = set()
+        def connected(reader, writer):
+            peers.add(asyncio.create_task(serve_fixture(reader, writer, state=state, provider=provider, delay=2.6)))
+        server = await asyncio.start_server(connected, '127.0.0.1', 0)
+        policy = NativeSDKPolicy(provider=provider, model='claude-opus-5-5' if provider == 'anthropic' else 'controlled-model',
+            session_id=row['target_session_id'], base_url=f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}',
+            accounting='subscription_request_bound', request_seconds=10 if pilot else 5,
+            pilot_timing=PilotTiming() if pilot else None)
+        launch = DockerLaunch(tmp_path.resolve(), docker_runtime, tmp_path / 'leases', ('allowed.txt',), 'builder')
+        ledger = DurableFixtureLedger(tmp_path / 'ledger.db')
+        bridge, _signer, _resolved = fixture_bridge(authority, row, launch, policy, ledger)
+        ledger.observe = bridge.readback
+        started = time.monotonic()
+        try:
+            if pilot:
+                result = await asyncio.wait_for(bridge.execute('CONTROLLED_DELAYED_TURN'), 29)
+                elapsed = time.monotonic() - started
+                assert result == 'CONTROLLED_SDK_DONE'
+                assert 5.2 < elapsed < 25
+                assert len(state['requests']) == len(ledger.proofs) == 2
+                assert len(authority.db.get_messages(row['target_session_id'])) == 4
+                assert 'CONTROLLED_OWNER_THINKING' not in json.dumps(authority.db.get_messages(row['target_session_id']))
+                assert row['admission_id'] in authority._protected_completion_receipts
+            else:
+                with pytest.raises((RuntimeError, ValueError, TimeoutError, EOFError)):
+                    await asyncio.wait_for(bridge.execute('CONTROLLED_DELAYED_TURN'), 15)
+                elapsed = time.monotonic() - started
+                assert row['admission_id'] not in getattr(authority, '_protected_completion_receipts', {})
+            container = bridge._runner.turn.proxy.worker.container
+            assert container.absent()
+            assert not bridge._runner.provider._tasks
+            assert not any(t.is_alive() for t in bridge._runner.threads)
+            assert bridge._runner.process.poll() is not None
+            docker_runtime.record('delayed-pilot-' + row['admission_id'], dict(pilot=pilot,
+                provider=provider, elapsed_seconds=elapsed, response_delay_seconds=2.6,
+                requests=len(state['requests']), namespace_absent=True, cid=container.cid,
+                name=container.name, signed_policy=asdict(policy)))
+        finally:
+            server.close()
+            await server.wait_closed()
+            await asyncio.wait_for(asyncio.gather(*peers, return_exceptions=True), 4)
+    try:
+        asyncio.run(run())
+    finally:
+        authority.db.close()
 
 
 def test_owner_factory_rejects_serialized_or_callable_authority():
@@ -216,7 +278,7 @@ def test_owner_factory_uses_canonical_row_once_and_rechecks_source(tmp_path, mon
         authority.db.close()
 
 
-@pytest.mark.parametrize('fault', ['strict', 'unsigned', 'signature', 'expired', 'principal', 'session', 'epoch', 'claim', 'model', 'endpoint', 'image', 'ledger', 'payload', 'retry'])
+@pytest.mark.parametrize('fault', ['strict', 'unsigned', 'signature', 'expired', 'principal', 'session', 'epoch', 'claim', 'model', 'endpoint', 'image', 'ledger', 'payload', 'retry', 'timing', 'reforged-timing', 'controller-reset'])
 def test_bound_native_policy_refuses_before_auth(tmp_path, monkeypatch, fault):
     from gateway.session_protected_native_sdk import NativeSDKPolicy
     from gateway.session_protected_docker import DockerLaunch, DockerRuntime
@@ -244,6 +306,14 @@ def test_bound_native_policy_refuses_before_auth(tmp_path, monkeypatch, fault):
     elif fault == 'image': runtime.image = 'sha256:' + '1' * 64
     elif fault == 'ledger': bridge.ledger.check = lambda binding: None
     elif fault == 'payload': row['payload']['text'] = 'UNSIGNED_TEXT'
+    elif fault in ('timing', 'reforged-timing'):
+        from gateway.session_protected_timing import PilotTiming
+        bridge.policy = replace(policy, request_seconds=10, pilot_timing=PilotTiming())
+        if fault == 'reforged-timing':
+            bridge.binding['sdk_policy'] = asdict(bridge.policy)
+            bridge.envelope['payload']['binding']['sdk_policy'] = asdict(bridge.policy)
+    elif fault == 'controller-reset':
+        bridge.controller_started_at += 1
     from gateway.session_protected_tools import production_plan
     try:
         with pytest.raises((RuntimeError, ValueError, KeyError)):
@@ -440,7 +510,101 @@ def test_canonical_drain_factory_completes_once_without_fifo_pause(tmp_path, mon
         authority.db.close()
 
 
-def test_real_sdk_cumulative_ledger_survives_new_clients(tmp_path, monkeypatch, docker_runtime):
+@pytest.mark.parametrize('provider', ['anthropic', 'openai-codex'])
+@pytest.mark.parametrize('fault', ['request-timeout', 'stop', 'controller-expiry'])
+def test_signed_pilot_stream_cancel_closes_socket_and_guest_without_refund(tmp_path, monkeypatch, docker_runtime, provider, fault):
+    import time
+    from gateway.session_protected_native_sdk import NativeSDKPolicy
+    from gateway.session_protected_timing import PilotTiming
+    from gateway.session_protected_docker import DockerLaunch
+    from tests.gateway.test_protected_conversation import native_claim
+    authority, _context, row = native_claim(tmp_path, monkeypatch, persisted=True,
+        provider=provider, model='controlled-model', text='CONTROLLED_STREAM', max_retries=0)
+    (tmp_path / 'allowed.txt').write_text('CONTROLLED_ARTIFACT\n')
+    async def run():
+        state = dict(requests=[], received=asyncio.Event(), disconnected=asyncio.Event())
+        peers = set()
+        def connected(reader, writer):
+            peers.add(asyncio.create_task(serve_fixture(reader, writer, state=state, provider=provider, delay='body')))
+        server = await asyncio.start_server(connected, '127.0.0.1', 0)
+        policy = NativeSDKPolicy(provider=provider, model='controlled-model', session_id=row['target_session_id'],
+            base_url=f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}', accounting='subscription_request_bound',
+            request_seconds=.5 if fault == 'request-timeout' else 10, pilot_timing=PilotTiming())
+        launch = DockerLaunch(tmp_path.resolve(), docker_runtime, tmp_path / 'leases', ('allowed.txt',), 'builder')
+        ledger = DurableFixtureLedger(tmp_path / 'ledger.db')
+        if fault == 'controller-expiry':
+            # Genuine remaining original 600s, before bridge construction. No reset
+            # or fixture mutation of active channel/SDK/turn deadline objects.
+            with sqlite3.connect(tmp_path / 'ledger.db') as conn:
+                conn.execute('UPDATE controller SET started=started-592')
+        bridge, _signer, _resolved = fixture_bridge(authority, row, launch, policy, ledger)
+        ledger.observe = bridge.readback
+        task = asyncio.create_task(bridge.execute('CONTROLLED_STREAM'))
+        try:
+            await asyncio.wait_for(state['received'].wait(), 12)
+            before = len(authority.db.get_messages(row['target_session_id']))
+            started = time.monotonic()
+            if fault == 'stop':
+                bridge._runner.turn.proxy.worker.interrupt()
+            with pytest.raises((RuntimeError, TimeoutError, EOFError)):
+                await asyncio.wait_for(task, 12)
+            await asyncio.wait_for(state['disconnected'].wait(), 2)
+            elapsed = time.monotonic() - started
+            assert elapsed < 12
+            assert len(authority.db.get_messages(row['target_session_id'])) == before
+            assert not getattr(authority, '_protected_completion_receipts', {})
+            assert len(state['requests']) == 1
+            with sqlite3.connect(tmp_path / 'ledger.db') as conn:
+                assert conn.execute('SELECT count(*) FROM attempts').fetchone()[0] == 1
+                assert conn.execute('SELECT state FROM attempts').fetchone()[0] == 'unknown'
+                assert conn.execute('SELECT frozen FROM controller').fetchone()[0] == 1
+            runner = bridge._runner
+            assert runner.turn.proxy.worker.container.absent()
+            assert not runner.provider._tasks and runner.provider._sdk_close_task.done()
+            assert not any(t.is_alive() for t in runner.threads)
+            assert runner.process.poll() is not None
+            docker_runtime.record('pilot-cancel-' + row['admission_id'], dict(fault=fault, provider=provider,
+                elapsed_after_request_seconds=elapsed, charged_requests=1, namespace_absent=True,
+                cid=runner.turn.proxy.worker.container.cid, name=runner.turn.proxy.worker.container.name))
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            server.close()
+            await server.wait_closed()
+            await asyncio.wait_for(asyncio.gather(*peers), 2)
+    try:
+        asyncio.run(run())
+    finally:
+        authority.db.close()
+
+
+def test_pilot_pid1_self_exits_at_remaining_controller_without_owner_cleanup(tmp_path, docker_runtime):
+    import time
+    from gateway.session_protected_timing import PilotTiming, TurnDeadline
+    from gateway.session_protected_docker import DockerContainer
+    started = time.monotonic()
+    deadline = TurnDeadline(PilotTiming(), started + 4)
+    container = DockerContainer(docker_runtime, tmp_path / 'leases', 1, 'builder', deadline=deadline)
+    try:
+        container.create({'allowed.txt': b'CONTROLLED_ARTIFACT\n'})
+        assert container.inspect()['State']['Running']
+        end = started + 7
+        while container.inspect()['State']['Running'] and time.monotonic() < end:
+            time.sleep(.05)
+        state = container.inspect()['State']
+        elapsed = time.monotonic() - started
+        assert not state['Running'] and state['Pid'] == 0
+        assert 3.5 < elapsed < 7
+        docker_runtime.record('pilot-pid1-' + container.name, dict(cid=container.cid, name=container.name,
+            seconds=elapsed, namespace_expires_at=deadline.namespace_expires_at, state=state))
+    finally:
+        container.close()
+    assert container.absent()
+
+
+@pytest.mark.parametrize('pilot', [False, True])
+def test_real_sdk_cumulative_ledger_survives_new_clients(tmp_path, monkeypatch, docker_runtime, pilot):
     from gateway.session_protected_native_sdk import NativeSDKPolicy
     from gateway.session_protected_docker import DockerLaunch
     from tests.gateway.test_protected_conversation import native_claim
@@ -454,8 +618,14 @@ def test_real_sdk_cumulative_ledger_survives_new_clients(tmp_path, monkeypatch, 
         server = await asyncio.start_server(connected, '127.0.0.1', 0)
         policy = NativeSDKPolicy(provider='anthropic', model='controlled-model', session_id=row['target_session_id'],
             base_url=f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}', accounting='subscription_request_bound')
+        if pilot:
+            from gateway.session_protected_timing import PilotTiming
+            policy = replace(policy, request_seconds=10, pilot_timing=PilotTiming())
         launch = DockerLaunch(tmp_path.resolve(), docker_runtime, tmp_path / 'leases', ('allowed.txt',), 'builder')
         bridge, _signer, resolved = fixture_bridge(authority, row, launch, policy, DurableFixtureLedger(tmp_path / 'ledger.db'))
+        if pilot:
+            from gateway.session_protected_timing import TurnDeadline
+            bridge._turn_deadline = TurnDeadline(policy.pilot_timing, bridge._controller_deadline)
         try:
             for index in range(13):
                 # Reopen the durable shared ledger; no fresh per-client allowance.

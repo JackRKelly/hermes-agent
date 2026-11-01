@@ -94,12 +94,13 @@ async def sentinel_scope(authority, ref, row, launch):
 
 class ToolProxy:
     """One fixed sentinel channel, no registry/hook/host fallback, bounded lifetime."""
-    def __init__(self, worker, launch):
+    def __init__(self, worker, launch, *, deadline=None):
         self.worker = worker
         self.launch = launch
         self.bound = False
         self.sequence = 0
-        self.deadline = time.monotonic() + 5
+        self.deadline = deadline.deadline if deadline is not None else time.monotonic() + 5
+        self._pilot = deadline is not None
 
     def _receive(self):
         try:
@@ -111,11 +112,12 @@ class ToolProxy:
     def _receive_frame(self):
         # Unbuffered child stdout; readiness cannot hide a partial frame in a Python buffer.
         stream = self.worker.process.stdout
+        frame_deadline = min(self.deadline, getattr(self, '_call_deadline', time.monotonic() + 5)) if self._pilot else self.deadline
         body = bytearray()
         with selectors.DefaultSelector() as selector:
             selector.register(stream, selectors.EVENT_READ)
             while not body.endswith(b'\n'):
-                remaining = self.deadline - time.monotonic()
+                remaining = frame_deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
                     self.worker.close()
                     raise TimeoutError('sentinel tool deadline')
@@ -158,13 +160,17 @@ class ToolProxy:
         if (not self.bound or self.worker.stop.is_set() or self.sequence >= 16
                 or time.monotonic() >= self.deadline):
             raise ValueError('unbound, exhausted or expired tool channel')
+        if self._pilot:
+            self._call_deadline = min(self.deadline, time.monotonic() + 5)
         from agent.protected_conversation import tool_arguments
         import json
         tool_arguments(name, json.dumps(args), getattr(self.worker, 'container', None) is not None)
         if getattr(self.worker, 'container', None) is not None:
-            if self.worker.container.attest() != self.attestation:
+            kwargs = {'seconds': max(.001, self._call_deadline - time.monotonic())} if self._pilot else {}
+            if self.worker.container.attest(**kwargs) != self.attestation:
                 self.worker.close()
                 raise ValueError('Docker generation changed')
+        self._check_tool_deadline()
         self.sequence += 1
         self._send({'op': 'call', 'sequence': self.sequence, 'name': name, 'args': args})
         frame = self._receive()
@@ -175,7 +181,13 @@ class ToolProxy:
             self.worker.close()
             raise ValueError('invalid sentinel tool result')
         self.last_imports = frame['imports']
+        self._check_tool_deadline()
         return frame['result']
+
+    def _check_tool_deadline(self):
+        if self._pilot and time.monotonic() >= self._call_deadline:
+            self.worker.close()
+            raise TimeoutError('sentinel tool deadline')
 
     def cancel(self):
         if not self.bound:

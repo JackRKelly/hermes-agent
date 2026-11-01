@@ -9,6 +9,7 @@ import os
 import socket
 import struct
 import sys
+import time
 
 from agent.protected_conversation import MAX_BYTES, CapabilityClient, ProtectedTurn
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
@@ -86,6 +87,7 @@ def response_from_wire(value):
 
 class SocketCapability:
     def __init__(self, path, config, *, owner_pid, owner_uid):
+        self.deadline = config['binding'].get('protected_timing_v1', {}).get('deadline')
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.socket.settimeout(5)
         try:
@@ -98,8 +100,20 @@ class SocketCapability:
             raise
 
     def _send(self, frame):
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('protected IPC deadline')
+            self.socket.settimeout(min(25, remaining))
         self.socket.sendall(encode(frame))
-        reply = receive(self.socket.recv)
+        def read(size):
+            if self.deadline is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('protected IPC deadline')
+                self.socket.settimeout(min(25, remaining))
+            return self.socket.recv(size)
+        reply = receive(read)
         if type(reply) is not dict or set(reply) != {'ok', 'value'} or reply['ok'] is not True:
             raise RuntimeError('protected capability request failed')
         return response_from_wire(reply['value']) if self.client.channel == 'inference' else reply['value']

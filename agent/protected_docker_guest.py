@@ -12,11 +12,17 @@ import sys
 import time
 
 
-def deadline(seconds):
+def deadline(seconds, *, expires_at=None):
     if sys.platform != 'linux' or os.getpid() != 1 or os.getuid() != 65533 or seconds != 30:  # windows-footgun: ok — short-circuit Linux-only immutable image entry
         raise ValueError('invalid namespace deadline')
     clock = lambda: time.clock_gettime(time.CLOCK_BOOTTIME)
     start = clock()
+    pilot = expires_at is not None
+    if pilot:
+        import math
+        if not math.isfinite(expires_at):
+            raise ValueError('invalid namespace expiry')
+        seconds = min(seconds, max(0, expires_at - time.time()))
     end, last_tool, observed = start + seconds, start, False
     while clock() < end:
         active = False
@@ -29,7 +35,7 @@ def deadline(seconds):
                 pass
         if active:
             last_tool, observed = clock(), True
-        elif (observed and clock() - last_tool > 2) or (not observed and clock() - start > 15):
+        elif not pilot and ((observed and clock() - last_tool > 2) or (not observed and clock() - start > 15)):
             os._exit(0)
         try:
             while os.waitpid(-1, os.WNOHANG)[0] > 0:
@@ -130,7 +136,7 @@ def export():
     print(json.dumps({'path': name, 'body': base64.b64encode(body).decode(), 'sha256': hashlib.sha256(body).hexdigest()}))
 
 
-def tools():
+def tools(*, pilot=False):
     if sys.platform != 'linux' or os.getuid() != 65532:  # windows-footgun: ok — short-circuit Linux-only immutable image entry
         raise ValueError('invalid tool UID')
     # The image contains exactly the explicit source closure, never workspace
@@ -139,11 +145,15 @@ def tools():
     os.environ.clear()
     os.environ.update(LANG='C', LC_ALL='C')
     from agent.protected_tool_worker import sentinel_main
-    return sentinel_main(docker=True)
+    return sentinel_main(docker=True, pilot=pilot)
 
 
 def main():
+    if len(sys.argv) == 4 and sys.argv[1:3] == ['deadline-pilot', '30']:
+        deadline(30, expires_at=float(sys.argv[3]))
+        return 0
     modes = {('deadline', '30'): lambda: deadline(30), ('stage',): stage,
+             ('tools-pilot',): lambda: tools(pilot=True),
              ('seal',): seal, ('quiescent',): quiescent, ('export',): export, ('tools',): tools}
     handler = modes.get(tuple(sys.argv[1:]))
     if handler is None:

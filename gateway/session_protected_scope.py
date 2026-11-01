@@ -20,18 +20,23 @@ async def _drain_owned(task, cancellations):
     return task.result()
 
 
-def _prepare(worker, launch, authority, row, principal_id, context, complete):
+def _prepare(worker, launch, authority, row, principal_id, context, complete, deadline=None):
     from hermes_state_runtime import RuntimeStoreError
     if worker.stop.is_set():
         raise RuntimeStoreError('managed_worker_stopped')
-    proxy = ToolProxy(worker, launch)
+    proxy = ToolProxy(worker, launch, deadline=deadline)
     proxy.bind()
     if worker.stop.is_set():
         raise RuntimeStoreError('managed_worker_stopped')
     owner = NativeLifecycle.reserve(authority, admission_id=row['admission_id'],
         principal_id=principal_id, process=worker.process, context=context)
     try:
+        if deadline is not None:
+            owner.binding['protected_timing_v1'] = deadline.binding()
+            owner._deadline = deadline.deadline
         inference = ScopedInference(complete, owner.binding)
+        if deadline is not None:
+            inference._deadline = deadline.deadline
         turn = ProtectedTurn(inference.client(), owner.client(), proxy)
         # Owner-only handles: the fresh child receives bounded channel configs,
         # never these objects or the canonical database/adoption authority.
@@ -66,7 +71,7 @@ async def retry_protected_retirements(authority):
 
 
 @asynccontextmanager
-async def protected_turn_scope(authority, ref, row, launch, *, principal_id, context, complete):
+async def protected_turn_scope(authority, ref, row, launch, *, principal_id, context, complete, deadline=None):
     """Acquire native source fixture state; always attempt retirement and reap.
 
     Legacy synchronous callbacks are controlled fixtures, not cancellable provider
@@ -87,7 +92,7 @@ async def protected_turn_scope(authority, ref, row, launch, *, principal_id, con
     except BaseException:
         await asyncio.to_thread(worker.close)
         raise
-    pending = asyncio.create_task(asyncio.to_thread(_prepare, worker, launch, authority, row, principal_id, context, complete))
+    pending = asyncio.create_task(asyncio.to_thread(_prepare, worker, launch, authority, row, principal_id, context, complete, deadline))
     try:
         _, turn = await asyncio.shield(pending)
         yield turn

@@ -39,6 +39,8 @@ async def serve_fixture(reader, writer, *, state, provider, delay):
         body = json.loads(await reader.readexactly(size))
         state['requests'].append((header, body))
         state['received'].set()
+        if type(delay) in (int, float):
+            await asyncio.sleep(delay)  # health: allow HX013 -- real peer reply latency IS the behavior under test; two replies must exceed the strict five-second total
         if delay == 'headers':
             assert await reader.read() == b''
             state['disconnected'].set()

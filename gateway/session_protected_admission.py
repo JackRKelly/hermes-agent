@@ -58,6 +58,9 @@ class NativeAdmissionBridge:
         if type(controller_started_at) not in (int, float) or not math.isfinite(controller_started_at):
             raise RuntimeStoreError('protected_controller_start_required')
         self.controller_started_at = controller_started_at
+        # Pin once; wall-clock rollback and new SDK/channel objects cannot renew it.
+        self._controller_deadline = time.monotonic() + max(0, controller_started_at + 600 - time.time())
+        self._turn_deadline = None
         # Optional source identity is a trusted fixture/deployment manifest reader,
         # never an input accepted by production_plan or the native worker RPC.
         self._source_identity = source_identity or _source_identity
@@ -100,13 +103,16 @@ class NativeAdmissionBridge:
         now = time.time()
         if (type(state) is not dict or state.get('started_at') != self.controller_started_at
                 or type(state.get('requests')) is not int or not 0 <= state['requests'] <= 12
-                or state.get('frozen') is not False or not self.controller_started_at <= now < self.controller_started_at + 600):
+                or state.get('frozen') is not False or not self.controller_started_at <= now < self.controller_started_at + 600
+                or time.monotonic() >= self._controller_deadline):
             raise RuntimeStoreError('protected_owner_budget_unknown_or_exhausted')
         return state
 
     def check(self):
         approved = self._check_native()
         self.budget_state()
+        if self._turn_deadline is not None:
+            self._turn_deadline.remaining()
         return approved
 
     def _check_native(self):
@@ -158,6 +164,11 @@ class NativeAdmissionBridge:
         self.verify_runtime_image()
         bridge = self
         class GuardedLedger:
+            def remaining_seconds(self):
+                bridge.check()
+                if bridge._turn_deadline is None:
+                    raise RuntimeStoreError('protected_pilot_deadline_required')
+                return min(bridge._turn_deadline.remaining(), bridge._controller_deadline - time.monotonic())
             def reserve(self, binding):
                 bridge.check()
                 before = bridge.budget_state()['requests']
@@ -180,6 +191,7 @@ class NativeAdmissionBridge:
             self._first_provider_activity_at = time.time()
         selected = construct_native_sdk(self.policy, resolve=self.resolve, ledger=GuardedLedger())
         selected._admission_guard = self.check
+        selected._protected_deadline = self._turn_deadline
         return selected
 
     def recheck_source(self):
@@ -267,6 +279,13 @@ class NativeAdmissionBridge:
             raise RuntimeStoreError('protected_owner_payload_mismatch')
         self.check()
         self._consumed = True
+        if self.policy.pilot_timing is not None:
+            from gateway.session_protected_timing import TurnDeadline
+            self._turn_deadline = TurnDeadline(self.policy.pilot_timing, self._controller_deadline)
+            # Owner-only signed selection, not DockerLaunch/config/model input.
+            if getattr(self.launch, '_pilot_deadline', None) is not None:
+                raise RuntimeStoreError('protected_pilot_deadline_already_bound')
+            self.launch._pilot_deadline = self._turn_deadline
         provider = self.provider()
         async with protected_process_scope(self.authority, self.ref, self.row, self.launch,
                 principal_id=self.row['principal_id'], context=self.context, provider=provider) as runner:

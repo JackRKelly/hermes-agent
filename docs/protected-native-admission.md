@@ -67,7 +67,7 @@ The native owner's ordinary profile runtime/secret scope must already be bound. 
 
 The async factory does no plugin/tool discovery, never calls the auxiliary sync-to-thread client, reuses native Codex account/identity headers and native Anthropic OAuth/API-key/beta identity rules, and constructs actual `AsyncOpenAI.responses.create` / `AsyncAnthropic.messages.create`. It pins canonical session/cache affinity, native transports and owner-selected request policy. The Responses transport has additive explicit endpoint/issuer inputs so this selected first-party path does not query provider registries; ordinary callers retain their previous defaults. Fresh-process tests fence provider/tool/auth-router imports across actual loopback SDK requests and separately witness ordinary `run_agent`, `tools`, `cron`, `gateway` and `agent` imports.
 
-SDK retries are zero; there is no provider/account fallback, redirects or environment proxy use. Total request timeout is at most 5 seconds. The HTTP stream has a cumulative 65,536-byte hard read bound, rejects content encodings other than identity and closes on cancellation. Codex consumes the actual asynchronous SSE Responses stream. Reported model and integer usage must be present and match the selected model before normalized text/tools can reach owner observations. Provider replay/reasoning metadata is deliberately excluded from the narrower protected wire. SDK request/close exceptions are normalized so arbitrary provider response bodies cannot leak through diagnostics.
+SDK retries are zero; there is no provider/account fallback, redirects or environment proxy use. Default total request timeout is at most 5 seconds (the separately signed pilot profile below permits at most 10 seconds). The HTTP stream has a cumulative 65,536-byte hard read bound, rejects content encodings other than identity and closes on cancellation. Codex consumes the actual asynchronous SSE Responses stream. Reported model and integer usage must be present and match the selected model before normalized text/tools can reach owner observations. Provider replay/reasoning metadata is deliberately excluded from the narrower protected wire. SDK request/close exceptions are normalized so arbitrary provider response bodies cannot leak through diagnostics.
 
 Reported model matching is **strict string equality**, not alias/date-prefix
 matching: the deployment must verify the actual backend returns the exact
@@ -87,6 +87,71 @@ multi-profile throughput guarantees.
 `max_output_tokens=1024` is a request preference. Native Codex omits that unsupported wire limit; neither it nor subscription prices prove a strict token/USD cap. The pilot accounting mode explicitly acknowledges that limit. Unknown/strict accounting still denies before credentials/network.
 
 ## Shared durable broker ledger contract
+
+### Explicit signed pilot timing (v1)
+
+The five-second default **total conversation** is a sentinel budget, not a
+real-provider performance guarantee. Two approximately 2.6-second SDK responses
+already exceed it before native tools/readbacks/export. The bounded private pilot
+therefore requires a distinct trusted-owner policy, not a worker/config flag:
+
+```python
+from gateway.session_protected_timing import PilotTiming
+
+sdk_policy = NativeSDKPolicy(
+    provider=selected_native_provider, model=exact_model, session_id=ref.session_id,
+    base_url=exact_native_endpoint, accounting='subscription_request_bound',
+    request_seconds=10, pilot_timing=PilotTiming(),
+)
+```
+
+`PilotTiming` is frozen and accepts exactly the reviewed profile, not arbitrary
+limits: request 10s, turn 25s, tool 5s, shell 2s, namespace 30s, SDK close/drain 1s.
+`request_seconds` may be shorter, never longer. Strict accounting still refuses.
+`asdict(sdk_policy)` now includes `pilot_timing` (null for the original default).
+The complete nested object is covered by `binding.sdk_policy` in the existing
+per-attempt signature and broker expected binding; dropping/forging those fields
+invalidates authorization. JSON is never converted into a timing constructor.
+
+One monotonic controller deadline is pinned from the **original** started-at
+plus 600s. At single-use execution, one frozen absolute turn deadline is created
+before provider/guest acquisition, at `min(now + 25s, controller_deadline)`.
+SDK waits, owner capability expiry, proxy lifetime, IPC idle/frame waits and the
+fresh conversation all use that same deadline; channels/calls do not renew it.
+Each SDK POST is additionally limited to `min(request_seconds, remaining)`;
+each proxy tool, including daemon attestation, to `min(5s, remaining)`. Shells
+retain the unchanged 2s guest watchdog and output bound. Operational Docker
+stage/seal/export calls also clamp their existing CLI timeout to remaining time.
+
+Only after signature validation does the owner select the pilot guest entries.
+The default guest still has its 5s tool watchdog, 15s initial staging grace and
+2s post-tool idle exit. Pilot tools have a 25s watchdog, and pilot PID1 removes
+those early idle exits while retaining an independent **at-most-30s** boot-clock
+namespace limit. Its exact attested command carries the owner-derived absolute
+wall expiry, `min(turn_deadline + 5s, original_controller_deadline)`, converted
+once to the VM boot clock on entry. This assumes the existing trusted VM/daemon
+wall clock is synchronized with the trusted host; clock skew can cause early
+denial. No mounts, credentials, resource caps, UIDs, shell authority or runtime
+image producer trust change. Rebuild the same six-file image closure from the
+final clean source revision. The namespace ceiling is not a renewable heartbeat.
+
+Revocation/expiry never allows a late response, append or success settlement.
+SDK cancellation and close/drain retain the 1s bound and exact failed-task
+retention. Exact-CID teardown/retirement uses its existing separately finite
+cleanup bounds **even after operational budget expiry**; expiry must not skip
+cleanup. Failed/cancelled reservations remain charged; request 13 is refused
+before POST. None of this guarantees remote backend billing cancellation.
+
+Controlled tests use the actual SDKs, TCP peers delaying **each** of two replies
+by 2.6s, real Docker/native file tools, native lifecycle readbacks and artifact
+settlement. The default fails without a completion receipt; the signed pilot
+completes, including opaque signed Opus 5.5 thinking replay on the Anthropic path.
+They separately prove request timeout/Stop/original-controller expiry close the
+SDK socket and guest with no refund/late append; PID1 self-exit is measured with
+four seconds remaining and no owner teardown until after exit. This demonstrates
+the approved operational behavior, **not live-provider throughput or latency**.
+
+### Ledger methods
 
 The owner passes the existing broker's shared ledger, **not** a per-run in-memory counter:
 
