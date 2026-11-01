@@ -508,6 +508,7 @@ def _readback(authority, cap, admission_id, conn):
         _deny()
     return dict(version='protected_phase_readback_v1', phase=state['phase'], native=bridge.binding,
         card=dict(bridge.binding['card']), source=bridge.source, phase_policy=asdict(bridge.phase_policy), receipt=receipt,
+        sdk_policy={k: getattr(bridge.policy, k) for k in ('provider', 'model', 'base_url', 'accounting')},
         receipt_sha256=_digest(receipt), result_sha256=_digest(receipt['result']), export_sha256=_digest(receipt['artifacts']),
         transcript_sha256=receipt['transcript_sha256'], artifacts=receipt['artifacts'],
         namespace_retired=True, namespace=dict(cid=container.cid,name=container.name,attestation=runner.turn._native_owner._container_binding))

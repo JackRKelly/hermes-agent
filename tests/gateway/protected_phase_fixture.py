@@ -152,6 +152,10 @@ async def run_two_actual_card_owners_reject_repair_approve(tmp_path, monkeypatch
             readback=native_phase_readback(owner.authority,admission_id=aid)
             assert readback['namespace_retired'] is True
             bridge=built[-1]
+            assert readback['sdk_policy'] == {
+                'provider': bridge.policy.provider, 'model': bridge.policy.model,
+                'base_url': bridge.policy.base_url, 'accounting': bridge.policy.accounting,
+            }
             cid=bridge._runner.turn.proxy.worker.container.cid
             bridge._runner.turn.proxy.worker.container.cid='0'*64
             with pytest.raises(Exception):
