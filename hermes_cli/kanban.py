@@ -357,9 +357,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except ValueError as exc:
         return _err(f"kanban: --max-runtime: {exc}", 2)
     max_retries = getattr(args, "max_retries", None)
-    if max_retries is not None and max_retries < 1:
-        return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
-                    "use 1 to trip on the first failure.", 2)
+    if max_retries is not None and (type(max_retries) is not int or max_retries < 0):
+        return _err(f"kanban: --max-retries must be a nonnegative integer (got {max_retries!r})", 2)
     with kbc.connect_closing() as conn:
         task_id = kb.create_task(
             conn, title=args.title, body=body, assignee=args.assignee,
