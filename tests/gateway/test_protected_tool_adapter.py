@@ -18,9 +18,14 @@ class ProtectedToolAdapterTests(unittest.TestCase):
         from gateway.session_managed_worker import _spawn_registered_worker
         authority = SimpleNamespace()
         ref = SimpleNamespace(session_id='sentinel-refused')
-        with self.assertRaisesRegex(RuntimeError, 'admission disabled'):
-            asyncio.run(_spawn_registered_worker(authority, ref,
-                {'generation': 1, 'protected_tools_v1': {'version': 1, 'adapter': 'readonly-v1'}}))
+        from unittest.mock import patch
+        with patch('gateway.session_managed_worker.subprocess.Popen') as spawn, \
+                patch('gateway.session_managed_worker._worker_env') as profile_environment:
+            with self.assertRaisesRegex(ValueError, 'protected_owner_bridge_required'):
+                asyncio.run(_spawn_registered_worker(authority, ref,
+                    {'generation': 1, 'protected_tools_v1': {'version': 1, 'adapter': 'readonly-v1'}}))
+            spawn.assert_not_called()
+            profile_environment.assert_not_called()
         self.assertEqual(authority._managed_spawning, {})
 
     @pytest.mark.platforms("posix")

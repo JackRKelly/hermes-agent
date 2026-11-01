@@ -77,7 +77,7 @@ def test_actual_conversation_entry_and_aiagent_dispatch_use_only_native_proxy(tm
 
 
 def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None,
-                 provider='custom', model='controlled-no-provider', text=None, max_retries=None):
+                 provider='custom', model='controlled-no-provider', text=None, max_retries=None, claim=True):
     """Real isolated card claim, policy and native reservation store (not a daemon)."""
     from hermes_state import SessionDB
     from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
@@ -120,6 +120,8 @@ def native_claim(tmp_path, monkeypatch, *, persisted=False, workspace=None,
     admitted = admit_session_input(db, epoch=epoch, principal_id='fixture-owner', session_id=session_id,
         request_id='controlled-input', payload={'kanban_card_v1': {'board': 'controlled', 'task_id': task.id, 'run_id': task.current_run_id},
             **({'text': text} if text is not None else {})})
+    if not claim:
+        return authority, json.loads(policy.kanban_json), admitted
     claimed = claim_session_input(db, epoch=epoch, session_id=session_id)
     return authority, json.loads(policy.kanban_json), admitted | {'generation': claimed['generation']}
 

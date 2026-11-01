@@ -52,13 +52,22 @@ async def serve_fixture(reader, writer, *, state, provider, delay):
                  usage=dict(input_tokens=3, output_tokens=2, total_tokens=5)))
         if state.get('tool_roundtrip') and len(state['requests']) == 1:
             if provider == 'anthropic':
-                response['content'] = [dict(type='tool_use', id='controlled-read', name='read_file', input={})]
+                response['content'] = [dict(type='tool_use', id='controlled-read',
+                    name=state.get('tool_name', body['tools'][0]['name']), input={})]
+                if state.get('signed_thinking'):
+                    response['content'].insert(0, dict(type='thinking', thinking='CONTROLLED_OWNER_THINKING',
+                        signature='CONTROLLED_SIGNED_THINKING'))
                 response['stop_reason'] = 'tool_use'
             else:
                 response['output'] = [dict(type='function_call', id='fc-controlled-read', call_id='controlled-read',
                     name='read_file', arguments='{}', status='completed')]
         elif state.get('tool_roundtrip'):
             assert 'CONTROLLED_ARTIFACT' in json.dumps(body), 'real Docker tool result must reach SDK follow-up'
+            if state.get('signed_thinking'):
+                assistant = next(m for m in body['messages'] if m['role'] == 'assistant')
+                assert [b['type'] for b in assistant['content']] == ['thinking', 'tool_use']
+                assert assistant['content'][0]['signature'] == 'CONTROLLED_SIGNED_THINKING'
+                assert assistant['content'][1]['name'] == state['requests'][0][1]['tools'][0]['name']
         fault = state.get('fault')
         if fault == 'model': response['model'] = 'CONTROLLED_WRONG_MODEL'  # health: allow HX011 -- explicit controlled HTTP fault vectors, not runtime routing
         elif fault == 'usage': response.pop('usage')

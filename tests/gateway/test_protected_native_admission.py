@@ -39,6 +39,16 @@ def test_untrusted_row_cannot_enable_native_bridge():
                         dict(protected_tools_v1={'enabled': True, 'accounting': 'subscription_request_bound'}))
 
 
+def test_owner_factory_rejects_serialized_or_callable_authority():
+    from gateway.session_protected_admission import NativeAdmissionBridgeFactory, production_plan
+    authority = SimpleNamespace()
+    with pytest.raises(ValueError, match='protected_owner_bridge_required'):
+        NativeAdmissionBridgeFactory(authority=authority, build={'enabled': True})
+    authority._protected_admission_bridge = lambda *args: True
+    with pytest.raises(ValueError, match='protected_owner_bridge_required'):
+        production_plan(authority, SimpleNamespace(session_id='untrusted'), {})
+
+
 class SignedFixture:
     """Controlled RSA fixture, same canonical RSA/SHA256 scope as OperatorAuthority.
 
@@ -145,6 +155,9 @@ def fixture_bridge(authority, row, launch, policy, ledger):
     except RuntimeStoreError as error:
         if str(error) != 'protected_source_not_immutable':
             raise
+        private = getattr(launch.runtime, 'private', None)
+        if private is not None and json.loads((private / 'closure.json').read_text())['dirty'] is False:
+            raise AssertionError('immutable Docker run MUST use clean production commit/tree reader') from error
         source_identity = fixture_source
     else:
         source_identity = None
@@ -159,7 +172,48 @@ def fixture_bridge(authority, row, launch, policy, ledger):
         ledger=ledger, resolve=resolve, artifact_names=('allowed.txt',), source_identity=source_identity,
         controller_started_at=getattr(ledger, 'ledger', ledger).check({})['started_at'])
     bridge.envelope = signer.sign(bridge.expected_authorization())
+    if source_identity is None:
+        assert set(bridge.source) == {'commit', 'tree'}
     return bridge, signer, resolve_calls
+
+
+def test_owner_factory_uses_canonical_row_once_and_rechecks_source(tmp_path, monkeypatch):
+    from gateway.session_protected_admission import NativeAdmissionBridgeFactory, production_plan
+    from gateway.session_protected_native_sdk import NativeSDKPolicy
+    from gateway.session_protected_docker import DockerLaunch, DockerRuntime
+    from tests.gateway.test_protected_conversation import native_claim
+    authority, _context, row = native_claim(tmp_path, monkeypatch, persisted=True,
+        provider='anthropic', model='controlled-model', text='CONTROLLED', max_retries=0)
+    runtime = DockerRuntime.__new__(DockerRuntime)
+    runtime.image, runtime.source = 'sha256:' + '0' * 64, '0' * 64
+    launch = DockerLaunch(tmp_path.resolve(), runtime, tmp_path / 'leases', ('allowed.txt',), 'builder')
+    policy = NativeSDKPolicy(provider='anthropic', model='controlled-model', session_id=row['target_session_id'],
+        base_url='https://api.anthropic.com', accounting='subscription_request_bound')
+    calls, reads = [], []
+    def build(ref, saved):
+        calls.append(saved)
+        bridge, _signer, _resolved = fixture_bridge(authority, saved, launch, policy, DurableFixtureLedger(tmp_path / 'ledger.db'))
+        identity = bridge._source_identity
+        bridge._source_identity = lambda: reads.append(True) or identity()
+        return bridge
+    factory = NativeAdmissionBridgeFactory(authority=authority, build=build)
+    authority._protected_admission_bridge = factory
+    ref = SimpleNamespace(session_id=row['target_session_id'])
+    try:
+        forged = dict(row, payload={'text': 'FORGED'})
+        with pytest.raises(ValueError, match='protected_owner_bridge_required'):
+            production_plan(authority, ref, forged)
+        assert not calls
+        bridge = production_plan(authority, ref, row)
+        assert production_plan(authority, ref, row) is bridge and len(calls) == 1
+        for _ in range(20):
+            bridge.check()
+        assert not reads  # no Git subprocess on the inference/tool hot path
+        bridge._source_identity = lambda: {'changed': True}
+        with pytest.raises(ValueError, match='protected_owner_policy_mismatch'):
+            bridge.provider()  # strong source recheck BEFORE credentials
+    finally:
+        authority.db.close()
 
 
 @pytest.mark.parametrize('fault', ['strict', 'unsigned', 'signature', 'expired', 'principal', 'session', 'epoch', 'claim', 'model', 'endpoint', 'image', 'ledger', 'payload', 'retry'])
@@ -306,6 +360,77 @@ def test_real_docker_sdk_native_bridge(tmp_path, monkeypatch, docker_runtime, pr
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            server.close()
+            await server.wait_closed()
+            await asyncio.wait_for(asyncio.gather(*peers), 2)
+    try:
+        asyncio.run(run())
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.parametrize('provider', ['anthropic', 'openai-codex'])
+def test_canonical_drain_factory_completes_once_without_fifo_pause(tmp_path, monkeypatch, docker_runtime, provider):
+    from gateway.session_protected_admission import NativeAdmissionBridgeFactory, native_protected_readback
+    from gateway.session_protected_native_sdk import NativeSDKPolicy
+    from gateway.session_protected_docker import DockerLaunch
+    from gateway.session_local_recovery import restore_local_session
+    from hermes_state_runtime import admit_session_input, get_session_admission
+    from tests.gateway.test_protected_conversation import native_claim
+    authority, _context, row = native_claim(tmp_path, monkeypatch, persisted=True,
+        provider=provider, model='controlled-model', text='CONTROLLED_DRAIN', max_retries=0, claim=False)
+    (tmp_path / 'allowed.txt').write_text('CONTROLLED_ARTIFACT\n')
+    async def run():
+        state = dict(requests=[], received=asyncio.Event(), disconnected=asyncio.Event(), tool_roundtrip=True)
+        peers, built = set(), []
+        def connected(reader, writer):
+            peers.add(asyncio.create_task(serve_fixture(reader, writer, state=state, provider=provider, delay=None)))
+        server = await asyncio.start_server(connected, '127.0.0.1', 0)
+        ledger = DurableFixtureLedger(tmp_path / 'ledger.db')
+        def build(ref, saved):
+            # Exact real canonical admission -> trusted signed bridge. The second
+            # queued input intentionally has no card authorization and must DENY,
+            # not enter ordinary bootstrap or pause the FIFO.
+            if saved['admission_id'] != row['admission_id']:
+                raise ValueError('controlled_unapproved_follower')
+            policy = NativeSDKPolicy(provider=provider, model='controlled-model', session_id=ref.session_id,
+                base_url=f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}', accounting='subscription_request_bound')
+            launch = DockerLaunch(tmp_path.resolve(), docker_runtime, tmp_path / 'leases', ('allowed.txt',), 'builder')
+            bridge, _signer, _resolved = fixture_bridge(authority, saved, launch, policy, ledger)
+            built.append(bridge)
+            return bridge
+        authority._protected_admission_bridge = NativeAdmissionBridgeFactory(authority=authority, build=build)
+        ledger.observe = lambda binding: native_protected_readback(authority, binding)
+        authority.runner.adapters = {}
+        authority.runner._adapter_for_source = lambda source: authority.runner.adapters.get(source.platform)
+        ref = restore_local_session(authority, row['target_session_id'])
+        live = authority.sessions[ref.session_id]
+        events = []
+        actual_publish = live.event_stream.publish
+        def publish(*args, **kwargs):
+            events.append((args, kwargs))
+            return actual_publish(*args, **kwargs)
+        monkeypatch.setattr(live.event_stream, 'publish', publish)
+        follower = admit_session_input(authority.db, epoch=authority.epoch, principal_id=row['principal_id'],
+            session_id=ref.session_id, request_id='controlled-follower', payload={'text': 'UNAPPROVED'})
+        try:
+            await asyncio.wait_for(authority._drain(ref), 25)
+            settled = get_session_admission(authority.db, admission_id=row['admission_id'])
+            assert (settled['status'], settled['outcome']) == ('terminal', 'completed')
+            assert get_session_admission(authority.db, admission_id=follower['admission_id'])['status'] == 'terminal'
+            assert not live.pause_notified
+            completed = [args[1] for args, kwargs in events if len(args) > 1
+                and args[1].get('admission_id') == row['admission_id'] and args[1].get('outcome') == 'completed']
+            assert len(completed) == 1 and completed[0]['text'] == 'CONTROLLED_SDK_DONE'
+            assert len(built) == 1 and len(state['requests']) == 2 and len(ledger.proofs) == 2
+            with authority.db._read_ctx() as conn:
+                assert conn.execute("SELECT count(*) FROM state_meta WHERE key=?",
+                    ('protected.success.v1.' + row['admission_id'],)).fetchone()[0] == 1
+            assert built[0]._runner.turn.proxy.worker.container.absent()
+            docker_runtime.record('canonical-drain-' + row['admission_id'], dict(source=built[0].source,
+                completed=completed, fifo_paused=live.pause_notified, requests=len(state['requests']),
+                namespace_absent=True))
+        finally:
             server.close()
             await server.wait_closed()
             await asyncio.wait_for(asyncio.gather(*peers), 2)

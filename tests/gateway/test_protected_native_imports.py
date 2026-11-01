@@ -32,3 +32,24 @@ test_actual_sdk_complete_or_cancel_closes_peer({provider!r}, None)
 '''
     result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=20, check=False)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('kind', ['anthropic_api', 'anthropic_oauth', 'codex_oauth'])
+def test_fresh_native_tools_and_thinking_never_reach_discovery(kind):
+    script = f'''
+import sys
+attempted = []
+class Fence:
+ def find_spec(self, name, *args):
+  if name in {{'hermes_cli.auth', 'hermes_cli.runtime_provider', 'providers', 'model_tools', 'run_agent', 'agent.auxiliary_client', 'tools.registry', 'hermes_cli.plugins', 'hermes_cli.models'}}:
+   attempted.append(name)
+   raise RuntimeError('discovery/import reached: ' + name)
+sys.meta_path.insert(0, Fence())
+import pytest
+from tests.gateway.test_protected_native_headers import _exercise_native_tool_roundtrip
+with pytest.MonkeyPatch.context() as patches:
+ _exercise_native_tool_roundtrip(patches, {kind!r})
+assert not attempted, attempted
+'''
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr

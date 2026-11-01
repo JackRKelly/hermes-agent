@@ -118,7 +118,8 @@ def settle_success(runner, names):
                 native_fence(native, terminal=False)
                 native.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (key, json.dumps(receipt, sort_keys=True)))
             settle_session_input(db, epoch=scope['epoch'], admission_id=owner._admission_id,
-                generation=scope['generation'], outcome='completed', result=receipt['result'], _terminal_write=terminal_write)
+                generation=scope['generation'], outcome='completed',
+                result={'result': receipt['result'], 'usage': {}}, _terminal_write=terminal_write)
 
     with closing(connect(Path(context['db']))) as conn:
         task = kb.get_task(conn, context['task_id'])

@@ -31,11 +31,33 @@ authority._protected_admission_bridge = bridge
 # Native execute_managed(...) now selects this exact owner capability.
 ```
 
+For canonical FIFO claims whose admission IDs/generations are not known at
+bootstrap, install `NativeAdmissionBridgeFactory(authority=authority,
+build=build_signed_bridge)` on that same owner attribute instead. The trusted
+`build_signed_bridge(ref, canonical_row)` callback constructs the exact bridge
+above using the persisted card mapping and existing signer/broker. The factory
+reads the actual started row in the current owner epoch before calling it,
+rejects input/generation/principal/session tamper, caches at most twelve exact
+capabilities and never retries a failed build. The callback is trusted bootstrap
+Python, not a model-supplied callable/JSON flag, plugin path, environment selector
+or command. No generic dispatch or new public owner endpoint is introduced.
+`native_protected_readback` works unchanged with either installation form; the
+factory readback selects only an already-created exact capability and never
+constructs a bridge in response to a readback request.
+
 `bridge.expected_authorization()` is the non-secret exact scope the existing operator signer must approve. It binds native profile/principal/session/admission/generation/epoch/owner instance, current board/task/run/claim, actual input digest, workspace/role/allowed inputs/exports, source commit/tree, immutable runtime image/closure and SDK policy. The signed payload must additionally contain a nonempty `approval_id` and a future timezone-aware `expires_at`. A digest, boolean, unsigned JSON, expired approval or mismatched scope is not authority. The scope explicitly fixes `max_requests=12`, `max_elapsed_seconds=600`, `controller_started_at` and `hard_token_usd_guarantee=False`. This is pilot-only, not a global waiver. The actual owner approval and executable graph signing remain private deployment responsibilities; source fixtures do not manufacture them.
 
 Install this capability only on the explicitly selected candidate profile authority. Once installed, **every managed admission on that authority must resolve the exact capability or refuse**: a fresh session/retry cannot fall through to ordinary host bootstrap. The actual native card must have `max_retries=0`. A card still carrying the former proposal's value 1 is refused before auth/requests.
 
 The production source identity reader requires the current source checkout to be clean and binds its immutable Git commit/tree. Before credentials/SDK construction, the bridge verifies the actual owner-created Docker closure manifest, six source-file hashes, source revision/tree/clean status, immutable image ID and trusted daemon image inspection. Container startup and native lifecycle retain the existing actual daemon/CID/image/generation attestation. `source_identity` injection exists only for explicitly labelled controlled dirty-tree fixtures/deployment manifest readers; it is never accepted through a request row or guest IPC. Normal production integration uses the default reader.
+
+Source identity is strongly rechecked at construction, provider acquisition and
+immediately before successful settlement. Within that run, lifecycle/inference/
+tool fences use the pinned identity rather than spawning Git processes on each
+check. The trusted owner must keep host source immutable; the credentialless
+guest has no host-source mount/write access. An immutable Docker test manifest
+requires the real clean commit/tree reader and cannot silently fall back to a
+dirty-source fixture.
 
 ## Native auth and SDK construction
 
@@ -46,6 +68,21 @@ The native owner's ordinary profile runtime/secret scope must already be bound. 
 The async factory does no plugin/tool discovery, never calls the auxiliary sync-to-thread client, reuses native Codex account/identity headers and native Anthropic OAuth/API-key/beta identity rules, and constructs actual `AsyncOpenAI.responses.create` / `AsyncAnthropic.messages.create`. It pins canonical session/cache affinity, native transports and owner-selected request policy. The Responses transport has additive explicit endpoint/issuer inputs so this selected first-party path does not query provider registries; ordinary callers retain their previous defaults. Fresh-process tests fence provider/tool/auth-router imports across actual loopback SDK requests and separately witness ordinary `run_agent`, `tools`, `cron`, `gateway` and `agent` imports.
 
 SDK retries are zero; there is no provider/account fallback, redirects or environment proxy use. Total request timeout is at most 5 seconds. The HTTP stream has a cumulative 65,536-byte hard read bound, rejects content encodings other than identity and closes on cancellation. Codex consumes the actual asynchronous SSE Responses stream. Reported model and integer usage must be present and match the selected model before normalized text/tools can reach owner observations. Provider replay/reasoning metadata is deliberately excluded from the narrower protected wire. SDK request/close exceptions are normalized so arbitrary provider response bodies cannot leak through diagnostics.
+
+Reported model matching is **strict string equality**, not alias/date-prefix
+matching: the deployment must verify the actual backend returns the exact
+selected `gpt-6.1-sol` / `claude-opus-5-5` ID before a live pilot. A different or
+missing reported ID freezes after the charged request, without fallback.
+Anthropic signed/interleaved thinking blocks are retained only in the owner SDK
+closure and replayed unchanged with the exact previously observed tool-call
+turn. They never enter the guest response, transcript or export and are erased
+on SDK close. OAuth inbound `mcp__` names are mapped only against the closed
+protected tool names, never `tools.registry`. Native fixed-endpoint conversion
+bypasses unrelated auth/provider discovery; ordinary Anthropic conversion keeps
+its previous route policy. Ambient OpenAI organization/project headers are
+explicitly omitted. Ledger/readback callbacks are synchronous owner work: a
+single-profile pilot must account for that event-loop latency, not advertise
+multi-profile throughput guarantees.
 
 `max_output_tokens=1024` is a request preference. Native Codex omits that unsupported wire limit; neither it nor subscription prices prove a strict token/USD cap. The pilot accounting mode explicitly acknowledges that limit. Unknown/strict accounting still denies before credentials/network.
 
@@ -90,3 +127,13 @@ The bridge is single-use even when auth, SDK, source, cancellation or cross-WAL 
 `test_protected_native_sdk.py` uses actual SDK packages and a real local TCP HTTP fixture with clearly labelled dummy credentials and synthetic responses. It covers success, delayed headers/body, in-flight cancellation, total timeout, HTTP failure/retry-zero, response byte limits, missing usage/model mismatch, freeze and post-failure refusal. These are not external-provider responses.
 
 `test_protected_native_admission.py` uses a scratch canonical SessionAuthority/native board and RSA-signed **controlled fixtures**, the actual native execute route, real Docker processes/tools and those SDKs. It covers two-request SDK → real Docker file tool → SDK follow-up, owner transcript/export/durable completion readbacks, cancellation and close-fault refusal, actual peer disconnect, task drain, exact namespace removal, signed/persisted binding tamper and a shared durable 12-request counter reopened across SDK instances. It does not claim an actual Jack signature, live account accounting, profile cutover, live card or publication acceptance.
+
+The canonical drain test additionally starts with an unclaimed persisted input,
+uses the bootstrap factory through the actual FIFO claim/execute/settlement/
+publication path, asserts exactly one completed event and durable success
+receipt, and proves an unapproved queued follower reaches a terminal refusal
+without ordinary bootstrap or a FIFO pause. Protected settlement stores the
+native `{result, usage}` envelope so canonical result replay is compatible.
+Fresh-process SDK tests include real tools and OAuth signed-thinking follow-up;
+they record attempted forbidden imports even when ordinary helpers swallow the
+raised import error, rather than merely checking `sys.modules` afterwards.

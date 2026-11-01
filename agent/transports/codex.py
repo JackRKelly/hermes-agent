@@ -256,7 +256,10 @@ def _alias_wire_tools(
             response_tools = [t for t in response_tools if not is_client_web_search(t)] + [{"type": "web_search"}]
     # OpenCode Responses backends reserve web_search / search_files as function names (HTTP 400 "custom
     # function name 'X' is reserved", #85589). Alias them on the wire; normalize_response maps them back.
-    if response_tools and _is_opencode_responses_backend(params):
+    # Resolve OpenCode's registry only when a name could actually need aliasing.
+    # Closed native read_file/terminal requests must not discover host providers.
+    if (response_tools and any(isinstance(t, dict) and t.get("name") in _OPENCODE_RESERVED_TOOL_NAMES
+                               for t in response_tools) and _is_opencode_responses_backend(params)):
         response_tools, _oc_aliases = _alias_reserved_tools(response_tools, _OPENCODE_RESERVED_TOOL_NAMES)
         wire_aliases.update(_oc_aliases)
     # Perplexity's Agent API reserves the same names as server-side tools.
@@ -740,7 +743,7 @@ class ResponsesApiTransport(ProviderTransport):
         is_xai_responses: bool — xAI/Grok backend profile_reasoning: dict | None — the claiming profile's
         ``reasoning_payload`` (sent verbatim on ``responses_profile_reasoning`` endpoints)
         """
-        from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+        from agent.prompt_identity import DEFAULT_AGENT_IDENTITY
 
         instructions = params.get("instructions", "")
         payload_messages = messages
@@ -771,11 +774,10 @@ class ResponsesApiTransport(ProviderTransport):
             self.convert_tools(tools), params, is_xai_responses, is_codex_backend,
         )
 
-        # Lazy: provider plugins import this transport during model_metadata init.
-        from agent.model_metadata import strip_codex_context_variant_suffix as _strip_ctx_variant
+        from agent.codex_responses_adapter import _wire_model_identity
         request_overrides = params.get("request_overrides") or {}
         # An override may rewrite the wire model; provenance must be stamped with what actually goes out.
-        wire_model = _strip_ctx_variant(request_overrides.get("model", model))
+        wire_model = _wire_model_identity(request_overrides.get("model", model)) or ""
         kwargs = {
             # ``-900k`` picker variants are Hermes-side aliases; the backend knows only the base slug.
             "model": wire_model,
@@ -897,10 +899,11 @@ class ResponsesApiTransport(ProviderTransport):
         """Normalize Codex Responses API response to NormalizedResponse."""
         from agent.codex_responses_adapter import _normalize_codex_response
 
+        explicit = ({"untrusted_completed_issuers": kwargs["untrusted_completed_issuers"]}
+                    if "untrusted_completed_issuers" in kwargs else {})
         msg, finish_reason = _normalize_codex_response(
             response, issuer_kind=kwargs.get("issuer_kind") or self._last_issuer_kind,
-            issuer_model=kwargs.get("issuer_model") or self._last_issuer_model,
-            untrusted_completed_issuers=kwargs.get("untrusted_completed_issuers"),
+            issuer_model=kwargs.get("issuer_model") or self._last_issuer_model, **explicit,
         )
 
         tool_calls = None

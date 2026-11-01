@@ -7,7 +7,9 @@ the deployed broker verifier, before constructing this capability. Direct Python
 construction is trusted owner code, not an untrusted admission API.
 """
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
+import json
 from urllib.parse import urlsplit
 
 from gateway.session_protected_provider import SelectedAsyncProvider
@@ -115,13 +117,14 @@ def construct_native_sdk(policy, *, resolve, ledger):
     if policy.provider == 'anthropic':
         import anthropic
         from agent.anthropic_adapter import (
-            _auth_style, _beta_header, _common_betas_for_base_url,
+            _beta_header, _common_betas_for_base_url,
             _get_claude_code_version, _OAUTH_ONLY_BETAS,
         )
         # Reuse native endpoint/token classification and header resolution, not
         # the auxiliary router or a sync-client-to-thread wrapper. No SDK install,
         # plugin lookup, credential discovery or provider fallback occurs here.
-        oauth = _auth_style(runtime['api_key'], policy.base_url, policy.base_url) == 'oauth'
+        from agent.anthropic_credentials import anthropic_route_is_oauth
+        oauth = anthropic_route_is_oauth(policy.base_url, runtime['api_key'], provider=policy.provider)
         betas = _common_betas_for_base_url(policy.base_url)
         native_headers = _beta_header(betas + _OAUTH_ONLY_BETAS if oauth else betas)
         if oauth:
@@ -134,12 +137,12 @@ def construct_native_sdk(policy, *, resolve, ledger):
         native_transport = AnthropicTransport()
         create = sdk.messages.create
     else:
-        from openai import AsyncOpenAI
+        from openai import AsyncOpenAI, Omit
         from agent.codex_headers import codex_cloudflare_headers, apply_required_codex_headers
         headers = {**codex_cloudflare_headers(runtime['api_key'], base_url=policy.base_url), **headers}
         required = {'default_headers': headers}
         apply_required_codex_headers(required, access_token=runtime['api_key'], base_url=policy.base_url)
-        headers = required['default_headers']
+        headers = {**required['default_headers'], 'OpenAI-Organization': Omit(), 'OpenAI-Project': Omit()}
         sdk = AsyncOpenAI(api_key=runtime['api_key'], base_url=policy.base_url,
             default_headers=headers, http_client=http, max_retries=0)
         from agent.transports.codex import ResponsesApiTransport
@@ -148,18 +151,36 @@ def construct_native_sdk(policy, *, resolve, ledger):
         oauth = False
     frozen = False
     active = False
+    # Signed thinking is an opaque owner-only replay channel, never guest state.
+    # At most twelve bounded SDK responses can populate it under the signed ledger.
+    owner_replay = {}
 
     class PinnedTransport:
         def build_kwargs(self, model, messages, tools):
             if model != policy.model:
                 raise RuntimeError('protected_sdk_model_mismatch')
             from agent.codex_responses_adapter import ResponsesEndpointQuirks
-            return native_transport.build_kwargs(model, messages, tools,
+            kwargs = native_transport.build_kwargs(model, messages, tools,
                 endpoint=ResponsesEndpointQuirks(),
                 base_url=policy.base_url, provider=policy.provider,
                 session_id=policy.session_id, cache_scope_id=policy.session_id,
-                is_codex_backend=policy.provider == 'openai-codex', is_oauth=oauth,
+                is_codex_backend=policy.provider == 'openai-codex', is_oauth=oauth, native_endpoint=True,
                 max_tokens=policy.max_output_tokens, timeout=policy.request_seconds)
+            if kwargs.get('model') != policy.model:
+                raise RuntimeError('protected_sdk_model_mismatch')
+            if policy.provider == 'anthropic':
+                rows = [m for m in messages if m['role'] == 'assistant']
+                wire = [m for m in kwargs['messages'] if m['role'] == 'assistant']
+                if len(rows) != len(wire):
+                    raise RuntimeError('protected_sdk_replay_unbound')
+                for row, outgoing in zip(rows, wire):
+                    key = tuple(c['id'] for c in row.get('tool_calls', []))
+                    saved, blocks = owner_replay.get(key, (None, None))
+                    if saved != row:
+                        raise RuntimeError('protected_sdk_replay_unbound')
+                    if blocks:
+                        outgoing['content'] = deepcopy(blocks)
+            return kwargs
         def normalize_response(self, response):
             return response
 
@@ -188,16 +209,33 @@ def construct_native_sdk(policy, *, resolve, ledger):
                     raise RuntimeError('protected_sdk_usage_unknown')
                 if policy.provider == 'openai-codex' and getattr(response, 'status', None) != 'completed':
                     raise RuntimeError('protected_sdk_incomplete')
-                normalized = native_transport.normalize_response(response, strip_tool_prefix=oauth,
+                normalized = native_transport.normalize_response(response, strip_tool_prefix=False,
                     untrusted_completed_issuers=frozenset({'codex_backend', 'xai_responses'}))
+                from agent.protected_conversation import TOOL_NAMES, tool_arguments
                 from agent.transports.types import NormalizedResponse, ToolCall, Usage
-                # The protected wire is deliberately narrower than ordinary agent
-                # replay state. Keep SDK/raw reasoning/message IDs owner-side; no
-                # provider metadata or new capability reaches the conversation.
-                calls = [ToolCall(call.call_id or call.id, call.name, call.arguments)
-                         for call in (normalized.tool_calls or [])]
+                # Local closed-name mapping: OAuth normalization must NEVER consult
+                # tools.registry, including on lean/polluted ordinary host owners.
+                calls = []
+                for call in normalized.tool_calls or []:
+                    name = call.name
+                    if oauth:
+                        if type(name) is not str or not name.startswith('mcp__'):
+                            raise RuntimeError('protected_sdk_tool_denied')
+                        name = name[5:]
+                    if name not in TOOL_NAMES:
+                        raise RuntimeError('protected_sdk_tool_denied')
+                    arguments = json.dumps(tool_arguments(name, call.arguments, docker=True), separators=(',', ':'))
+                    calls.append(ToolCall(call.call_id or call.id, name, arguments))
                 result = NormalizedResponse(normalized.content, calls or None, normalized.finish_reason,
                     usage=Usage(prompt_tokens=values[0], completion_tokens=values[1], total_tokens=sum(values)))
+                if policy.provider == 'anthropic' and calls:
+                    key = tuple(c.id for c in calls)
+                    if key in owner_replay or len(owner_replay) >= 12 or len(set(key)) != len(key):
+                        raise RuntimeError('protected_sdk_replay_unbound')
+                    row = dict(role='assistant', content=result.content or '', tool_calls=[dict(
+                        id=c.id, type='function', function=dict(name=c.name, arguments=c.arguments)) for c in calls])
+                    blocks = (normalized.provider_data or {}).get('anthropic_content_blocks')
+                    owner_replay[key] = (deepcopy(row), deepcopy(blocks))
                 ledger.reconcile(receipt, dict(model=response.model, input_tokens=values[0], output_tokens=values[1]))
                 return result
         except BaseException as error:
@@ -220,6 +258,8 @@ def construct_native_sdk(policy, *, resolve, ledger):
         except Exception:  # health: allow BLE001 -- sanitize arbitrary SDK close faults at the owner boundary without credential-bearing tracebacks
             from gateway.session_protected_provider import ProviderCloseFailed
             raise ProviderCloseFailed() from None
+        finally:
+            owner_replay.clear()
 
     return SelectedAsyncProvider(model=policy.model, provider_id=policy.provider,
         transport=PinnedTransport(), create=metered_create, aclose=close_sdk)

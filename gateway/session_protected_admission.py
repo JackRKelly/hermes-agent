@@ -116,7 +116,7 @@ class NativeAdmissionBridge:
         current = get_session_admission(self.authority.db, admission_id=self.row['admission_id'])
         if current is None or current['payload'] != self.row['payload']:
             raise RuntimeStoreError('protected_owner_payload_mismatch')
-        if (self._source_identity() != self.source or self._binding() != self.binding
+        if (self._binding() != self.binding
                 or self._context() != self.context or self.policy.session_id != self.ref.session_id):
             raise RuntimeStoreError('protected_owner_policy_mismatch')
         _saved_policy(self.authority, self.ref, self.row, self.launch, self.row['principal_id'],
@@ -150,6 +150,7 @@ class NativeAdmissionBridge:
         return dict(task)
 
     def provider(self):
+        self.recheck_source()
         self.check()
         from agent.secret_scope import current_secret_scope_home
         if current_secret_scope_home() != self.authority.profile_id:
@@ -180,6 +181,15 @@ class NativeAdmissionBridge:
         selected = construct_native_sdk(self.policy, resolve=self.resolve, ledger=GuardedLedger())
         selected._admission_guard = self.check
         return selected
+
+    def recheck_source(self):
+        """Recheck at construction, provider acquisition and successful settlement.
+
+        Host source is trusted and immutable; credentialless guests cannot write
+        it. Avoid Git subprocesses on every tool/lifecycle fence within a run.
+        """
+        if self._source_identity() != self.source:
+            raise RuntimeStoreError('protected_owner_policy_mismatch')
 
     def verify_runtime_image(self):
         """Real owner manifest + trusted daemon, never a guest-supplied attestation."""
@@ -269,14 +279,50 @@ class NativeAdmissionBridge:
             except BaseException:
                 self.ledger.freeze(None, 'provider_close_failed_or_cancelled')
                 raise
+            self.recheck_source()
             self.check()
             receipt = await runner.settle_success(self.artifact_names)
             self.authority.__dict__.setdefault('_protected_completion_receipts', {})[self.row['admission_id']] = receipt
             return result['final_response']
 
 
+class NativeAdmissionBridgeFactory:
+    """Trusted bootstrap-only builder, never a JSON/plugin factory.
+
+    Install this exact capability on ``authority._protected_admission_bridge``.
+    ``build(ref, canonical_row)`` is trusted owner code mapping the real card to
+    a signed bridge; it must not load a path/command/module from the request.
+    Failed builds remain consumed; the bounded pilot holds at most 12 entries.
+    """
+    def __init__(self, *, authority, build):
+        if not callable(build):
+            raise RuntimeStoreError('protected_owner_bridge_required')
+        self.authority, self._build, self._bridges = authority, build, {}
+
+    def resolve(self, ref, row):
+        from hermes_state_runtime import get_session_admission
+        saved = get_session_admission(self.authority.db, admission_id=row.get('admission_id'))
+        keys = ('admission_id', 'generation', 'principal_id', 'payload', 'target_session_id')
+        if (saved is None or saved['status'] != 'started' or saved['owner_epoch'] != self.authority.epoch
+                or saved['target_session_id'] != ref.session_id
+                or any(saved.get(k) != row.get(k) for k in keys)):
+            raise RuntimeStoreError('protected_owner_bridge_required')
+        key = saved['admission_id']
+        if key not in self._bridges:
+            if len(self._bridges) >= 12:
+                raise RuntimeStoreError('protected_owner_bridge_required')
+            self._bridges[key] = None  # no repeated builder side effects after failure
+            bridge = self._build(ref, json.loads(json.dumps(saved)))
+            if type(bridge) is not NativeAdmissionBridge or bridge.authority is not self.authority:
+                raise RuntimeStoreError('protected_owner_bridge_required')
+            self._bridges[key] = bridge
+        return self._bridges[key]
+
+
 def production_plan(authority, ref, row):
     bridge = getattr(authority, '_protected_admission_bridge', None)
+    if type(bridge) is NativeAdmissionBridgeFactory and bridge.authority is authority:
+        bridge = bridge.resolve(ref, row)
     if (type(bridge) is not NativeAdmissionBridge or bridge.authority is not authority
             or bridge.ref.session_id != ref.session_id or bridge.row['admission_id'] != row.get('admission_id')
             or bridge.row['generation'] != row.get('generation') or bridge.row['principal_id'] != row.get('principal_id')
@@ -289,6 +335,9 @@ def production_plan(authority, ref, row):
 def native_protected_readback(authority, request_binding):
     """Trusted canonical-owner callback; not an unauthenticated JSON endpoint."""
     bridge = getattr(authority, '_protected_admission_bridge', None)
+    if type(bridge) is NativeAdmissionBridgeFactory and bridge.authority is authority:
+        native = request_binding.get('native_binding') if type(request_binding) is dict else None
+        bridge = bridge._bridges.get(native.get('admission_id')) if type(native) is dict else None
     if type(bridge) is not NativeAdmissionBridge or bridge.authority is not authority:
         raise RuntimeStoreError('protected_owner_bridge_required')
     return bridge.readback(request_binding)
