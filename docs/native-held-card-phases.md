@@ -7,6 +7,22 @@ There is no config/env/row flag, model-facing tool, or public phase RPC.
 
 ## Bootstrap and ownership
 
+Prepare through the canonical CLI before opening owners:
+
+```sh
+hermes kanban --board "$BOARD" create "$TITLE" --assignee "$BUILDER" \
+  --initial-status blocked --max-retries 0 --json
+hermes kanban --board "$BOARD" show "$TASK_ID" --json
+```
+
+Creation and readback must both show BLOCKED with `max_retries=0`, no run or
+claim. Zero is accepted generally by CLI creation as a zero-failure threshold,
+not unlimited retries: existing recomputation/reapers keep an initially blocked
+zero-retry card blocked even before a failure. Negative, boolean and noninteger
+values remain invalid; omitted and positive thresholds retain their behavior.
+The signed held claim below is the only activation seam for this workflow. Do
+not replace zero with one or expose a READY window.
+
 ```python
 from gateway.session_card_owner import card_owner_runtime
 from gateway.session_protected_phase import (
@@ -100,7 +116,12 @@ explicit operator reconciliation; it is not treated as success.
 
 Readback is `protected_phase_readback_v1`: exact native/card/claim/source/typed
 policy, finite receipt, result/transcript/export digests, bounded artifact bytes,
-and actual owned namespace-retirement proof. It rechecks the canonical owner,
+and actual owned namespace-retirement proof. `sdk_policy` reports the actual
+owner-selected SDK provider/model/base URL/accounting mode after successful
+finite execution; it is not the ordinary agent's billing-route projection.
+Consumers must check it against the signed role and source binding, not accept
+a requested provider or worker transcript field as executed provenance.
+It rechecks the canonical owner,
 board, native terminal row, transcript, pinned CID/image/daemon and real process
 teardown. Finite completion is never presented as card DONE.
 
