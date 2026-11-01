@@ -12,7 +12,7 @@ def complete_task(
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True, force: bool = False,
-    _completion_guard=None,
+    _completion_guard=None, _completion_project=None,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -108,6 +108,8 @@ def complete_task(
             _kb._completed_event_payload(result, event_summary, verified_cards, metadata),
             run_id=run_id,
         )
+        if _completion_project is not None:
+            _completion_project(conn, run_id)
     _kb._flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
     # Success wipes the breaker counter (history stays on the event log).
     _kb._clear_failure_counter(conn, task_id)

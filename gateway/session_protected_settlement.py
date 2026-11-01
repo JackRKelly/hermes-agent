@@ -30,6 +30,8 @@ def settle_success(runner, names):
     owner = runner.turn._native_owner
     scope, context, db = owner._scope, owner._context, owner._authority.db
     key = PREFIX + owner._admission_id
+    phase_bridge = getattr(runner, '_phase_bridge', None)
+    container = getattr(runner.turn.proxy.worker, 'container', None)
     if type(names) is not tuple:
         _deny()
     with db._read_ctx() as conn:
@@ -63,6 +65,11 @@ def settle_success(runner, names):
             transcript_sha256=hashlib.sha256(json.dumps(owner._observations.messages, sort_keys=True).encode()).hexdigest(),
             result=result, artifacts={name: dict(sha256=hashlib.sha256(body).hexdigest(),
                 body=base64.b64encode(body).decode()) for name, body in sorted(artifacts.items())})
+    if phase_bridge is not None:
+        from dataclasses import asdict
+        receipt.update(phase_policy=asdict(phase_bridge.phase_policy), binding=phase_bridge.binding,
+            namespace=dict(owner._container_binding, name=container.name, daemon=container.runtime.daemon, endpoint=container.runtime.endpoint))
+
     expected = dict(admission_id=owner._admission_id, session_id=scope['session_id'],
         execution_id=scope['execution_id'], generation=scope['generation'], epoch=scope['epoch'],
         card={k: context[k] for k in ('board', 'task_id', 'run_id')})
@@ -104,7 +111,7 @@ def settle_success(runner, names):
         task = conn.execute('SELECT * FROM tasks WHERE id=?', (context['task_id'],)).fetchone()
         run = conn.execute('SELECT * FROM task_runs WHERE id=?', (context['run_id'],)).fetchone()
         if (runner._closed.is_set() or runner.turn.proxy.worker.stop.is_set()
-                or task is None or run is None or task['status'] != 'running' or run['status'] != 'running'
+                or task is None or run is None or task['status'] != ('blocked' if phase_bridge is not None else 'running') or run['status'] != 'running'
                 or task['current_run_id'] != context['run_id'] or run['task_id'] != context['task_id']
                 or task['claim_lock'] != context['claim_lock'] or run['claim_lock'] != context['claim_lock']
                 or not task['claim_expires'] or task['claim_expires'] <= time.time()):
@@ -120,6 +127,10 @@ def settle_success(runner, names):
             settle_session_input(db, epoch=scope['epoch'], admission_id=owner._admission_id,
                 generation=scope['generation'], outcome='completed',
                 result={'result': receipt['result'], 'usage': {}}, _terminal_write=terminal_write)
+
+    if phase_bridge is not None:
+        from gateway.session_protected_phase import settle_held
+        return settle_held(runner, receipt, guard, native_fence)
 
     with closing(connect(Path(context['db']))) as conn:
         task = kb.get_task(conn, context['task_id'])

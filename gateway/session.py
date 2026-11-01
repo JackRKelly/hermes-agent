@@ -788,7 +788,7 @@ class SessionStore(
 ):
     """Session routing index + transcripts: SQLite (SessionDB), legacy JSONL fallback."""
 
-    def __init__(self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None):
+    def __init__(self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None, *, db=None):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: dict[str, SessionEntry] = {}
@@ -857,7 +857,11 @@ class SessionStore(
             self._routing_home: Optional[Path] = Path(get_hermes_home())
         except Exception:
             self._routing_home = None
-        self._open_session_db_for_active_scope()
+        if db is None:
+            self._open_session_db_for_active_scope()
+        else:
+            # Explicit single-home native consumers never resolve an ambient DB.
+            self._db_pinned = db
 
     def _lazy(self, name: str, factory):
         """``self.<name>``, created via *factory* when missing/None (suites build bare stores via

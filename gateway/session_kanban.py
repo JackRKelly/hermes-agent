@@ -71,6 +71,14 @@ def build_kanban_policy(connection, params, config):
 
 
 async def run_task(connection, params):
+    if getattr(getattr(connection.authority, 'runner', None), 'card_only', False):
+        from gateway.session_card_owner import card_owner_scope
+        with card_owner_scope(connection.authority):
+            return await _run_task(connection, params)
+    return await _run_task(connection, params)
+
+
+async def _run_task(connection, params):
     if not connection.native_owner or 'session:create' not in connection.actor.capabilities:
         raise RuntimeStoreError('permission_denied')
     from gateway.run import _load_gateway_config
@@ -130,7 +138,13 @@ async def run_task(connection, params):
                     run_id=task.current_run_id)
     from gateway.session_runtime_workers import tracked_write
     await tracked_write(authority, admit_claim)
-    await connection.resume(ref, {})
+    if getattr(getattr(authority, 'runner', None), 'card_only', False):
+        # This authenticated producer is not a viewer. resume() builds the UI's
+        # ordinary tool inventory (including credential/provider probes); the
+        # local route was already mounted by create/restore above.
+        authority.authorize(connection.actor, ref, 'session:submit')
+    else:
+        await connection.resume(ref, {})
     # Finite like the `chat -q` worker it replaced: nobody can answer an approval or clarify in a
     # card (approvals.single_query_mode applies). Never unattended: that is `-z`'s auto-approval.
     # A retry of an attempt admitted before cards were finite resubmits its committed payload,

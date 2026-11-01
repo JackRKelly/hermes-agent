@@ -16,6 +16,10 @@ import subprocess
 import sqlite3
 import time
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from gateway.session_protected_phase import HeldPhasePolicy
 
 from gateway.session_protected_native_sdk import NativeSDKPolicy, construct_native_sdk
 from hermes_state_runtime import RuntimeStoreError
@@ -40,7 +44,13 @@ class NativeAdmissionBridge:
     Its reserve/check/reconcile/freeze methods must transact durable state.
     """
     def __init__(self, *, authority, ref, row, launch, sdk_policy, envelope, verify, ledger,
-                 resolve, artifact_names, controller_started_at, source_identity=None):
+                 resolve, artifact_names, controller_started_at, source_identity=None, phase_policy: 'HeldPhasePolicy | None' = None):
+        from gateway.session_protected_phase import HeldPhasePolicy
+        if phase_policy is not None and type(phase_policy) is not HeldPhasePolicy:
+            raise RuntimeStoreError('protected_phase_policy_invalid')
+        if getattr(authority, '_held_card', None) is not None and phase_policy is None:
+            raise RuntimeStoreError('protected_phase_policy_required')
+        self.phase_policy = phase_policy
         from gateway.session_protected_docker import DockerLaunch
         if type(launch) is not DockerLaunch or type(sdk_policy) is not NativeSDKPolicy:
             raise RuntimeStoreError('protected_owner_bridge_required')
@@ -70,6 +80,9 @@ class NativeAdmissionBridge:
         self._first_provider_activity_at = None
         self.context = self._context()
         self.binding = self._binding()
+        if self.phase_policy is not None:
+            from gateway.session_protected_phase import validate_bridge
+            validate_bridge(self)
 
     def _context(self):
         from hermes_state_local import local_receipt
@@ -90,7 +103,8 @@ class NativeAdmissionBridge:
             card={k: self.context[k] for k in ('board', 'task_id', 'run_id', 'claim_lock')},
             workspace=str(self.launch.workspace), role=self.launch.role,
             inputs=list(self.launch.paths), artifacts=list(self.artifact_names), sdk_policy=asdict(self.policy),
-            input_sha256=hashlib.sha256(json.dumps(self.row['payload'], sort_keys=True, allow_nan=False).encode()).hexdigest())
+            input_sha256=hashlib.sha256(json.dumps(self.row['payload'], sort_keys=True, allow_nan=False).encode()).hexdigest(),
+            **({'phase_policy': asdict(self.phase_policy)} if self.phase_policy is not None else {}))
 
     def expected_authorization(self):
         """Public non-secret exact scope for the existing operator signer."""
@@ -116,6 +130,9 @@ class NativeAdmissionBridge:
         return approved
 
     def _check_native(self):
+        if self.phase_policy is not None:
+            from gateway.session_protected_phase import check_held_stop
+            check_held_stop(self.authority)
         from gateway.session_protected_process import _saved_policy
         from gateway.session_protected_capabilities import NativeLifecycle
         from hermes_state_runtime import get_session_admission
@@ -290,6 +307,7 @@ class NativeAdmissionBridge:
         async with protected_process_scope(self.authority, self.ref, self.row, self.launch,
                 principal_id=self.row['principal_id'], context=self.context, provider=provider) as runner:
             self._runner = runner
+            runner._phase_bridge = self if self.phase_policy is not None else None
             result = await runner.run_conversation(text)
             # Draining the actual SDK is a precondition of native success, not
             # cleanup after the durable completion receipt has already committed.

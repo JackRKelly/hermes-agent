@@ -3156,6 +3156,7 @@ def request_review(
     conn: sqlite3.Connection, task_id: str, *, summary: Optional[str] = None,
     metadata: Optional[dict] = None, reviewer: Optional[str] = None,
     expected_run_id: Optional[int] = None, force: bool = False, with_reason: bool = False,
+    _phase_guard=None, _phase_project=None,
 ):
     """``running``/``ready`` -> ``review``; never touches block recurrence accounting.
 
@@ -3190,6 +3191,8 @@ def request_review(
     staged_copies: list[Path] = []
     try:
         with write_txn(conn):
+            if _phase_guard is not None:
+                _phase_guard(conn)
             if not _parents_satisfied(conn, task_id):
                 return _ret(False, "parent dependencies are not satisfied")
             trow = conn.execute(
@@ -3208,7 +3211,8 @@ def request_review(
                     "override) instead of clearing the live run's claim",
                 )
             if reviewer is None:
-                reviewer = _prior_reviewer(conn, task_id)
+                from hermes_cli.kanban_review_provenance import prior_reviewer
+                reviewer = prior_reviewer(conn, task_id)
                 if reviewer is False:
                     return _ret(
                         False, "re-review has no durable reviewer provenance (the "
@@ -3236,7 +3240,7 @@ def request_review(
             assignee_sql = ", assignee = ?" if reviewer is not None else ""
             run_guard = "" if expected_run_id is None else " AND current_run_id = ?"
             params: tuple[Any, ...] = (
-                *(() if reviewer is None else (reviewer,)), task_id,
+                *(() if reviewer is None else (reviewer,)), task_id, _phase_guard is not None,
                 *(() if expected_run_id is None else (int(expected_run_id),)),
             )
             cur = conn.execute(
@@ -3248,7 +3252,7 @@ def request_review(
                        worker_pid    = NULL
                 """ + assignee_sql + """
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND (status IN ('running', 'ready') OR (status = 'blocked' AND ?))
                 """ + run_guard,
                 params,
             )
@@ -3274,27 +3278,13 @@ def request_review(
             if staged:
                 payload["artifacts"] = staged
             _append_event(conn, task_id, "review_requested", payload, run_id=run_id)
+            if _phase_project is not None:
+                _phase_project(conn, run_id)
     except Exception:
         if staged_copies:
             _discard_staged_copies(staged_copies, staged_copies[0].parent)
         raise
     return _ret(True)
-
-
-def _prior_reviewer(conn: sqlite3.Connection, task_id: str):
-    """Reviewer recorded by the latest ``changes_requested`` run's event.
-    ``None`` = first review (no such run); ``False`` = a run exists but its
-    provenance is missing/malformed."""
-    changes_run = conn.execute(
-        "SELECT id FROM task_runs "
-        "WHERE task_id = ? AND outcome = 'changes_requested' "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
-    ).fetchone()
-    if changes_run is None:
-        return None
-    changes_event = _latest_event(conn, task_id, "changes_requested", changes_run["id"])
-    reviewer = _json_dict(_row_get(changes_event, "payload")).get("reviewer")
-    return reviewer if isinstance(reviewer, str) and reviewer.strip() else False
 
 
 def _nonblank_str(value: Any) -> Optional[str]:
@@ -3303,6 +3293,7 @@ def _nonblank_str(value: Any) -> Optional[str]:
 
 def request_changes(
     conn: sqlite3.Connection, task_id: str, *, reason: str, expected_run_id: Optional[int] = None,
+    _phase_guard=None, _phase_project=None,
 ) -> tuple[bool, Optional[str]]:
     """Close an active reviewer run (claimed from ``review``) and hand the task
     back to the implementer from the latest ``review_requested`` event, parent
@@ -3312,13 +3303,16 @@ def request_changes(
         return False, "reason is required"
 
     with write_txn(conn):
+        if _phase_guard is not None:
+            _phase_guard(conn)
         task_row = conn.execute(
             "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if task_row is None:
             return False, "task not found"
         current_run_id = task_row["current_run_id"]
-        if task_row["status"] != "running" or current_run_id is None:
+        if (task_row["status"] not in ({"running", "blocked"} if _phase_guard is not None else {"running"})
+                or current_run_id is None):
             return False, "task is not in an active review run"
         if expected_run_id is not None and int(current_run_id) != int(expected_run_id):
             return False, "run_id mismatch"
@@ -3347,9 +3341,9 @@ def request_changes(
                    claim_lock = NULL,
                    claim_expires = NULL,
                    worker_pid = NULL, worker_started_at = NULL
-             WHERE id = ? AND status = 'running' AND current_run_id = ?
+             WHERE id = ? AND status = ? AND current_run_id = ?
             """,
-            (new_status, implementer, task_id, int(current_run_id)),
+            (new_status, implementer, task_id, task_row['status'], int(current_run_id)),
         )
         if cur.rowcount != 1:
             return False, "task changed during review handoff"
@@ -3368,6 +3362,8 @@ def request_changes(
             },
             run_id=run_id,
         )
+        if _phase_project is not None:
+            _phase_project(conn, run_id)
     return True, implementer
 
 
