@@ -298,6 +298,9 @@ def owner_scope(authority, *, hydrate_secrets=False):
     """
     from contextlib import nullcontext
     runner = getattr(authority, 'runner', None)
+    if getattr(runner, 'card_only', False):
+        from gateway.session_card_owner import card_owner_scope
+        return card_owner_scope(authority)
     if not getattr(getattr(runner, 'config', None), 'multiplex_profiles', False):
         from tui_gateway.launch_profile_policy import launch_profile_scope_if_multiplexed
         return launch_profile_scope_if_multiplexed()

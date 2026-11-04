@@ -4,6 +4,15 @@ stdin is the owner's bounded bootstrap/control pipe; a duplicate of stdout is
 reserved for framed events before runtime imports redirect ordinary output.
 Neither assignment secrets nor launch credentials appear in argv or logs.
 """
+# This fixed source-test child must bypass all PM/profile/provider/plugin imports.
+# No config/env switch selects it; production protected admission remains disabled.
+import sys
+if __name__ == '__main__' and sys.argv[1:] == ['--sentinel-tools-v1']:
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from agent.protected_tool_worker import sentinel_main
+    raise SystemExit(sentinel_main())
+
 # Spawned as a bare ``sys.executable -m``: in a PM install that interpreter carries no dependencies
 # until hermes_bootstrap selects the committed environment, so it must be the first import.
 try:

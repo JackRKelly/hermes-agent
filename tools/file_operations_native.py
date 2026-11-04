@@ -19,11 +19,14 @@ from typing import Optional
 _UTF8_BOM = b"\xef\xbb\xbf"
 
 
-def _open_regular(path: str) -> Optional[int]:
+def _open_regular(path: str, *, nofollow: bool = False) -> Optional[int]:
     """fd of ``path`` when it is a regular file; None when missing; raises ``_NotRegular`` otherwise.
     One lookup with O_NONBLOCK, judged by fstat: a FIFO swapped in never blocks this thread."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        if nofollow:
+            flags |= os.O_NOFOLLOW  # fail closed on unsupported platforms
+        fd = os.open(path, flags)
     except FileNotFoundError:
         return None
     if not stat.S_ISREG(os.fstat(fd).st_mode):

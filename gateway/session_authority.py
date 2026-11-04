@@ -901,6 +901,9 @@ class SessionAuthority:
         handle = self._handle(ref)
         if handle.execution_generation != generation:
             raise RuntimeStoreError('stale_generation')
+        if getattr(self, '_held_card', None) is not None:
+            from gateway.session_protected_phase import stop_held_card
+            await asyncio.to_thread(stop_held_card, self, ref)
         live, agent = self.sessions[ref.session_id], None
         if handle.execution_state == 'running':
             # Latches are written under the lock adopt_agent takes on the executor thread, BEFORE the
@@ -1457,7 +1460,8 @@ def backfill_compression_created_sources(db):
     return stamped
 
 
-async def initialize_session_authority(runner, *, profile_id, instance_id, db=None, register=True):
+async def initialize_session_authority(runner, *, profile_id, instance_id, db=None, register=True,
+                                       install=None, card_only=False):
     """Call after exclusive profile ownership, before connecting adapters/API.
 
     ``register=False`` builds a served secondary's authority without making it the runner's
@@ -1470,6 +1474,16 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
     from pathlib import Path
     db_key = await asyncio.to_thread(Path(db.db_path).resolve)
     epoch = await asyncio.to_thread(begin_runtime_epoch, db, instance_id=instance_id)
+    authority = SessionAuthority(runner, profile_id=profile_id, instance_id=instance_id, db=db, epoch=epoch)
+    if install is not None:
+        # Trusted synchronous bootstrap, before ANY recovery/adoption/drain. An
+        # exception prevents publication; no config/row-selected installer exists.
+        import inspect
+        result = install(authority)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError('session authority installer must be synchronous')
     # Hot-serve builds a profile while the loop serves the others: both writes stay off it.
     await asyncio.to_thread(recover_session_inputs, db, epoch=epoch)
     # A lost automation turn has nobody to resolve it: it settles interrupted before any FIFO runs.
@@ -1479,17 +1493,18 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
     await asyncio.to_thread(backfill_compression_created_sources, db)
     from gateway.session_local_recovery import release_handed_off_receipts
     await asyncio.to_thread(release_handed_off_receipts, db, epoch=epoch)
-    from gateway.session_bot import release_superseded_bot_chat_at_boot
-    await asyncio.to_thread(release_superseded_bot_chat_at_boot, db, runner.session_store)
-    authority = SessionAuthority(runner, profile_id=profile_id, instance_id=instance_id, db=db, epoch=epoch)
+    if not card_only:
+        from gateway.session_bot import release_superseded_bot_chat_at_boot
+        await asyncio.to_thread(release_superseded_bot_chat_at_boot, db, runner.session_store)
     # A receipt's compression catch-up (#140060) writes: it commits off the loop too, before the
     # authority is published, so the recovery below only reads.
     from gateway.session_local_adoption import adopt_local_compressions
     await adopt_local_compressions(authority)
     if register:
         runner.session_authority = authority
-    from gateway.session_cron import bind_owner
-    bind_owner(authority)
+    if not card_only:
+        from gateway.session_cron import bind_owner
+        bind_owner(authority)
     store = runner.session_store
     if register:
         store._local_authority_epoch = epoch

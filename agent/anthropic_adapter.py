@@ -651,6 +651,7 @@ def build_anthropic_kwargs(
     reasoning_config: Optional[dict[str, Any]], tool_choice: Optional[str] = None,
     is_oauth: bool = False, preserve_dots: bool = False, context_length: Optional[int] = None,
     base_url: str | None = None, fast_mode: bool = False, drop_context_1m_beta: bool = False,
+    native_endpoint: bool = False,
 ) -> dict[str, Any]:
     """Build kwargs for anthropic.messages.create(). ``max_tokens`` is the OUTPUT cap for one
     response; ``context_length`` is the TOTAL window (input + output). ``max_tokens=None`` uses the
@@ -660,11 +661,14 @@ def build_anthropic_kwargs(
     ``is_oauth`` applies Claude Code compatibility transforms; ``preserve_dots`` keeps model-name
     dots (DashScope: qwen3.5-plus); a third-party ``base_url`` strips thinking signatures;
     ``fast_mode`` adds ``extra_body.speed="fast"`` plus the fast-mode beta on native Anthropic only."""
-    system, anthropic_messages = convert_messages_to_anthropic(messages, base_url=base_url, model=model)
+    # Trusted native SDK owners have already validated the fixed endpoint. Do not
+    # discover unrelated portal/auth routes for this closed transport path.
+    system, anthropic_messages = convert_messages_to_anthropic(
+        messages, base_url=base_url, model=model, native_endpoint=native_endpoint)
     anthropic_tools = convert_tools_to_anthropic(tools) if tools else []
     # Nous Portal routes on its own catalog ids (``anthropic/claude-opus-4.8``); normalizing would
     # make the model unresolvable there (prefix AND dots kept).
-    if not _is_nous_portal_endpoint(base_url):
+    if native_endpoint or not _is_nous_portal_endpoint(base_url):
         model = normalize_model_name(model, preserve_dots=preserve_dots)
     # Non-positive/non-finite values fail locally instead of 400-ing upstream.
     effective_max_tokens = _resolve_anthropic_messages_max_tokens(max_tokens, model, context_length=context_length)

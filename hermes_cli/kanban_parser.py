@@ -193,7 +193,9 @@ _SPECS = [
         _arg("--max-retries", type=int, metavar="N",
              help="Per-task override for the consecutive-failure "
                   f"circuit breaker. Trip on the Nth failure — e.g. --max-retries 1 blocks on the "
-                  f"first failure (no retries), --max-retries 3 allows two retries. Omit to use "
+                  f"first failure (no retries), --max-retries 3 allows two retries. Zero is a "
+                  f"zero-failure threshold: initially blocked tasks stay blocked on recompute; "
+                  f"it never means unlimited retries. Omit to use "
                   f"the dispatcher's kanban.failure_limit config (default "
                   f"{kb.DEFAULT_FAILURE_LIMIT})."),
         _arg("--model", dest="model_override",

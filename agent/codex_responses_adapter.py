@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, TypeGuard
 
 from agent.message_sanitization import coerce_tool_name, deterministic_call_id
-from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from agent.prompt_identity import DEFAULT_AGENT_IDENTITY
 from hermes_cli.route_identity import normalize_route_base_url
 
 logger = logging.getLogger(__name__)
@@ -87,9 +87,13 @@ _CROSS_ISSUER_WARN_EMITTED = False
 def _wire_model_identity(model: Any) -> Optional[str]:
     """Canonical Responses wire model stamped on encrypted reasoning: blobs are sealed to the issuing
     model too, so a same-endpoint model switch must not replay them (HTTP 400)."""
-    from agent.model_metadata import strip_codex_context_variant_suffix
-
-    return str(strip_codex_context_variant_suffix(model or "")).strip() or None
+    raw = (model or "").strip()
+    # Ordinary picker aliases still use the shared eligibility check, but exact
+    # native wire IDs need no catalog/provider discovery at all.
+    if raw.lower().endswith("-900k"):
+        from agent.model_metadata import strip_codex_context_variant_suffix
+        raw = strip_codex_context_variant_suffix(raw)
+    return raw or None
 
 
 # api.openai.com model families that accept ``reasoning.context: "all_turns"`` and honour a reasoning blob
@@ -1266,7 +1270,7 @@ def _untrusted_completed_issuers() -> frozenset:
 
 def _normalize_codex_response(
     response: Any, *, issuer_kind: Optional[str] = None, issuer_model: Optional[str] = None,
-    recover_leaked_tool_call: bool = True,
+    recover_leaked_tool_call: bool = True, untrusted_completed_issuers: Optional[frozenset] = None,
 ) -> tuple[Any, str]:
     """Normalize a Responses API object to ``(assistant_message, finish_reason)``.
     ``issuer_kind`` / ``issuer_model`` are stamped onto captured reasoning items for provenance replay drops.
@@ -1341,7 +1345,8 @@ def _normalize_codex_response(
     # response.status — forcing incomplete there stalls for minutes on a final state.
     reasoning_only = (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text
     trusted_final = (
-        response_status == "completed" and issuer_kind not in _untrusted_completed_issuers()
+        response_status == "completed" and issuer_kind not in (
+            _untrusted_completed_issuers() if untrusted_completed_issuers is None else untrusted_completed_issuers)
     )
     if tool_calls:
         finish_reason = "tool_calls"
