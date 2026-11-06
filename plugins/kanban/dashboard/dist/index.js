@@ -313,6 +313,27 @@
     return `${url}${sep}board=${encodeURIComponent(board)}`;
   }
 
+  // Deep link: ``?task=t_xxx`` in the dashboard URL opens that card's
+  // drawer on load (same path as clicking the card), and the param is
+  // kept in sync while the drawer is open so the URL stays shareable.
+  // Other query params (e.g. ``?profile=``) are preserved.
+  const URL_TASK_PARAM = "task";
+
+  function readTaskParam() {
+    const v = new URLSearchParams(window.location.search).get(URL_TASK_PARAM);
+    return (v || "").trim() || null;
+  }
+
+  function writeTaskParam(taskId) {
+    const u = new URL(window.location.href);
+    if ((u.searchParams.get(URL_TASK_PARAM) || null) === (taskId || null)) return;
+    if (taskId) u.searchParams.set(URL_TASK_PARAM, taskId);
+    else u.searchParams.delete(URL_TASK_PARAM);
+    // replaceState, not pushState: opening/closing a card shouldn't add
+    // Back-button history entries.
+    window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
+  }
+
   // The SDK's Select component fires ``onValueChange(value)`` directly
   // (it's a shadcn-style popup, not a native <select>). Older plugin
   // code calls ``onChange({target: {value}})`` which silently never
@@ -650,7 +671,8 @@
     const [laneByProfile, setLaneByProfile] = useState(true);
     const [configApplied, setConfigApplied] = useState(false);
 
-    const [selectedTaskId, setSelectedTaskId] = useState(null);
+    const [selectedTaskId, setSelectedTaskId] = useState(() => readTaskParam());
+    useEffect(function () { writeTaskParam(selectedTaskId); }, [selectedTaskId]);
     const [selectedIds, setSelectedIds] = useState(() => new Set());
     const [lastSelectedId, setLastSelectedId] = useState(null);
     const [failedIds, setFailedIds] = useState(() => new Set());
