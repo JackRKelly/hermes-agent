@@ -334,6 +334,43 @@
     window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
   }
 
+  // ``?board=<slug>`` picks the board on load, ahead of the localStorage pin,
+  // so a shared card link can name the board it lives on. It is not
+  // persisted: a later visit without the param keeps the user's own pin.
+  // (``?profile=`` is the dashboard's management-profile scope, never the board.)
+  const URL_BOARD_PARAM = "board";
+
+  function readBoardParam() {
+    const v = new URLSearchParams(window.location.search).get(URL_BOARD_PARAM);
+    return (v || "").trim() || null;
+  }
+
+  function initialBoard() {
+    return readBoardParam() || readSelectedBoard() || null;
+  }
+
+  // Keep an explicit ``?board=`` truthful after the switcher (or the
+  // deleted-board fallback) changes boards, so a reload doesn't snap back.
+  // Never adds the param when the URL didn't carry one.
+  function syncBoardParam(board) {
+    const u = new URL(window.location.href);
+    const cur = u.searchParams.get(URL_BOARD_PARAM);
+    if (cur === null || !board || cur === board) return;
+    u.searchParams.set(URL_BOARD_PARAM, board);
+    window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
+  }
+
+  // Drawer load failure text. A 404 for the task itself (e.g. a deep link to
+  // a card on another board, or a deleted card) gets an actionable sentence
+  // instead of the raw API detail; every other error is shown as before.
+  function taskLoadErrorMessage(e, taskId, board) {
+    const raw = String((e && e.message) || e);
+    const is404 = (e && e.status === 404) || /^404:/.test(raw);
+    if (!is404 || /^board\b/i.test(parseApiErrorMessage(e))) return raw;
+    return `Card ${taskId} not found on board ${board || "default"}. ` +
+      "Switch to the board that holds it, or add ?board=<slug> to the link.";
+  }
+
   // The SDK's Select component fires ``onValueChange(value)`` directly
   // (it's a shadcn-style popup, not a native <select>). Older plugin
   // code calls ``onChange({target: {value}})`` which silently never
@@ -646,7 +683,8 @@
   function KanbanPage() {
     const { t } = useI18n();
     const kanbanDialogs = useKanbanDialogs(t);
-    const [board, setBoard] = useState(() => readSelectedBoard() || null);
+    const [board, setBoard] = useState(initialBoard);
+    useEffect(function () { syncBoardParam(board); }, [board]);
     const [boardList, setBoardList] = useState([]);      // [{slug, name, counts, ...}]
     const [showNewBoard, setShowNewBoard] = useState(false);
     const [showBoardSettings, setShowBoardSettings] = useState(false);
@@ -3566,7 +3604,7 @@
     const load = useCallback(function () {
       return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug))
         .then(function (d) { setData(d); setErr(null); setPatchErr(null); })
-        .catch(function (e) { setErr(String(e.message || e)); })
+        .catch(function (e) { setErr(taskLoadErrorMessage(e, props.taskId, boardSlug)); })
         .finally(function () { setLoading(false); });
     }, [props.taskId, boardSlug]);
 
