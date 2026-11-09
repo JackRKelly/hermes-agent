@@ -234,8 +234,18 @@ def specify_task(
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
+def is_block_loop_escalation(task: kb.Task) -> bool:
+    """True for a task ``_route_block`` sent to triage for a human after a block loop.
+
+    Sweeps must not auto-promote it: ``triage -> todo -> ready`` respawns a
+    worker that re-blocks for the same cause and lands straight back in triage,
+    looping forever. Specifying it by id stays the explicit human override.
+    """
+    return task.block_kind is not None and task.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT
+
+
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column; ``tenant`` narrows the sweep."""
+    """Sweepable triage task ids (block-loop escalations excluded); ``tenant`` narrows the sweep."""
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+    return [t.id for t in tasks if not is_block_loop_escalation(t)]
