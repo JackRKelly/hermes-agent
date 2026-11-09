@@ -28,6 +28,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
 from hermes_cli.kanban_specify import (
     _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body,
+    is_block_loop_escalation,
 )
 from hermes_cli.kanban_specify import _profile_author as _specify_author
 
@@ -337,7 +338,7 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Sweepable triage task ids; block-loop escalations stay parked for a human."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+    return [row.id for row in rows if not is_block_loop_escalation(row)]
