@@ -437,6 +437,11 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "Absolute path for 'dir' or 'worktree' workspace. "
                 "Relative paths are rejected at dispatch."
         )),
+        "branch": _prop("string", (
+                "Git branch for a 'worktree' workspace (same as "
+                "`hermes kanban create --branch`). Only valid with "
+                "workspace_kind='worktree'."
+        )),
         "project": _prop("string", (
                 "Optional project id or slug to link the task to. When "
                 "set, the task becomes a git worktree under the project's "

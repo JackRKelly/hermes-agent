@@ -85,16 +85,10 @@ def _parse_workspace_flag(value: Optional[str]) -> tuple[Optional[str], Optional
 
 def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     """Normalize an optional branch name from ``kanban create --branch``."""
-    if value is None:
-        return None
-    branch = value.strip()
-    if not branch:
-        raise argparse.ArgumentTypeError("--branch requires a non-empty name")
-    if branch.startswith("-"):
-        raise argparse.ArgumentTypeError("--branch must not start with '-'")
-    if any(ch.isspace() for ch in branch):
-        raise argparse.ArgumentTypeError("--branch must not contain whitespace")
-    return branch
+    try:
+        return kbw.normalize_branch_name(value, "--branch")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool, str]:
