@@ -113,6 +113,7 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
 BLOCK_RECURRENCE_LIMIT = 2
+APPROVAL_GATE_PREFIX = "[awaiting-approval:"
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 
 
@@ -3219,15 +3220,13 @@ def _route_block(
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
 
     ``dependency`` never enters the human ``blocked`` bucket: it waits in
-    ``todo`` for ``recompute_ready``, so a cron never sees a dependency-wait
-    as something to "unblock". Callers that pass ``dependency`` with no
-    incomplete parent are re-kinded to ``needs_input`` before this runs
-    (see :func:`block_task`). Every other kind counts unblock-loop
-    recurrences: block_task only fires from running/ready (AFTER an unblock
-    returned the task to the pool), so a stored ``block_kind`` equal to the
-    incoming one means blocked -> unblocked -> re-block for the same cause
-    (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+    ``todo`` for ``recompute_ready`` (callers re-kind it to ``needs_input``
+    when no parent is open, see :func:`block_task`). Every other kind counts
+    unblock-loop recurrences: a stored ``block_kind`` equal to the incoming
+    one means blocked -> unblocked -> re-block for the same cause. At
+    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human,
+    except an approval-gate park, which re-blocks by design (a rejection hands
+    it back) and must stay in ``blocked`` where the approval sweep finds it.
     """
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
@@ -3235,7 +3234,8 @@ def _route_block(
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT:
+    gate = (reason or "").lstrip().startswith(APPROVAL_GATE_PREFIX)
+    if recurrences >= BLOCK_RECURRENCE_LIMIT and not gate:
         payload["limit"] = BLOCK_RECURRENCE_LIMIT
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
