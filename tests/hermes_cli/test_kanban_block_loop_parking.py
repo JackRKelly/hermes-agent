@@ -105,9 +105,10 @@ def test_human_move_back_to_triage_is_sweepable_again(kanban_home: Path) -> None
     "[awaiting-approval:merge] PR head=abc then=complete",
     "  \n[awaiting-approval:merge] PR head=abc then=complete",
 ])
-def test_approval_gate_reblock_stays_blocked(kanban_home: Path, reason: str) -> None:
+@pytest.mark.parametrize("kind", ["needs_input", None])
+def test_approval_gate_reblock_stays_blocked(kanban_home: Path, reason: str, kind) -> None:
     with kbc.connect_closing() as conn:
-        tid = _block_unblock_reblock(conn, reason)
+        tid = _block_unblock_reblock(conn, reason, kind=kind)
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert task.block_recurrences == 2

@@ -3234,7 +3234,7 @@ def _route_block(
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    gate = kind == "needs_input" and (reason or "").lstrip().startswith(APPROVAL_GATE_PREFIX)
+    gate = (reason or "").lstrip().startswith(APPROVAL_GATE_PREFIX)
     if recurrences >= BLOCK_RECURRENCE_LIMIT and not gate:
         payload["limit"] = BLOCK_RECURRENCE_LIMIT
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
