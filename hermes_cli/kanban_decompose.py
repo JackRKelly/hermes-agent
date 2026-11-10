@@ -341,4 +341,4 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Sweepable triage task ids; block-loop escalations stay parked for a human."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows if not is_block_loop_escalation(row)]
+        return [row.id for row in rows if not is_block_loop_escalation(conn, row.id)]
