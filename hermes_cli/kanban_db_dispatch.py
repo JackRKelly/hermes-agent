@@ -254,19 +254,16 @@ _EXIT_TRAILER_RE = re.compile(
 )
 
 
-def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional[int]:
+def _worker_log_exit_code(task_id: str, board: Optional[str] = None, run_id: Optional[int] = None) -> Optional[int]:
     """Exit code from the trailer the worker CLI wrote to its own log; None when absent.
 
     The durable twin of ``_recent_worker_exits``: written by the worker itself
     (``hermes_cli.quiet_single_query.exit_single_query``), so it is there whether
-    or not the process running this sweep ever reaped the worker. Last trailer
-    wins — the log is append-mode across re-runs.
+    or not the process running this sweep ever reaped the worker. Only run ``run_id``'s
+    part of the append-mode log counts (``kanban_worker_log.run_scoped_log_tail``).
     """
-    try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
-    except Exception:
-        return None
-    matches = _EXIT_TRAILER_RE.findall(raw or "")
+    from hermes_cli.kanban_worker_log import read_run_log_tail
+    matches = _EXIT_TRAILER_RE.findall(read_run_log_tail(task_id, board=board, run_id=run_id))
     return int(matches[-1]) if matches else None
 
 
@@ -997,7 +994,7 @@ def _log_noise_prefixes() -> tuple[str, ...]:
     return ("session_id:", "Query:", t("cli.chat.initializing_agent"))
 
 
-def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
+def _worker_final_output(task_id: str, board: Optional[str] = None, run_id: Optional[int] = None) -> str:
     """Best-effort read of a dead worker's last printed text, for the board diagnostic.
 
     A ``chat -q`` worker's stdout/stderr are redirected to its per-task log
@@ -1010,12 +1007,10 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
 
     ``board`` must come from the dispatching tick: ambient current-board resolution
     is wrong for every board but the one the dispatcher thread happens to call
-    "current", so the log would silently not be found.
+    "current", so the log would silently not be found. Only run ``run_id``'s part counts.
     """
-    try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
-    except Exception:
-        return ""
+    from hermes_cli.kanban_worker_log import read_run_log_tail
+    raw = read_run_log_tail(task_id, board=board, run_id=run_id)
     if not raw:
         return ""
     raw = _EXIT_TRAILER_RE.sub("", raw)
@@ -1054,7 +1049,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], exit_code=None, *, task_id: Optional[str] = None,
-    board: Optional[str] = None,
+    board: Optional[str] = None, run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1062,9 +1057,9 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board)
+    dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id)
     if task_id and not dead.rate_limited:
-        worker_output = _worker_final_output(task_id, board=board)
+        worker_output = _worker_final_output(task_id, board=board, run_id=run_id)
         if worker_output:
             dead.error_text += f"{WORKER_OUTPUT_SEP}{worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
@@ -1078,6 +1073,7 @@ def _classify_dead_worker_exit(
     *,
     task_id: Optional[str] = None,
     board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 
@@ -1086,13 +1082,14 @@ def _classify_dead_worker_exit(
     registry only knows children of THIS process; a per-tick dispatcher reads the exit trailer
     the worker left in its log instead, so the same death gets the same booking (protocol
     violation / rate-limit requeue / crash) as under the gateway-embedded dispatcher. A worker
-    that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash.
+    that never reached its exit epilogue (killed, OOM) leaves no trailer of ITS run (``run_id``)
+    and stays a plain crash, whatever an earlier run left in the same log.
     """
     kind, code = _classify_worker_exit(pid)
     if exit_code is not None:
         kind, code = _exit_code_kind(int(exit_code))
     elif kind == "unknown" and task_id:
-        logged = _worker_log_exit_code(task_id, board=board)
+        logged = _worker_log_exit_code(task_id, board=board, run_id=run_id)
         if logged is not None:
             kind, code = _exit_code_kind(logged)
     if kind == "clean_exit":
@@ -1161,7 +1158,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1186,7 +1183,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             pid = int(row["worker_pid"])
             # A managed run's authority-recorded exit (its bound interpreter's, under this claim).
             exit_code = managed_run_exit_code(conn, row["id"], pid, row["claim_lock"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
+            dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board,
+                                         run_id=_kb._row_get(row, "current_run_id"))
             apply_attempt_note(conn, row["id"], pid, dead)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
@@ -2698,15 +2696,16 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
 
 def _open_worker_log(task: Task, board: Optional[str]):
     """Append-mode per-task log (a re-run on unblock appends, never overwrites),
-    rotated first. Anchored at the board root (not the shared kanban root) so
-    `hermes kanban log` reads its own file and boards sharing task ids don't
-    collide."""
+    rotated first, then stamped with this run's start marker. Anchored at the board
+    root so `hermes kanban log` reads its own file and boards sharing ids don't collide."""
     log_dir = _kb.worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
-    from hermes_cli.kanban_worker_log import rotate_worker_log, worker_log_rotation_config
+    from hermes_cli.kanban_worker_log import rotate_worker_log, worker_log_rotation_config, write_run_start_marker
     rotate_worker_log(log_path, *worker_log_rotation_config())
-    return open(log_path, "ab")
+    log_f = open(log_path, "ab")
+    write_run_start_marker(log_f, task.current_run_id)
+    return log_f
 
 
 def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
