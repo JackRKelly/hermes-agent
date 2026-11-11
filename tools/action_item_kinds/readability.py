@@ -1,0 +1,156 @@
+"""What Jack reads on the face of an Action Item: the field limits and the banned content, in one place.
+
+These numbers and this banned list are the ones in JackRKelly/assistant
+``docs/action-items-card-guide.md`` (sections 3 and 6). When one changes, change the other in the
+same pair of PRs so they match again.
+
+They are add-time rules: ``build_envelope`` (so ``action_item_add`` and ``action_item_update``)
+enforces them on every new item. An item stored before they existed still loads, so the read-time
+schemas only carry the hard length caps. Every refusal names the field, the rule, the offending
+token or length, a conforming example and the guide, so the calling agent can fix it in one retry.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Optional
+
+from tools.action_item_kinds.core import SchemaError
+
+GUIDE = "docs/action-items-card-guide.md"
+
+TITLE_MAX_WORDS = 8
+TITLE_MAX_CHARS = 60
+SUMMARY_MAX_SENTENCES = 2
+SUMMARY_MAX_CHARS = 240
+RISK_NOTE_MAX_CHARS = 120
+MAX_QUESTIONS = 5
+QUESTION_MAX_CHARS = 120
+MIN_OPTIONS = 2
+MAX_OPTIONS = 4
+OPTION_LABEL_MAX_CHARS = 40
+OPTION_EFFECT_MAX_CHARS = 120
+REC_REASON_MAX_CHARS = 240
+
+EXAMPLE_TITLE = "Railway: when to roll out staging and prod?"
+EXAMPLE_SUMMARY = "Dev now uses the new deploy settings. Staging and prod need the same change before Dec 1."
+EXAMPLE_RISK_NOTE = "Waiting past Dec 1 breaks the next prod deploy."
+EXAMPLE_QUESTION = "Convoy: keep or discard?"
+EXAMPLE_LABEL = "Staging this week, then prod"
+EXAMPLE_EFFECT = "Convoy isn't running anywhere, so nothing stops."
+EXAMPLE_REC_REASON = "Staging first catches a bad setting before prod."
+EXAMPLE_QUESTIONS = [
+    {"key": "q1", "question": "When should staging and prod get it?", "options": [
+        {"key": "staging-first", "label": "Staging this week, then prod", "recommended": True},
+        {"key": "both-now", "label": "Both this week", "recommended": False}]},
+    {"key": "q2", "question": "Convoy: keep or discard?", "options": [
+        {"key": "discard", "label": "Discard it", "recommended": True},
+        {"key": "keep", "label": "Keep it", "recommended": False}]},
+]
+
+def _literals(kind: str, *tokens: str) -> list[tuple[str, re.Pattern]]:
+    return [(kind, re.compile(re.escape(t), re.IGNORECASE)) for t in tokens]
+
+
+# (what it is, pattern): searched case-insensitively in the title, the summary, every question and
+# every option label.
+BANNED: tuple[tuple[str, re.Pattern], ...] = (
+    ("a raw tag", re.compile(r"\[[a-z-]+[:\]]", re.IGNORECASE)),
+    *_literals("a park field", "then=", "head=", "draft=", "thread=", "account="),
+    ("a card id", re.compile(r"\bt_[0-9a-f]{8}\b", re.IGNORECASE)),
+    *_literals("a local path", "/Users/", "~/", "/private/", ".hermes/"),
+    *_literals("an em dash", "\u2014"),
+    *_literals("board jargon", "needs-jack", "awaiting-approval", "legacy park", "unblock",
+               "hands the card back"),
+)
+# "(1) ... (2) ..." or "1. ... 2. ...": several questions written into one.
+NUMBERED_RE = re.compile(r"(?:^|(?<=\s))(?:\(([1-9])\)|([1-9])[.)](?=\s))")
+SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=\S)")
+
+
+def fix(where: str, problem: str, example: Any) -> SchemaError:
+    """The refusal: field, rule and offending value, then a conforming example and the guide."""
+    shown = f'"{example}"' if isinstance(example, str) else json.dumps(example, ensure_ascii=False)
+    return SchemaError(f"{where}: {problem}. Write e.g. {shown} (see {GUIDE})")
+
+
+def banned_token(text: str) -> Optional[tuple[str, str]]:
+    """``(what, token)`` of the first banned thing in ``text``, else None."""
+    for what, pattern in BANNED:
+        found = pattern.search(text)
+        if found:
+            return what, found.group(0)
+    return None
+
+
+def numbered_markers(text: str) -> list[re.Match]:
+    """The "(1)", "(2)", ... (or "1.", "2.", ...) markers of a numbered list in ``text``, in order;
+    empty unless there are at least two."""
+    run: list[re.Match] = []
+    for marker in NUMBERED_RE.finditer(text):
+        if int(marker.group(1) or marker.group(2)) == len(run) + 1:
+            run.append(marker)
+    return run if len(run) >= 2 else []
+
+
+def sentences(text: str) -> int:
+    return len([s for s in SENTENCE_END_RE.split(text.strip()) if s])
+
+
+def check_banned(text: str, where: str, example: str) -> None:
+    hit = banned_token(text)
+    if hit:
+        raise fix(where, f'contains {hit[0]} ({hit[1]!r}); raw tags, park fields, card ids, local '
+                         "paths, em dashes and board jargon are not shown to Jack, say it in plain words",
+                  example)
+
+
+def check_chars(text: str, limit: int, where: str, example: str) -> None:
+    if len(text) > limit:
+        raise fix(where, f"{len(text)} chars, max {limit}", example)
+
+
+def _required_line(value: Any, where: str, rule: str, example: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise fix(where, f"required, {rule}", example)
+    if "\n" in value or "\r" in value:
+        raise fix(where, f"must be one line ({rule})", example)
+    return value
+
+
+def check_title(value: Any, where: str = "title") -> None:
+    rule = f"1-{TITLE_MAX_WORDS} words and at most {TITLE_MAX_CHARS} chars"
+    title = _required_line(value, where, rule, EXAMPLE_TITLE)
+    check_banned(title, where, EXAMPLE_TITLE)
+    words = len(title.split())
+    if words > TITLE_MAX_WORDS:
+        raise fix(where, f"{words} words, max {TITLE_MAX_WORDS}", EXAMPLE_TITLE)
+    check_chars(title, TITLE_MAX_CHARS, where, EXAMPLE_TITLE)
+
+
+def check_summary(value: Any, where: str = "summary") -> None:
+    rule = f"1-{SUMMARY_MAX_SENTENCES} sentences and at most {SUMMARY_MAX_CHARS} chars"
+    if not isinstance(value, str) or not value.strip():
+        raise fix(where, f"required, {rule}", EXAMPLE_SUMMARY)
+    check_banned(value, where, EXAMPLE_SUMMARY)
+    count = sentences(value)
+    if count > SUMMARY_MAX_SENTENCES:
+        raise fix(where, f"{count} sentences, max {SUMMARY_MAX_SENTENCES}", EXAMPLE_SUMMARY)
+    check_chars(value, SUMMARY_MAX_CHARS, where, EXAMPLE_SUMMARY)
+
+
+def check_risk_note(risk: Any, where: str = "risk.note") -> None:
+    note = risk.get("note") if isinstance(risk, dict) else None
+    if not isinstance(note, str):
+        return  # the envelope schema reports the missing or mistyped note
+    if "\n" in note or "\r" in note:
+        raise fix(where, "must be one line", EXAMPLE_RISK_NOTE)
+    check_chars(note, RISK_NOTE_MAX_CHARS, where, EXAMPLE_RISK_NOTE)
+
+
+def check_new_envelope(*, title: Any, summary: Any, risk: Any) -> None:
+    """The add-time rules on the envelope fields every kind shares."""
+    check_title(title)
+    check_summary(summary)
+    check_risk_note(risk)

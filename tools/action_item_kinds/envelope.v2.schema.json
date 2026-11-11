@@ -1,14 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "action_item_kinds/envelope.v1.schema.json",
-  "title": "Action item envelope v1 (the stored [action-item:v1] comment)",
-  "description": "Common fields of every kind. The payload is checked against <kind>.v<schema>.schema.json; per-kind rules on then, source_key and batchable live in the KindSpec.",
+  "$id": "action_item_kinds/envelope.v2.schema.json",
+  "title": "Action item envelope v2 (the stored [action-item:v1] comment)",
+  "description": "Common fields of every kind. v2 adds title and summary: action_item_add and action_item_update always write them (readability.py enforces the card-guide limits at add time); they stay optional here so a v1 envelope stored without them still reads. The payload is checked against <kind>.v<schema>.schema.json; per-kind rules on then, source_key and batchable live in the KindSpec.",
   "type": "object",
   "additionalProperties": false,
   "required": ["kind", "schema", "ask", "why", "risk", "deadline", "links", "then", "payload"],
   "properties": {
     "kind": {"type": "string", "pattern": "^[a-z][a-z_]{1,39}$"},
     "schema": {"type": "integer", "minimum": 1},
+    "title": {"type": "string", "maxLength": 60, "x-text": "text-line"},
+    "summary": {"type": "string", "maxLength": 240, "x-text": "text"},
     "ask": {"type": "string", "maxLength": 140, "x-text": "line"},
     "why": {"type": "string", "maxLength": 280, "x-text": "plain"},
     "risk": {

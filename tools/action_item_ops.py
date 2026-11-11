@@ -8,7 +8,7 @@ invalid call writes nothing.
 Identity is never an argument. ``requested_by`` is the calling profile (``current_profile_name``),
 stamped as the comment author and as the park event's ``actor``; the card is the dispatcher task
 (``$HERMES_KANBAN_TASK``) or an explicit card the caller owns (its assignee or creator). No path
-here can write a decision (``[jack-approved`` / ``[jack-rejected`` / ``[jack-done``).
+here can write a decision (``[jack-approved`` / ``[jack-rejected`` / ``[jack-done`` / ``[jack-answer``).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ ADDABLE_STATUSES = ("running", "ready")
 # E.164 handles are payload data the redactor would mask; mask them first so the secret check
 # looks only at what remains.
 _PHONE_RE = re.compile(r"\+[1-9][0-9]{6,14}")
-ENVELOPE_ARGS = ("ask", "why", "risk", "deadline", "links", "then", "batchable")
+ENVELOPE_ARGS = ("title", "summary", "ask", "why", "risk", "deadline", "links", "then", "batchable")
 
 
 @dataclass(frozen=True)

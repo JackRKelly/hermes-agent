@@ -13,6 +13,7 @@ import json
 import logging
 from typing import Callable
 
+from tools.action_item_kinds import readability as rd
 from tools.action_item_kinds.core import SchemaError
 from tools.action_item_kinds.registry import KINDS
 from tools.action_item_view import ItemRefused
@@ -21,10 +22,18 @@ from tools.registry import no_cache_check_fn, registry, tool_error
 logger = logging.getLogger(__name__)
 
 _ID = {"type": "string", "description": "Item id <board>:<card>@<block_event_id>, as action_item_add returned it."}
+_PLAIN = ("plain words: no raw tags, key=value fields, card ids, local paths, em dashes or board jargon "
+          f"(the {rd.GUIDE} banned list)")
 _ENVELOPE = {
+    "title": {"type": "string", "description": (
+        f"Required. What the card is about, 1-{rd.TITLE_MAX_WORDS} words, <={rd.TITLE_MAX_CHARS} chars, "
+        f'{_PLAIN}. E.g. "{rd.EXAMPLE_TITLE}"')},
+    "summary": {"type": "string", "description": (
+        f"Required. 1-{rd.SUMMARY_MAX_SENTENCES} short sentences, <={rd.SUMMARY_MAX_CHARS} chars: what "
+        f"happened and why Jack is needed now, {_PLAIN}.")},
     "ask": {"type": "string", "description": "One line (<=140 chars): the decision or action, as a question for Jack."},
     "why": {"type": "string", "description": "<=280 chars: why it matters and what waits on it."},
-    "risk": {"type": "object", "description": "{level: low|medium|high, note: <=200 chars}.",
+    "risk": {"type": "object", "description": f"{{level: low|medium|high, note: one line, <={rd.RISK_NOTE_MAX_CHARS} chars}}.",
              "properties": {"level": {"type": "string", "enum": ["low", "medium", "high"]},
                             "note": {"type": "string"}}, "required": ["level", "note"]},
     "deadline": {"type": "string", "description": "A real deadline only, ISO 8601 with a UTC offset."},
@@ -43,8 +52,14 @@ _KIND_PAYLOADS = (
     "to, cc, bcc, subject, body, attachments}. "
     "send_message (frozen v1): {channel, account, conversation_id, contact, recipients, last_messages, "
     "last_inbound_at, draft_text, draft_ref}. "
-    "design_decision: {question, options: [{key, label, effect, pros, cons, recommended}] (2-6, exactly "
-    "one recommended), rec_reason}. user_task: {steps: [...], where}. other: {title, body, links?}."
+    f"design_decision: {{questions: [1-{rd.MAX_QUESTIONS} of {{key: \"q1\"..\"q{rd.MAX_QUESTIONS}\", "
+    f"question: one question, <={rd.QUESTION_MAX_CHARS} chars, options: [{rd.MIN_OPTIONS}-{rd.MAX_OPTIONS} of "
+    f"{{key, label <={rd.OPTION_LABEL_MAX_CHARS} chars, effect? <={rd.OPTION_EFFECT_MAX_CHARS} chars, "
+    "recommended}] with exactly one recommended and key \"other\" reserved, allow_other? (default true: Jack "
+    f"may answer in his own words)}}], rec_reason? <={rd.REC_REASON_MAX_CHARS} chars}}. Several questions go in "
+    "ONE item as questions[], never numbered in one question; Jack answers them, there is no approve. "
+    "user_task: {steps: [...], where}. other: {title, body, links?}. A refusal names the field, the rule "
+    "and a conforming example: fix it and call again once."
 )
 
 ACTION_ITEM_ADD_SCHEMA = {
@@ -66,7 +81,7 @@ ACTION_ITEM_ADD_SCHEMA = {
             "card": {"type": "string", "description": "A card you own, when this session has no Kanban task."},
             "board": {"type": "string", "description": "Board slug; defaults to the current board."},
         },
-        "required": ["kind", "payload", "ask", "why", "risk"],
+        "required": ["kind", "payload", "title", "summary", "ask", "why", "risk"],
     },
 }
 ACTION_ITEM_UPDATE_SCHEMA = {
@@ -75,7 +90,9 @@ ACTION_ITEM_UPDATE_SCHEMA = {
         "Re-park an item you parked (or on a card you are assigned) with changed fields, e.g. the PR "
         "head moved or the draft was edited: a new item comment and a new park, so the item gets a new "
         "id and binding hash and any approval of the old id is void. Pass only what changed; payload "
-        "fields merge over the current agent fields and tool fields are re-read live."),
+        "fields merge over the current agent fields and tool fields are re-read live. The new item must "
+        "meet today's rules: an item stored without title and summary needs both passed, and a v1 "
+        "design_decision needs its questions passed as questions[] (see action_item_add)."),
     "parameters": {
         "type": "object",
         "properties": {"id": _ID, "payload": {"type": "object", "description": "Changed agent fields."},
@@ -98,9 +115,10 @@ ACTION_ITEM_WITHDRAW_SCHEMA = {
 ACTION_ITEM_GET_DECISION_SCHEMA = {
     "name": "action_item_get_decision",
     "description": (
-        "Read-only: Jack's answer to an item, {status, verdict, option, note, decided_by, via, at, "
-        "audit_id, verified}. Act on a decision only when verified is true; an unverifiable decision "
-        "comment is no approval."),
+        "Read-only: Jack's answer to an item, {status, verdict, option, answers, note, decided_by, via, "
+        "at, audit_id, verified}. A design_decision has verdict \"answer\": answers maps each question "
+        "key to the option key Jack picked, or \"other\" with his own words in note. Act on a decision "
+        "only when verified is true; an unverifiable decision comment is no approval."),
     "parameters": {"type": "object", "properties": {"id": _ID}, "required": ["id"]},
 }
 

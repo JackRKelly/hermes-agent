@@ -82,12 +82,18 @@ class KindSpec:
     live_check: Callable[[dict, LiveSources], dict]
     legacy_parse: Callable[[str], Optional[dict]]  # free-text park reason -> agent payload, or None
     check: Callable[[dict], None] = lambda env: None  # rules beyond the JSON Schema (hashes, ...)
+    # Add-time rules on the agent payload (readability.py), run before the schema so a refusal
+    # carries its fix; never run on read, so an item stored before a rule existed still loads.
+    precheck: Callable[[dict], None] = lambda payload: None
     park_params: Callable[[dict], tuple[str, list[tuple[str, str]]]] = lambda env: (env["ask"], [])
     default_then: str = "ready"
     then_values: tuple[str, ...] = ("complete", "ready")
     source_key: Optional[Callable[[dict], str]] = None  # derived and required when set
     default_links: Callable[[dict], list] = field(default=lambda payload: [])
     batchable: bool = False
+    # Actions of an item stored under an older payload schema, when they differ from
+    # ``allowed_actions``: a stored item keeps the decision path it was parked with.
+    schema_actions: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def current_schema(self) -> int:
@@ -98,7 +104,8 @@ class KindSpec:
         return prefixed_hash({"kind": self.kind, "schema": env["schema"],
                               "binding": {f: payload.get(f) for f in self.binding_fields}})
 
-    def actions_for(self, payload: dict) -> tuple[str, ...]:
+    def actions_for(self, payload: dict, schema: int) -> tuple[str, ...]:
+        actions = self.schema_actions.get(schema, self.allowed_actions)
         if self.batchable and payload.get("promotion"):
-            return tuple(a for a in self.allowed_actions if a != "batch")
-        return self.allowed_actions
+            return tuple(a for a in actions if a != "batch")
+        return actions

@@ -24,7 +24,7 @@ COMMENT_PREFIX = "[action-item:v1] "
 WITHDRAWN_PREFIX = "[action-item-withdrawn"
 # Decision prefixes are written only by Jack's verified surfaces (the web app, the approvals
 # handler). No agent-facing path may emit one, anywhere in its text.
-DECISION_PREFIXES = ("[jack-approved", "[jack-rejected", "[jack-done")
+DECISION_PREFIXES = ("[jack-approved", "[jack-rejected", "[jack-done", "[jack-answer")
 ITEM_RE = re.compile(r"(?<!\S)item=([0-9a-f]{16})(?!\S)")
 STATIC_LINK_HOSTS = frozenset({"github.com", "linear.app", "mail.google.com", "app.slack.com"})
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")

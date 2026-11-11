@@ -2,6 +2,10 @@
 
 Bump ``KINDS_VERSION`` whenever a kind or a schema version is added or changed: the dashboard plugin
 refuses to install or load against a registry version it was not built for.
+
+Version 2: every new envelope carries a human ``title`` and ``summary`` (envelope schema v2, which
+still reads a v1 envelope without them), ``design_decision`` v2 asks 1-5 questions that Jack
+answers (never approves), and a free-text ``[needs-jack:`` park reads as a ``design_decision``.
 """
 
 from __future__ import annotations
@@ -11,20 +15,22 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
 from tools.action_item_kinds import (
-    design_decision, other, pr_merge, send_email, send_message, user_task,
+    design_decision, other, pr_merge, readability, send_email, send_message, user_task,
 )
 from tools.action_item_kinds.core import SchemaError, item_hash
 from tools.action_item_kinds.hostcfg import link_hosts
 from tools.action_item_kinds.schema_lite import load_schema, validate
 from tools.action_item_kinds.spec import FALLBACK_ACTIONS, KINDS_DIR, KindSpec, LiveSources
 
-KINDS_VERSION = 1
+KINDS_VERSION = 2
 KINDS: Mapping[str, KindSpec] = MappingProxyType({spec.kind: spec for spec in (
     pr_merge.SPEC, send_email.SPEC, send_message.SPEC, design_decision.SPEC, user_task.SPEC, other.SPEC,
 )})
-ENVELOPE_SCHEMA = load_schema(KINDS_DIR / "envelope.v1.schema.json")
-# Legacy free-text parks, most specific first; ``other`` takes anything left.
-_LEGACY_ORDER = ("pr_merge", "send_email", "send_message", "user_task", "other")
+ENVELOPE_VERSION = 2
+ENVELOPE_SCHEMA = load_schema(KINDS_DIR / f"envelope.v{ENVELOPE_VERSION}.schema.json")
+# Legacy free-text parks, most specific first; ``design_decision`` takes every remaining
+# ``[needs-jack:`` park and ``other`` takes anything left.
+_LEGACY_ORDER = ("pr_merge", "send_email", "send_message", "user_task", "design_decision", "other")
 _FIELD_RE = re.compile(r"^((?:envelope|payload)[\w.\[\]]*)\s*:")
 
 
@@ -35,24 +41,28 @@ def spec_for(kind: Any) -> KindSpec:
     return spec
 
 
-def build_envelope(kind: str, *, payload: Any, ask: Any, why: Any, risk: Any, deadline: Any = None,
-                   links: Any = None, then: Any = None, batchable: Any = None,
+def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: Any, why: Any, risk: Any,
+                   deadline: Any = None, links: Any = None, then: Any = None, batchable: Any = None,
                    sources: Optional[LiveSources] = None, hosts: Optional[Iterable[str]] = None) -> dict:
     """A validated envelope from an agent's call: tool fields are filled by the kind's ``enrich``
-    (reading the live source), never taken from the agent. Raises ``SchemaError``."""
+    (reading the live source), never taken from the agent. The add-time readability rules
+    (``readability.py``) apply here only, so a stored item still reads. Raises ``SchemaError``."""
     spec = spec_for(kind)
     if not isinstance(payload, dict):
         raise SchemaError("payload: must be an object")
+    spec.precheck(payload)
     tool_fields = sorted(set(payload) - spec.agent_fields)
     if tool_fields:
         raise SchemaError(f"payload: {tool_fields} are filled by the tool from the live source; "
                           f"pass only {sorted(spec.agent_fields)}")
+    readability.check_new_envelope(title=title, summary=summary, risk=risk)
     if sources is None:
         from tools.action_item_kinds.github import GhSources
         sources = GhSources()
     full = spec.enrich(dict(payload), sources)
-    env: dict = {"kind": spec.kind, "schema": spec.current_schema, "ask": ask, "why": why, "risk": risk,
-                 "deadline": deadline, "links": spec.default_links(full) if links is None else links,
+    env: dict = {"kind": spec.kind, "schema": spec.current_schema, "title": title, "summary": summary,
+                 "ask": ask, "why": why, "risk": risk, "deadline": deadline,
+                 "links": spec.default_links(full) if links is None else links,
                  "then": spec.default_then if then is None else then, "payload": full}
     if spec.source_key is not None:
         env["source_key"] = spec.source_key(full)
@@ -103,12 +113,13 @@ def classify(env: Any, hosts: Optional[Iterable[str]] = None) -> dict:
         field = _FIELD_RE.match(str(exc))
         return {"render_as": "other", "allowed_actions": FALLBACK_ACTIONS, "binding_hash": None,
                 "fallback": {"reason": reason, "failed": [field.group(1)] if field else [], "error": str(exc)}}
-    return {"render_as": spec.kind, "allowed_actions": spec.actions_for(env["payload"]),
+    return {"render_as": spec.kind, "allowed_actions": spec.actions_for(env["payload"], env["schema"]),
             "binding_hash": spec.binding_hash(env), "fallback": None}
 
 
 def legacy_payload(reason: str) -> Optional[tuple[str, dict]]:
-    """``(kind, agent payload)`` typed from a free-text park, or None for an empty reason."""
+    """``(kind, payload)`` typed from a free-text park, or None for an empty reason. A
+    ``design_decision`` payload is ``design_decision.legacy_questions``' read-only projection."""
     for kind in _LEGACY_ORDER:
         parsed = KINDS[kind].legacy_parse(reason)
         if parsed is not None:
