@@ -15,11 +15,12 @@ from tools.action_item_kinds.core import STATIC_LINK_HOSTS
 
 
 def dashboard_config() -> dict:
+    from hermes_cli.config_backend import read_config_doc_readonly
     from hermes_cli.kanban_db import kanban_home
-    import hermes_yaml
 
     try:
-        data = hermes_yaml.safe_load((kanban_home() / "config.yaml").read_text(encoding="utf-8-sig"))
+        # Shared, signature-cached parse: read only, never mutated.
+        data = read_config_doc_readonly(kanban_home() / "config.yaml")
     except (OSError, YAMLError, UnicodeDecodeError):
         return {}
     section = data.get("dashboard") if isinstance(data, dict) else None
