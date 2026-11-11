@@ -30,6 +30,8 @@ _HERMES_CORE_TOOLS = [
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
     "kanban_attach", "kanban_attach_url", "kanban_attachments",
+    # Typed asks for Jack on a card; every profile, so not kanban-gated (tools/action_item_tools.py).
+    "action_item_add", "action_item_update", "action_item_withdraw", "action_item_get_decision",
     "computer_use",
     # Service-gated connector account status and authorization links.
     "manage_connections",
@@ -160,6 +162,12 @@ TOOLSETS = {
         "block for human input, heartbeat during long ops, comment on threads, attach "
         "files, and (for orchestrators) list, unblock, and fan out tasks.",
         [t for t in _HERMES_CORE_TOOLS if t.startswith("kanban_")],
+    ),
+    "action_item": _ts(
+        "Action Items: park a typed, schema-checked ask for Jack on a Kanban card (merge a PR, send "
+        "an email or message, pick an option, do a task) and read his verified decision. Agents "
+        "create, update and withdraw items; only Jack's decision resolves one.",
+        [t for t in _HERMES_CORE_TOOLS if t.startswith("action_item_")],
     ),
     "discord": _ts("Discord read and participate tools (fetch messages, search members, create threads)", ["discord"]),
     "discord_admin": _ts("Discord server management (list channels/roles, pin messages, assign roles)", ["discord_admin"]),

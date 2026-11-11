@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action_item_kinds/pr_merge.v1.schema.json",
+  "title": "pr_merge v1 payload",
+  "description": "Agent fields: repo, number, head_sha (and optionally method). Every other field is read from the live PR by the tool.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["repo", "number", "head_sha", "title", "tldr", "base_ref", "head_ref", "method",
+               "admin", "promotion", "commits", "files"],
+  "properties": {
+    "repo": {"type": "string", "maxLength": 140, "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "number": {"type": "integer", "minimum": 1},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "title": {"type": "string", "maxLength": 300, "x-text": "text-line"},
+    "tldr": {"type": "string", "maxLength": 2000, "x-text": "text", "x-allow-blank": true},
+    "base_ref": {"type": "string", "pattern": "^[A-Za-z0-9._/-]{1,255}$"},
+    "head_ref": {"type": "string", "pattern": "^[A-Za-z0-9._/-]{1,255}$"},
+    "method": {"enum": ["squash", "merge", "rebase"]},
+    "admin": {"type": "boolean"},
+    "promotion": {"type": "boolean"},
+    "commits": {"type": "integer", "minimum": 0},
+    "files": {"type": "integer", "minimum": 0}
+  }
+}

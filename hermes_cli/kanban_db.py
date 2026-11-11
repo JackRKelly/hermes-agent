@@ -3125,21 +3125,19 @@ def edit_task(
 
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    kind: Optional[str] = None, expected_run_id: Optional[int] = None, actor: Optional[str] = None,
 ) -> bool:
-    """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
-    :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
-    re-kinded to ``needs_input`` (sticky) so ``recompute_ready`` cannot
-    promote it into a context-free respawn. ``transient`` still counts
-    toward the loop breaker so a forever-flaky task escalates. True on any
-    transition.
+    """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see :func:`_route_block`).
+    ``kind='dependency'`` with no incomplete parent is re-kinded to ``needs_input`` (sticky) so
+    ``recompute_ready`` cannot promote it into a context-free respawn. ``transient`` still counts
+    toward the loop breaker so a forever-flaky task escalates. True on any transition. ``actor``
+    (the parking profile) is stamped on the block event: action items bind their park to it.
 
-    An already-``blocked`` card that the failure breaker parked UNTYPED
-    (``block_kind IS NULL``, no live run) is classified in place when *kind*
-    is supplied: ``block_kind``/``block_recurrences`` are set and a ``blocked``
-    audit event is appended, while status, failure evidence and the terminal
-    runs stay exactly as the breaker left them. A typed block, a card with a
-    live run, or a kind-less call on a blocked card are still refused.
+    An already-``blocked`` card that the failure breaker parked UNTYPED (``block_kind IS NULL``,
+    no live run) is classified in place when *kind* is supplied: ``block_kind``/``block_recurrences``
+    are set and a ``blocked`` audit event is appended, while status, failure evidence and the
+    terminal runs stay exactly as the breaker left them. A typed block, a card with a live run, or
+    a kind-less call on a blocked card are still refused.
     """
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
@@ -3188,6 +3186,8 @@ def block_task(
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
+        if actor:
+            payload["actor"] = actor
         sql = f"""
                 UPDATE tasks
                    SET status        = '{new_status}',

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action_item_kinds/send_message.v1.schema.json",
+  "title": "send_message v1 payload (FROZEN, design §3.2.1; changes need a v2 file)",
+  "description": "Per-channel rules (account, conversation_id and handle forms) are checked by send_message.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["channel", "account", "conversation_id", "contact", "recipients", "last_messages",
+               "last_inbound_at", "draft_text", "draft_ref", "content_hash"],
+  "properties": {
+    "channel": {"enum": ["imessage", "sms", "google_voice", "slack"]},
+    "account": {"type": "string", "maxLength": 200, "x-text": "line"},
+    "conversation_id": {"type": "string", "maxLength": 300, "x-text": "line"},
+    "contact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle"],
+      "properties": {
+        "name": {"type": "string", "maxLength": 200, "x-text": "line"},
+        "handle": {"type": "string", "maxLength": 200, "x-text": "line"},
+        "team": {"type": "string", "pattern": "^[TE][A-Z0-9]{2,}$"}
+      }
+    },
+    "recipients": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/recipient"}},
+    "last_messages": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"$ref": "#/$defs/message"}},
+    "last_inbound_at": {"type": "string", "x-iso": true},
+    "draft_text": {"type": "string", "maxLength": 2000, "x-text": "plain"},
+    "draft_ref": {"type": ["string", "null"], "maxLength": 200, "x-text": "line"},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "recipient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle"],
+      "properties": {
+        "name": {"type": "string", "maxLength": 200, "x-text": "line"},
+        "handle": {"type": "string", "maxLength": 200, "x-text": "line"}
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "at", "text"],
+      "properties": {
+        "from": {"enum": ["them", "jack"]},
+        "name": {"type": "string", "maxLength": 200, "x-text": "line"},
+        "at": {"type": "string", "x-iso": true},
+        "text": {"type": "string", "maxLength": 500, "x-text": "plain"}
+      }
+    }
+  }
+}
