@@ -113,7 +113,7 @@ def classify(env: Any, hosts: Optional[Iterable[str]] = None) -> dict:
         field = _FIELD_RE.match(str(exc))
         return {"render_as": "other", "allowed_actions": FALLBACK_ACTIONS, "binding_hash": None,
                 "fallback": {"reason": reason, "failed": [field.group(1)] if field else [], "error": str(exc)}}
-    return {"render_as": spec.kind, "allowed_actions": spec.actions_for(env["payload"]),
+    return {"render_as": spec.kind, "allowed_actions": spec.actions_for(env["payload"], env["schema"]),
             "binding_hash": spec.binding_hash(env), "fallback": None}
 
 

@@ -246,6 +246,10 @@ SPEC = KindSpec(
     # Unchanged from v1 so a stored v1 item keeps its binding hash; v2 binds through option_set_hash.
     binding_fields=("question", "option_set_hash"),
     allowed_actions=("answer", "snooze", "later"),
+    # A v1 item parked before KINDS_VERSION 2 keeps phase 1a's pick_option/other (the app that is
+    # live today decides it that way) and also takes "answer", so the v2 app answers it like a v2
+    # one through questions_of. Reject is gone for both: Jack answers a question, never rejects it.
+    schema_actions={1: ("pick_option", "other", "answer", "snooze", "later")},
     executor=None, enrich=_enrich,
     live_check=no_external_live_check("option_set_hash", option_set_hash),
     legacy_parse=legacy_questions, check=_check, precheck=_precheck,

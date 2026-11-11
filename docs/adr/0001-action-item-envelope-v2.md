@@ -26,6 +26,16 @@ decided through the web app, whose audit rows carry their `binding_hash`.
 4. `legacy_questions` returns a read-only projection (`questions` with possibly empty `options`,
    plus `source_text`), not an agent payload: it is never stored or hashed, so it need not satisfy
    the v2 schema's 2-4 options rule.
+5. Actions follow the stored payload schema (`KindSpec.schema_actions`). A v2 `design_decision`
+   takes `answer`, `snooze` and `later`. A stored v1 one keeps phase 1a's `pick_option` and `other`
+   (the app that is live today decides it that way) and also takes `answer`, so the v2 app can
+   answer it through `questions_of`. Neither takes `reject`.
+6. An answer is its own decision comment, verified like an approval in `action_item_decision.py`:
+   `[jack-answer:<id>] "<readable answer>" answers=q1:<option>,q2:other source=webapp:<audit_id>
+   binding=<hash>`. `answers=` must name exactly the item's question keys, each with one of that
+   question's option keys or `other` when the question allows it. The audit row carries
+   `verdict: "answer"`, the same `answers` map and the same `note`. An Other answer's words live
+   only in the note, so binding the note binds them. `action_item_get_decision` returns `answers`.
 
 ## Consequences
 
@@ -33,5 +43,7 @@ decided through the web app, whose audit rows carry their `binding_hash`.
   and decide "has a human title" by the field's presence.
 - `action_item_update` on a v1 item must pass `title`, `summary` and, for a v1 `design_decision`,
   `questions`: the refusal says so with an example.
+- The assistant app writes the answer comment and its audit row in exactly the form of point 6;
+  its gate check (`kanban_gates.py`) treats `[jack-answer` like `[jack-approved`.
 - If a future change needs a hard envelope marker, it adds a field under a new KINDS_VERSION; the
   prefix still never changes.

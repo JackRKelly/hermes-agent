@@ -8,7 +8,7 @@ invalid call writes nothing.
 Identity is never an argument. ``requested_by`` is the calling profile (``current_profile_name``),
 stamped as the comment author and as the park event's ``actor``; the card is the dispatcher task
 (``$HERMES_KANBAN_TASK``) or an explicit card the caller owns (its assignee or creator). No path
-here can write a decision (``[jack-approved`` / ``[jack-rejected`` / ``[jack-done``).
+here can write a decision (``[jack-approved`` / ``[jack-rejected`` / ``[jack-done`` / ``[jack-answer``).
 """
 
 from __future__ import annotations
