@@ -82,6 +82,9 @@ class KindSpec:
     live_check: Callable[[dict, LiveSources], dict]
     legacy_parse: Callable[[str], Optional[dict]]  # free-text park reason -> agent payload, or None
     check: Callable[[dict], None] = lambda env: None  # rules beyond the JSON Schema (hashes, ...)
+    # Add-time rules on the agent payload (readability.py), run before the schema so a refusal
+    # carries its fix; never run on read, so an item stored before a rule existed still loads.
+    precheck: Callable[[dict], None] = lambda payload: None
     park_params: Callable[[dict], tuple[str, list[tuple[str, str]]]] = lambda env: (env["ask"], [])
     default_then: str = "ready"
     then_values: tuple[str, ...] = ("complete", "ready")

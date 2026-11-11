@@ -71,8 +71,10 @@ class FakePR(LiveSources):
         return "squash"
 
 
-ENVELOPE = {"ask": "Merge v2#4280 into main?", "why": "The page never loads.",
+ENVELOPE = {"title": "Merge: product page skeleton fix", "summary": "The product page never loads. This PR fixes it.",
+            "ask": "Merge v2#4280 into main?", "why": "The page never loads.",
             "risk": {"level": "low", "note": "UI only."}}
+HUMAN = {k: ENVELOPE[k] for k in ("title", "summary")}
 
 
 def build(kind: str, payload: dict, sources: LiveSources | None = None, **extra) -> dict:
@@ -101,17 +103,18 @@ def test_send_message_vectors_hash_identically_to_the_design_doc():
 
 
 def test_building_the_vector_from_its_agent_fields_reproduces_the_stored_bytes():
-    """The tool path (computed thread_url, content_hash, source_key, default link) writes exactly
-    the doc's envelope, so its park binds ``item=bfd49d86f87dbc09``."""
+    """The tool path (computed thread_url, content_hash, source_key, default link) writes the doc's
+    envelope plus the v2 title and summary, and its park binds that envelope's hash16."""
     vector = email_env()
     agent = {k: v for k, v in vector["payload"].items() if k not in ("thread_url", "content_hash")}
-    env = build_envelope("send_email", payload=agent, ask=vector["ask"], why=vector["why"],
+    env = build_envelope("send_email", payload=agent, **HUMAN, ask=vector["ask"], why=vector["why"],
                          risk=vector["risk"], deadline=vector["deadline"], sources=LiveSources(), hosts=HOSTS)
-    assert canonical_json(env) == canonical_json(vector)
+    assert canonical_json({k: v for k, v in env.items() if k not in HUMAN}) == canonical_json(vector)
+    assert (env["title"], env["summary"]) == (HUMAN["title"], HUMAN["summary"])
     assert park_reason(env) == (
         "[awaiting-approval:send-email] https://mail.google.com/mail/u/jack@cybership.io/#all/18f3a2b4c5d6e7f8 "
         "draft=r-1234567890123456789 thread=18f3a2b4c5d6e7f8 account=jack@cybership.io then=complete "
-        "item=bfd49d86f87dbc09")
+        f"item={item_hash(env)}")
 
 
 def test_hash16_is_over_the_stored_bytes_after_the_17_byte_prefix():
@@ -183,15 +186,18 @@ def test_pr_merge_unreadable_source_fails_closed():
         build("pr_merge", {"repo": "cybership-io/v2", "number": 4280, "head_sha": "a" * 40}, LiveSources())
 
 
+def _decision(*options: dict, question: str = "Which?") -> dict:
+    return {"questions": [{"key": "q1", "question": question, "options": list(options)}], "rec_reason": "r"}
+
+
 @pytest.mark.parametrize("kind, payload, message", [
-    ("design_decision", {"question": "Which?", "rec_reason": "A is cheaper.", "options": [
-        {"key": "a", "label": "A", "effect": "x", "pros": [], "cons": [], "recommended": True},
-        {"key": "a", "label": "B", "effect": "y", "pros": [], "cons": [], "recommended": False}]}, "unique"),
-    ("design_decision", {"question": "Which?", "rec_reason": "r", "options": [
-        {"key": "a", "label": "A", "effect": "x", "pros": [], "cons": [], "recommended": False},
-        {"key": "b", "label": "B", "effect": "y", "pros": [], "cons": [], "recommended": False}]}, "exactly one"),
-    ("design_decision", {"question": "See [this](https://github.com/x)", "rec_reason": "r", "options": []},
-     "markdown is refused"),
+    ("design_decision", _decision({"key": "a", "label": "A", "recommended": True},
+                                  {"key": "a", "label": "B", "recommended": False}), "unique"),
+    ("design_decision", _decision({"key": "a", "label": "A", "recommended": False},
+                                  {"key": "b", "label": "B", "recommended": False}), "exactly one"),
+    ("design_decision", _decision({"key": "a", "label": "A", "recommended": True},
+                                  {"key": "b", "label": "B", "recommended": False},
+                                  question="Pick **one** option?"), "markdown is refused"),
     ("user_task", {"steps": [], "where": ""}, "at least 1"),
     ("other", {"title": "T", "body": "see [x](https://evil.example/)"}, "only https links"),
     ("other", {"title": "T", "body": "<script>x</script>"}, "HTML is refused"),
@@ -207,10 +213,9 @@ def test_valid_items_of_every_kind_are_accepted():
         "pr_merge": ({"repo": "o/r", "number": 1, "head_sha": "a" * 40}, FakePR()),
         "send_email": ({k: v for k, v in email_env()["payload"].items()}, None),
         "send_message": (message_payload(), None),
-        "design_decision": ({"question": "Refresh the 14 labels?", "rec_reason": "Cheaper.", "options": [
-            {"key": "now", "label": "Now", "effect": "Refresh today", "pros": ["fast"], "cons": [], "recommended": True},
-            {"key": "later", "label": "Later", "effect": "Wait", "pros": [], "cons": ["slow"], "recommended": False}]},
-            None),
+        "design_decision": ({"rec_reason": "Cheaper.", "questions": [{"key": "q1", "question": "Refresh the 14 labels?",
+            "options": [{"key": "now", "label": "Now", "effect": "Refresh today", "recommended": True},
+                        {"key": "later", "label": "Later", "recommended": False}]}]}, None),
         "user_task": ({"steps": ["Sign in to Linear"], "where": "linear.app"}, None),
         "other": ({"title": "Read this", "body": "- **one**\n- `two` [doc](https://github.com/x)"}, None),
     }
@@ -282,8 +287,8 @@ def test_legacy_parks_are_typed_from_their_reason():
     kind, payload = legacy_payload("[awaiting-approval:send-email] https://x draft=r-1 thread=t1 account=a@b.co")
     assert kind == "send_email" and payload["draft_id"] == "r-1"
     assert legacy_payload("[needs-jack:sign-in] Sign in to Linear")[0] == "user_task"
-    kind, payload = legacy_payload("[needs-jack:decision] Consult Jack: pick a vendor")
-    assert kind == "other" and payload["title"].startswith("[needs-jack:decision]")
+    kind, payload = legacy_payload("[awaiting-approval:deploy] Deploy the staged change then=ready")
+    assert kind == "other" and payload["title"].startswith("Approve deploy")
     assert legacy_payload("") is None
 
 
@@ -295,7 +300,8 @@ def test_every_kind_ships_its_schema_and_a_complete_spec():
     for kind, spec in KINDS.items():
         for version in spec.schema_versions:
             assert (KINDS_DIR / f"{kind}.v{version}.schema.json").is_file()
-        assert set(spec.binding_fields) <= set(spec.schema_versions[spec.current_schema]["properties"])
+        # A binding field is read from every stored version, so it is a field of at least one of them.
+        assert set(spec.binding_fields) <= {p for s in spec.schema_versions.values() for p in s["properties"]}
         assert spec.agent_fields <= set(spec.schema_versions[spec.current_schema]["properties"])
         for fn in (spec.enrich, spec.live_check, spec.legacy_parse):
             assert callable(fn)

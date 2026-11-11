@@ -32,7 +32,7 @@ ADDABLE_STATUSES = ("running", "ready")
 # E.164 handles are payload data the redactor would mask; mask them first so the secret check
 # looks only at what remains.
 _PHONE_RE = re.compile(r"\+[1-9][0-9]{6,14}")
-ENVELOPE_ARGS = ("ask", "why", "risk", "deadline", "links", "then", "batchable")
+ENVELOPE_ARGS = ("title", "summary", "ask", "why", "risk", "deadline", "links", "then", "batchable")
 
 
 @dataclass(frozen=True)

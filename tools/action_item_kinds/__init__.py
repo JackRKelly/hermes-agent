@@ -14,11 +14,12 @@ from tools.action_item_kinds.registry import (
     KINDS, KINDS_VERSION, build_envelope, classify, legacy_payload, park_reason, spec_for,
     validate_envelope,
 )
+from tools.action_item_kinds.design_decision import legacy_questions, questions_of
 from tools.action_item_kinds.spec import KindSpec, LiveSources, SourceUnavailable
 
 __all__ = [
     "COMMENT_PREFIX", "KINDS", "KINDS_VERSION", "KindSpec", "LiveSources", "SchemaError",
     "SourceUnavailable", "build_envelope", "canonical_json", "classify", "comment_body",
-    "comment_hash16", "item_hash", "legacy_payload", "park_reason", "parse_comment", "prefixed_hash",
-    "spec_for", "validate_envelope",
+    "comment_hash16", "item_hash", "legacy_payload", "legacy_questions", "park_reason", "parse_comment",
+    "prefixed_hash", "questions_of", "spec_for", "validate_envelope",
 ]
