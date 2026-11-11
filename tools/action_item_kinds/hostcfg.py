@@ -19,7 +19,7 @@ def dashboard_config() -> dict:
     import hermes_yaml
 
     try:
-        data = hermes_yaml.safe_load((kanban_home() / "config.yaml").read_text(encoding="utf-8"))
+        data = hermes_yaml.safe_load((kanban_home() / "config.yaml").read_text(encoding="utf-8-sig"))
     except (OSError, YAMLError, UnicodeDecodeError):
         return {}
     section = data.get("dashboard") if isinstance(data, dict) else None

@@ -10,7 +10,7 @@ import re
 from typing import Optional
 
 GATE_RE = re.compile(r"\[awaiting-approval:(?P<gate>[a-z-]+)\]\s*(?P<rest>[^\n]*)")
-NEEDS_JACK_RE = re.compile(r"\[needs-jack(?::(?P<what>[\w-]+))?\]\s*(?P<rest>[^\n]*)", re.I)
+NEEDS_JACK_RE = re.compile(r"\[needs-jack(?::(?P<what>[\w-]+))?\]\s*(?P<rest>[^\n]*)", re.IGNORECASE)
 KV_RE = re.compile(r"(?<!\S)([a-z]+)=(\S+)")
 KV_TRAILING = ".,;:!?)]}>\"'"
 URL_RE = re.compile(r"https?://\S+")

@@ -34,7 +34,7 @@ _TYPES = {
 
 
 def load_schema(path: Path) -> dict:
-    schema = json.loads(path.read_text(encoding="utf-8"))
+    schema = json.loads(path.read_text(encoding="utf-8-sig"))
     _check_keywords(schema, str(path.name))
     return schema
 

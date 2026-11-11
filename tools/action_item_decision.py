@@ -32,7 +32,7 @@ from tools.action_item_kinds.hostcfg import dashboard_principal
 from tools.action_item_view import ItemView
 
 WEBAPP_AUTHOR = "action-items"
-_DECISION_RE = re.compile(r"^\[jack-(?P<verdict>approved|rejected|done):(?P<id>[^\]\s]+)\]\s*(?P<rest>.*)$", re.S)
+_DECISION_RE = re.compile(r"^\[jack-(?P<verdict>approved|rejected|done):(?P<id>[^\]\s]+)\]\s*(?P<rest>.*)$", re.DOTALL)
 _VERDICT = {"approved": "approve", "rejected": "reject", "done": "done"}
 # Row verdicts each comment prefix may carry (§3.3 step 6).
 _ROW_VERDICTS = {"approved": {"approve", "pick_option", "other"}, "rejected": {"reject", "edit"},

@@ -211,7 +211,7 @@ def withdraw_item(args: dict) -> dict:
     with _board(board) as (kb, conn):
         view, task = _open_item(kb, conn, args.get("id"), caller)
         if task.status != "blocked":
-            raise ItemRefused(f"{view.id} is not open (card is {task.status}); nothing to withdraw")
+            raise ItemRefused(f"{view.id} is not pending: card is {task.status}, so there is nothing to withdraw")
         body = f"{WITHDRAWN_PREFIX}:{view.id}] {reason}"
         _guard_text(body, "reason")
         kb.add_comment(conn, task.id, author=caller.profile, body=body)

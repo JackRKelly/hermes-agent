@@ -24,14 +24,14 @@ AGENT_FIELDS = frozenset({"repo", "number", "head_sha", "method"})
 LONG_LIVED = frozenset({"dev", "staging", "main"})
 TLDR_MAX = 2000
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
-_TLDR_TITLE_RE = re.compile(r"^tl;?\s*dr\b", re.I)
+_TLDR_TITLE_RE = re.compile(r"^tl;?\s*dr\b", re.IGNORECASE)
 _SANITIZE = (
-    (re.compile(r"<!--.*?-->", re.S), ""),
+    (re.compile(r"<!--.*?-->", re.DOTALL), ""),
     (re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)?/?>"), ""),
     (re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)"), ""),
     (re.compile(r"\[([^\]\n]*)\]\([^)\n]*\)"), r"\1"),
     (re.compile(r"\*\*([^*\n]+)\*\*"), r"\1"),
-    (re.compile(r"^\s*```.*$", re.M), ""),
+    (re.compile(r"^\s*```.*$", re.MULTILINE), ""),
     (re.compile(r"\n{3,}"), "\n\n"),
 )
 

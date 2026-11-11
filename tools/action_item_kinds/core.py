@@ -31,7 +31,7 @@ EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 # An HTML tag (``<p>``, ``</div>``, ``<br/>``, ``<a href=...>``); ``<dave@x.com>`` is not one.
 HTML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)?/?>")
 # Markdown constructs refused in ``text`` fields (only ``other.body`` may use the subset).
-MARKDOWN_RE = re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)|```|^\s{0,3}#{1,6}\s|\*\*[^*\n]+\*\*", re.M)
+MARKDOWN_RE = re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)|```|^\s{0,3}#{1,6}\s|\*\*[^*\n]+\*\*", re.MULTILINE)
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(([^)\s]*)[^)\n]*\)")
 
 
@@ -117,7 +117,7 @@ def check_iso(value: Any, where: str) -> None:
     if not isinstance(value, str):
         raise SchemaError(f"{where}: must be an ISO 8601 string")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise SchemaError(f"{where}: not ISO 8601 ({value!r})") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
