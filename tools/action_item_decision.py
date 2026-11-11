@@ -131,21 +131,38 @@ def verify(view: ItemView, decision: dict, comment: Any, all_comments: list) -> 
     return not problems, problems
 
 
-def decision_for(view: ItemView, comments: list, next_park_at: Optional[int]) -> dict:
+def _pick_decision(view: ItemView, window: list, comments: list) -> Optional[tuple]:
+    """``(comment, decision, verified, problems)`` for the item: the first verified decision, else
+    the first one, so an earlier forged comment cannot mask Jack's later verified answer."""
+    found = []
+    for comment in window:
+        decision = parse_decision(comment.body)
+        if decision is None or decision["id"] != view.id:
+            continue
+        verified, problems = verify(view, decision, comment, comments)
+        if verified:
+            return comment, decision, verified, problems
+        found.append((comment, decision, verified, problems))
+    return found[0] if found else None
+
+
+def decision_for(view: ItemView, comments: list, next_park_at: Optional[int],
+                 assignee: Optional[str] = None) -> dict:
     """The ``action_item_get_decision`` result for one resolved item."""
     window = [c for c in comments if c.created_at >= view.event_at
               and (next_park_at is None or c.created_at < next_park_at)]
     out: dict = {"id": view.id, "status": "open", "verdict": None, "option": None, "note": None,
                  "decided_by": None, "via": None, "at": None, "audit_id": None, "verified": False,
                  "trusted_item": view.trusted, "problems": list(view.problems)}
-    if any(c.body.startswith(WITHDRAWN_PREFIX) for c in window):
+    # Only the owners withdraw (§4.2), so a withdrawal is theirs and cites this item's id.
+    withdrawn = f"{WITHDRAWN_PREFIX}:{view.id}]"
+    owners = {owner for owner in (view.actor, assignee) if owner}
+    if any(c.body.startswith(withdrawn) and c.author in owners for c in window):
         out["status"] = "withdrawn"
-    for comment in window:
-        decision = parse_decision(comment.body)
-        if decision is None or decision["id"] != view.id:
-            continue
+    picked = _pick_decision(view, window, comments)
+    if picked is not None:
+        comment, decision, verified, problems = picked
         source = decision["params"].get("source", "")
-        verified, problems = verify(view, decision, comment, comments)
         out.update(status="decided", verdict=decision["verdict"], option=decision["option"],
                    note=decision["note"], decided_by=comment.author, at=comment.created_at,
                    via=source.split(":", 1)[0] or None, verified=verified, problems=problems,
@@ -155,7 +172,6 @@ def decision_for(view: ItemView, comments: list, next_park_at: Optional[int]) ->
             out["status"] = "done"
         elif any(body.startswith("[action-failed") for body in after):
             out["status"] = "failed"
-        break
     if next_park_at is not None and out["status"] == "open":
         out["status"] = "superseded"
     return out

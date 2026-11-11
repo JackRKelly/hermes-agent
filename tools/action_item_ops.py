@@ -19,11 +19,14 @@ from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
 from tools.action_item_kinds.core import (
-    WITHDRAWN_PREFIX, SchemaError, canonical_json, check_text, comment_body, refuse_decision_text,
+    WITHDRAWN_PREFIX, SchemaError, canonical_json, check_text, comment_body, comment_hash16,
+    reason_item_hash, refuse_decision_text,
 )
 from tools.action_item_kinds.registry import build_envelope, park_reason, spec_for
 from tools.action_item_kinds.spec import LiveSources
-from tools.action_item_view import ItemRefused, ItemView, item_id, load_item, parse_item_id
+from tools.action_item_view import (
+    ItemRefused, ItemView, binding_problems, item_id, load_item, parse_item_id,
+)
 
 ADDABLE_STATUSES = ("running", "ready")
 # E.164 handles are payload data the redactor would mask; mask them first so the secret check
@@ -92,9 +95,18 @@ def _board_slug(kb, board: Optional[str]) -> str:
 
 
 def _prepare(env: dict) -> tuple[str, str]:
+    """The comment and park reason, refused unless the reason reads back as this exact item: the
+    add-time gate is the read-time trust check (§3.1), so nothing is written that would load
+    untrusted (a bound id with a space is cut short by the space-delimited reason)."""
     body, reason = comment_body(env), park_reason(env)
     _guard_text(body, "item")
     _guard_text(reason, "park reason")
+    problems = binding_problems(env, reason)
+    if reason_item_hash(reason) != comment_hash16(body):
+        problems.append("its item= does not bind the item comment")
+    if problems:
+        raise SchemaError("the park reason cannot carry this item (" + "; ".join(problems)
+                          + "); bound ids and link URLs must not contain whitespace")
     return body, reason
 
 
@@ -157,8 +169,17 @@ def add_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
 
 
 def _open_item(kb, conn, raw_id: Any, caller: Caller) -> tuple[ItemView, Any]:
+    """A trusted action-item park the caller owns (§4.2). Legacy parks and the loop breaker's
+    ``block_loop_detected`` park are not action items: they carry no parking profile, and lifting
+    them is ``kanban_unblock``'s (orchestrator-only) job, so update and withdraw refuse them."""
     board, card, event_id = parse_item_id(raw_id)
     view = load_item(kb, conn, board, card, event_id)
+    if view.event_kind != "blocked":
+        raise ItemRefused(f"{view.id} is the loop breaker's {view.event_kind} park, not an action item; "
+                          "only an orchestrator lifts it")
+    if view.envelope is None or not view.trusted or not view.actor:
+        raise ItemRefused(f"{view.id} is not a trusted action item ({'; '.join(view.problems) or 'no actor'}); "
+                          "only an item parked with action_item_add can be updated or withdrawn")
     task = kb.get_task(conn, card)
     _require_owner(caller, task, actor=view.actor)
     from hermes_cli.kanban_db_repark import latest_park_event
@@ -177,9 +198,6 @@ def update_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
     board = parse_item_id(args.get("id"))[0]
     with _board(board) as (kb, conn):
         view, task = _open_item(kb, conn, args.get("id"), caller)
-        if view.envelope is None or not view.trusted:
-            raise ItemRefused(f"{view.id} is not a trusted item ({'; '.join(view.problems)}); park a new "
-                              "one with action_item_add once the card is yours again")
         old = view.envelope
         spec = spec_for(old["kind"])
         payload = {k: v for k, v in old["payload"].items() if k in spec.agent_fields}
@@ -232,4 +250,6 @@ def get_decision(args: dict) -> dict:
         view = load_item(kb, conn, board, card, event_id)
         later = [e.created_at for e in kb.list_events(conn, card)
                  if e.kind in PARK_EVENTS and e.id > event_id]
-        return decision_for(view, kb.list_comments(conn, card), later[0] if later else None)
+        task = kb.get_task(conn, card)
+        return decision_for(view, kb.list_comments(conn, card), later[0] if later else None,
+                            assignee=task.assignee if task else None)

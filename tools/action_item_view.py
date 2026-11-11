@@ -41,6 +41,7 @@ class ItemView:
     event_at: int
     reason: str
     actor: Optional[str]
+    event_kind: str = "blocked"  # or the loop breaker's ``block_loop_detected``
     comment: Any = None  # the bound kanban Comment, when exactly one matches
     envelope: Optional[dict] = None
     classification: dict = field(default_factory=dict)
@@ -51,7 +52,7 @@ class ItemView:
         return not self.problems
 
 
-def _binding_problems(env: dict, reason: str) -> list[str]:
+def binding_problems(env: dict, reason: str) -> list[str]:
     """§3.1 rule 3: the gate parameters in the park reason agree with the payload's bound fields."""
     spec = KINDS[env["kind"]]
     parsed = legacy.parse_gate(reason) if spec.park_tag == "awaiting-approval" else legacy.parse_needs_jack(reason)
@@ -75,7 +76,7 @@ def load_item(kb, conn, board: str, card: str, event_id: int) -> ItemView:
     payload = event.payload or {}
     view = ItemView(id=item_id(board, card, event_id), board=board, card=card, event_id=event_id,
                     event_at=event.created_at, reason=str(payload.get("reason") or ""),
-                    actor=payload.get("actor"))
+                    actor=payload.get("actor"), event_kind=event.kind)
     wanted = reason_item_hash(view.reason)
     if wanted is None:
         view.problems.append("legacy park: the reason binds no item comment")
@@ -91,5 +92,5 @@ def load_item(kb, conn, board: str, card: str, event_id: int) -> ItemView:
     if view.classification["fallback"]:
         view.problems.append(f"payload fails its schema: {view.classification['fallback']['error']}")
     else:
-        view.problems.extend(_binding_problems(view.envelope, view.reason))
+        view.problems.extend(binding_problems(view.envelope, view.reason))
     return view

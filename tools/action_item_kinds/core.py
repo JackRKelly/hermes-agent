@@ -107,7 +107,9 @@ def check_text(value: str, mode: str, where: str, *, allow_blank: bool = False,
 
 def check_link_url(url: Any, where: str, hosts: Iterable[str] = STATIC_LINK_HOSTS) -> None:
     allowed = frozenset(hosts)
-    parts = urlsplit(url) if isinstance(url, str) else None
+    # Whitespace is refused: the park reason is space-delimited, so a link used as the park's
+    # target would be cut at the first space and no longer match the payload.
+    parts = urlsplit(url) if isinstance(url, str) and not any(ch.isspace() for ch in url) else None
     if (not parts or parts.scheme != "https" or (parts.hostname or "") not in allowed
             or parts.username or parts.password or parts.port not in (None, 443)):
         raise SchemaError(f"{where}: only https links to {sorted(allowed)} are allowed ({url!r})")

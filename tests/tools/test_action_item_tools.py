@@ -176,6 +176,7 @@ def test_requested_by_is_never_an_argument(board, monkeypatch, override):
     ({"ask": "<b>Merge?</b>"}, "HTML is refused"),
     ({"why": "token ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"}, "secret-looking"),
     ({"risk": {"level": "extreme", "note": "x"}}, "risk.level"),
+    ({"links": [{"label": "PR", "url": "https://github.com/cybership-io/v2/pull/4280 x"}]}, "only https links"),
 ])
 def test_an_invalid_add_is_refused_and_writes_nothing(board, monkeypatch, change, message):
     tid, run_id = make_card("engineering", claim=True)
@@ -240,6 +241,78 @@ def test_update_and_withdraw_are_refused_for_a_non_owner(board, monkeypatch):
     assert (after[0], len(after[1]), len(after[2])) == (before[0], len(before[1]), len(before[2]))
 
 
+LEGACY_MERGE_PARK = f"[awaiting-approval:merge] https://github.com/cybership-io/v2/pull/4280 head={HEAD} base=main"
+
+
+def _legacy_park(assignee: str, created_by: str) -> tuple[str, str]:
+    """A card parked the pre-action-item way: ``kanban_block`` with a gate reason and no actor."""
+    from hermes_cli import kanban_db as kb
+    tid, _ = make_card(assignee, created_by=created_by)
+    conn = _conn()
+    try:
+        assert kb.block_task(conn, tid, reason=LEGACY_MERGE_PARK, kind="needs_input")
+    finally:
+        conn.close()
+    park = [e for e in card_state(tid)[2] if e.kind == "blocked"][-1]
+    return tid, f"default:{tid}@{park.id}"
+
+
+@pytest.mark.parametrize("who", ["orchestrator", "engineering"])  # the creator, then the assignee
+def test_a_legacy_park_is_not_an_item_so_nobody_withdraws_or_updates_it(board, monkeypatch, who):
+    tid, legacy_id = _legacy_park("engineering", created_by="orchestrator")
+    before = card_state(tid)
+    as_chat(monkeypatch, who)
+    for out in (call("action_item_withdraw", id=legacy_id, reason="not needed"),
+                call("action_item_update", id=legacy_id, why="Changed.")):
+        assert "not a trusted action item" in out["error"], out
+    after = card_state(tid)
+    assert after[0] == "blocked" and len(after[1]) == len(before[1]) and len(after[2]) == len(before[2])
+
+
+def test_the_loop_breaker_park_is_never_lifted_by_withdraw(board, monkeypatch):
+    """Even when the breaker's event repeats an item's reason and actor, it stays parked: lifting
+    it is kanban_unblock's job, which task workers do not have."""
+    from hermes_cli import kanban_db as kb
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    item = call("action_item_add", **MERGE)
+    conn = _conn()
+    try:
+        kb._append_event(conn, tid, "block_loop_detected",
+                         {"reason": item["park_reason"], "actor": "engineering"})
+        conn.commit()
+    finally:
+        conn.close()
+    breaker = [e for e in card_state(tid)[2] if e.kind == "block_loop_detected"][-1]
+    as_chat(monkeypatch, "engineering")  # the assignee and the item's parker
+    out = call("action_item_withdraw", id=f"default:{tid}@{breaker.id}", reason="retry")
+    assert "loop breaker" in out["error"], out
+    assert "no longer the card's current park" in call("action_item_withdraw", id=item["id"], reason="x")["error"]
+    status, comments, _ = card_state(tid)
+    assert status == "blocked" and not any(c.body.startswith("[action-item-withdrawn") for c in comments)
+
+
+def test_a_bound_id_the_park_reason_cannot_carry_is_refused_on_add(board, monkeypatch):
+    """A space in a bound id would be cut off in the space-delimited park reason, leaving an item
+    that loads untrusted; add refuses it up front instead."""
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    payload = {"channel": "sms", "account": "this-mac", "conversation_id": "SMS;-;+15125550147 x",
+               "contact": {"handle": "+15125550147"}, "recipients": [{"handle": "+15125550147"}],
+               "last_messages": [{"from": "them", "at": "2026-11-10T09:00:00-06:00", "text": "eta?"}],
+               "last_inbound_at": "2026-11-10T09:00:00-06:00", "draft_text": "On my way", "draft_ref": None}
+    out = call("action_item_add", kind="send_message", payload=payload, ask="Send this text?",
+               why="They asked for an ETA.", risk={"level": "low", "note": "One text."}, then="complete")
+    assert "park reason cannot carry this item" in out["error"] and "Nothing was written" in out["error"], out
+    status, comments, events = card_state(tid)
+    assert status == "running" and comments == [] and not [e for e in events if e.kind == "blocked"]
+    ok = call("action_item_add", kind="send_message", payload={**payload, "conversation_id": "SMS;-;+15125550147"},
+              ask="Send this text?", why="They asked for an ETA.", risk={"level": "low", "note": "One text."},
+              then="complete")
+    assert ok["ok"], ok
+    assert call("action_item_get_decision", id=ok["id"])["trusted_item"] is True
+
+
 def test_owner_update_reparks_in_place_and_voids_the_old_id(board, monkeypatch):
     tid, run_id = make_card("engineering", claim=True)
     as_worker(monkeypatch, "engineering", tid, run_id)
@@ -268,6 +341,13 @@ def test_owner_withdraw_records_it_and_hands_the_card_back(board, monkeypatch):
     assert out["ok"] and out["card_status"] == "ready"
     assert card_state(tid)[1][-1].body == f"[action-item-withdrawn:{item['id']}] PR closed by someone else"
     assert call("action_item_get_decision", id=item["id"])["status"] == "withdrawn"
+
+
+def test_only_an_owners_withdrawal_of_this_item_counts(board, monkeypatch):
+    tid, item, _ = _parked(monkeypatch)
+    _comment(tid, "captain-sales", f"[action-item-withdrawn:{item['id']}] hidden by someone else")
+    _comment(tid, "engineering", f"[action-item-withdrawn:default:{tid}@1] a different item")
+    assert call("action_item_get_decision", id=item["id"])["status"] == "open"
 
 
 # --- get_decision verification -----------------------------------------------------------------------
@@ -343,6 +423,16 @@ def test_a_fully_bound_web_approval_verifies_and_a_reused_audit_id_does_not(boar
     assert out["verified"] is True and out["via"] == "webapp" and out["audit_id"] == "a1", out
     _comment(tid, "action-items", _approval(item))  # a second comment citing the same audit row
     assert call("action_item_get_decision", id=item["id"])["verified"] is False
+
+
+def test_an_earlier_forged_approval_does_not_mask_the_verified_one(board, monkeypatch):
+    tid, item, event_id = _parked(monkeypatch)
+    park_at = next(e for e in card_state(tid)[2] if e.id == event_id).created_at
+    _comment(tid, "engineering", _approval(item, audit_id="forged"))
+    _audit(board, [_row(item, tid, event_id, at=park_at)])
+    _comment(tid, "action-items", _approval(item))
+    out = call("action_item_get_decision", id=item["id"])
+    assert out["verified"] is True and out["decided_by"] == "action-items" and out["audit_id"] == "a1", out
 
 
 def test_an_edited_audit_log_breaks_the_chain(board, monkeypatch):
