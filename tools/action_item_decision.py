@@ -198,10 +198,19 @@ def _pick_decision(view: ItemView, window: list, comments: list) -> Optional[tup
 def decision_for(view: ItemView, comments: list, next_park_at: Optional[int],
                  assignee: Optional[str] = None) -> dict:
     """The ``action_item_get_decision`` result for one resolved item."""
+    return decide(view, comments, next_park_at, assignee)[0]
+
+
+def decide(view: ItemView, comments: list, next_park_at: Optional[int],
+           assignee: Optional[str] = None) -> tuple[dict, Any]:
+    """``(result, decision comment or None)``. ``outcome`` is what became of the decision: ``done`` /
+    ``failed`` once an ``[action-done`` / ``[action-failed`` follows it, ``carried`` when a later
+    re-park of the same artifact took the approval over (``tools/action_item_carry.py``)."""
     window = [c for c in comments if c.created_at >= view.event_at
               and (next_park_at is None or c.created_at < next_park_at)]
     out: dict = {"id": view.id, "status": "open", "verdict": None, "option": None, "answers": None, "note": None,
                  "decided_by": None, "via": None, "at": None, "audit_id": None, "verified": False,
+                 "outcome": None, "carried_from": None, "carried_to": None,
                  "trusted_item": view.trusted, "problems": list(view.problems)}
     # Only the owners withdraw (§4.2), so a withdrawal is theirs and cites this item's id.
     withdrawn = f"{WITHDRAWN_PREFIX}:{view.id}]"
@@ -209,6 +218,7 @@ def decision_for(view: ItemView, comments: list, next_park_at: Optional[int],
     if any(c.body.startswith(withdrawn) and c.author in owners for c in window):
         out["status"] = "withdrawn"
     picked = _pick_decision(view, window, comments)
+    comment = None
     if picked is not None:
         comment, decision, verified, problems = picked
         source = decision["params"].get("source", "")
@@ -218,9 +228,9 @@ def decision_for(view: ItemView, comments: list, next_park_at: Optional[int],
                    audit_id=source.split(":", 1)[1] if source.startswith("webapp:") else None)
         after = [c.body for c in window if c.created_at >= comment.created_at and c.id > comment.id]
         if any(body.startswith("[action-done") for body in after):
-            out["status"] = "done"
+            out["status"] = out["outcome"] = "done"
         elif any(body.startswith("[action-failed") for body in after):
-            out["status"] = "failed"
+            out["status"] = out["outcome"] = "failed"
     if next_park_at is not None and out["status"] == "open":
         out["status"] = "superseded"
-    return out
+    return out, comment
