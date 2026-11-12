@@ -181,6 +181,11 @@ def test_park_then_later_untagged_block_pings_only_the_later_block(tmp_path, mon
     ("block_loop_detected", "[hold:jack] quoting [awaiting-approval:merge] until the vendor replies", False),
     ("blocked", "[needs-attention] CI red; old ask was [awaiting-approval:merge]", False),
     ("blocked", "merge PR #5 when green [awaiting-approval:merge] sha=abc", True),  # gate is the first marker
+    # A typed action item binding is Jack's park unless a Captain, hold or attention marker owns it.
+    ("blocked", "re-parked the typed item then=ready item=2877c0d1e2f3a4b5", True),
+    ("blocked", "[captain:routing] quoting then=ready item=2877c0d1e2f3a4b5", False),
+    ("blocked", "[needs-attention] CI red item=2877c0d1e2f3a4b5", False),
+    ("blocked", "worker said item=2877c0d1 (short, not a binding)", False),
     ("crashed", "[needs-jack] pick one", False),
     ("gave_up", "[awaiting-approval:merge] merge #5", False),
     ("timed_out", "[decision:scope] option A or B?", False),

@@ -113,7 +113,6 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
 BLOCK_RECURRENCE_LIMIT = 2
-APPROVAL_GATE_PREFIX = "[awaiting-approval:"
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 
 
@@ -3225,17 +3224,18 @@ def _route_block(
     unblock-loop recurrences: a stored ``block_kind`` equal to the incoming
     one means blocked -> unblocked -> re-block for the same cause. At
     ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human,
-    except an approval-gate park, which re-blocks by design (a rejection hands
-    it back) and must stay in ``blocked`` where the approval sweep finds it.
+    except a Jack park (approval gate, needs-jack/decision tag, item binding):
+    it re-parks by design and stays ``blocked``, the status Action Items lists.
     """
+    from hermes_cli.kanban_jack_park import is_jack_park_reason
+
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    gate = (reason or "").lstrip().startswith(APPROVAL_GATE_PREFIX)
-    if recurrences >= BLOCK_RECURRENCE_LIMIT and not gate:
+    if recurrences >= BLOCK_RECURRENCE_LIMIT and not is_jack_park_reason(reason):
         payload["limit"] = BLOCK_RECURRENCE_LIMIT
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
     return "blocked", "blocked", set_sql, (kind, recurrences), payload

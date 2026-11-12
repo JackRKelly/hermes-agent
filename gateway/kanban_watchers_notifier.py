@@ -19,6 +19,7 @@ from agent.i18n import t
 
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
 from gateway.wake import session_owned_by_profile
+from hermes_cli.kanban_jack_park import is_jack_park_reason
 
 
 def _kbc():
@@ -61,31 +62,14 @@ def diagnostic_event(ev) -> bool:
 
 # A block parked for Jack (an Action Item or a tagged decision) is delivered by the Action Items
 # queue, never by a chat ping or a wake turn: posting the reason would put the question itself in
-# a topic. The test is the one Action Items uses to put a block in Jack's queue (assistant
-# scripts/kanban_gates.py ``block_owner``), and the FIRST marker decides: an approval gate that
-# leads its owner tag and any [needs-attention] marker, or a first owner tag that is Jack's.
-# Anything else (a [captain:..] or [hold:..] block quoting a gate or a Jack tag, an untagged
-# needs_input block) still notifies, so no block is withheld here without landing in Jack's queue.
-_APPROVAL_GATE_RE = re.compile(r"\[awaiting-approval:[a-z-]+\]")
-_ATTENTION_RE = re.compile(r"\[needs-attention\]")
-_OWNER_TAG_RE = re.compile(r"\[(?P<owner>needs-jack|decision|captain|hold)(?::[\w-]+)?\]", re.IGNORECASE)
-_JACK_OWNER_TAGS = frozenset({"needs-jack", "decision"})
-
-
+# a topic. The reason test is shared with the block router (``is_jack_park_reason``); anything
+# else (a [captain:..] or [hold:..] block quoting a gate or a Jack tag, an untagged needs_input
+# block) still notifies, so no block is withheld here without landing in Jack's queue.
 def jack_park_event(ev) -> bool:
     """True for a ``blocked`` / ``block_loop_detected`` event whose reason parks the card for Jack."""
     if ev.kind not in {"blocked", "block_loop_detected"}:
         return False
-    reason = str((ev.payload or {}).get("reason") or "")
-    owner = _OWNER_TAG_RE.search(reason)
-    gate = _APPROVAL_GATE_RE.search(reason)
-    if gate:
-        attention = _ATTENTION_RE.search(reason)
-        if all(gate.start() < m.start() for m in (owner, attention) if m):
-            return True
-        if attention and not (owner and owner.start() < attention.start()):
-            return False
-    return bool(owner) and owner["owner"].lower() in _JACK_OWNER_TAGS
+    return is_jack_park_reason(str((ev.payload or {}).get("reason") or ""))
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
 # API outage must not permanently unsubscribe a live review-gate channel.
