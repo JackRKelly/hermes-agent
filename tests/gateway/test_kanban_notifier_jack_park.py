@@ -133,6 +133,22 @@ def test_routing_block_still_pings_and_wakes(tmp_path, monkeypatch, wake_spy):
     assert _unseen(task_id) == []
 
 
+def test_captain_block_quoting_a_gate_still_pings_and_wakes(tmp_path, monkeypatch, wake_spy):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "quoted.db"))
+    kb.init_db()
+    task_id = _card_with_event("blocked", {"reason": "[captain:routing] worker quoted the old park "
+                                                     "[awaiting-approval:merge] pr/9", "kind": "needs_input"})
+    adapter = RecordingAdapter()
+
+    asyncio.run(_run_one_tick(monkeypatch, _runner(adapter)))
+
+    assert len(adapter.sent) == 1
+    assert "[captain:routing] worker quoted the old park" in adapter.sent[0]["text"]
+    assert len(adapter.handled) == 1
+    assert len(wake_spy) == 1
+    assert _unseen(task_id) == []
+
+
 def test_park_then_later_untagged_block_pings_only_the_later_block(tmp_path, monkeypatch, wake_spy):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "mixed.db"))
     kb.init_db()
@@ -156,8 +172,18 @@ def test_park_then_later_untagged_block_pings_only_the_later_block(tmp_path, mon
     ("blocked", "[decision] Consult Jack: which plan", True),
     ("blocked", "[decision:scope] option A or B?", True),
     ("block_loop_detected", "[awaiting-approval:merge] merge #5 sha=abc", True),
+    ("blocked", "[awaiting-approval:merge] merge #5; captain notes [captain:routing] later", True),
+    ("blocked", "[needs-jack:decision] approve it as [awaiting-approval:merge] item", True),
     ("blocked", "[captain:routing] re-parked; Jack already answered the [needs-jack:decision] item", False),
     ("blocked", "[hold:jack] waiting on vendor, see [decision] note", False),
+    # A gate quoted after a Captain, hold or attention marker is not Jack's park (Action Items skips it).
+    ("blocked", "[captain:routing] worker quoted the old park [awaiting-approval:merge] pr/9", False),
+    ("block_loop_detected", "[hold:jack] quoting [awaiting-approval:merge] until the vendor replies", False),
+    ("blocked", "[needs-attention] CI red; old ask was [awaiting-approval:merge]", False),
+    ("blocked", "merge PR #5 when green [awaiting-approval:merge] sha=abc", True),  # gate is the first marker
+    ("crashed", "[needs-jack] pick one", False),
+    ("gave_up", "[awaiting-approval:merge] merge #5", False),
+    ("timed_out", "[decision:scope] option A or B?", False),
     ("blocked", "push failed after posting the [action-item:v1] comment", False),
     ("blocked", "worker needs input: which branch?", False),
     ("blocked", "[needs-jackson] unrelated tag", False),
