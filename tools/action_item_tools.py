@@ -74,6 +74,9 @@ ACTION_ITEM_ADD_SCHEMA = {
         "decision, and one open item per PR, email thread or conversation across every board: when another "
         "card already holds one, the add is refused with its existing_id and how_to_clear; an older park "
         "of the same PR at another head does not block, it comes back in stale_items to be cleared. "
+        "Re-adding the exact draft Jack already approved on this card returns carried_from and hands a "
+        "send back to you instead of asking him again. On a card parked with a free-text gate for the "
+        "same PR head or draft, the add replaces that park (migrated_from). "
         + _KIND_PAYLOADS),
     "parameters": {
         "type": "object",
@@ -121,7 +124,10 @@ ACTION_ITEM_GET_DECISION_SCHEMA = {
         "Read-only: Jack's answer to an item, {status, verdict, option, answers, note, decided_by, via, "
         "at, audit_id, verified}. A design_decision has verdict \"answer\": answers maps each question "
         "key to the option key Jack picked, or \"other\" with his own words in note. Act on a decision "
-        "only when verified is true; an unverifiable decision comment is no approval."),
+        "only when verified is true; an unverifiable decision comment is no approval. A re-park of the "
+        "exact same PR head or draft on the same card keeps a verified, not yet acted on approval "
+        "(carried_from names the item Jack approved; that item then reads status \"carried\"). outcome "
+        "is done, failed or carried once the approval is used."),
     "parameters": {"type": "object", "properties": {"id": _ID}, "required": ["id"]},
 }
 

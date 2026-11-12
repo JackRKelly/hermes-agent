@@ -162,13 +162,55 @@ def add_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
         if task is None:
             raise ItemRefused(f"card {card} not found")
         _require_owner(caller, task)
-        if task.status not in ADDABLE_STATUSES or (task.status == "running" and caller.env_task != card):
+        board = _board_slug(kb, args.get("board"))
+        legacy = _free_text_gate_to_migrate(kb, conn, board, task, env) if task.status == "blocked" else None
+        if legacy is None and (task.status not in ADDABLE_STATUSES
+                               or (task.status == "running" and caller.env_task != card)):
             raise ItemRefused(f"card {card} is {task.status}: items are added to a card you are running, "
                               "or a ready card you own; a parked card is changed with action_item_update")
-        board = _board_slug(kb, args.get("board"))
         stale = _refuse_second_open_item(conn, board, task, env)
-        result = _write(kb, conn, board, task, caller, env)
+        result = _write(kb, conn, board, task, caller, env, current=legacy)
+        if legacy is not None:
+            result["migrated_from"] = legacy.id
+        result = _hand_back_if_carried(kb, conn, board, task, caller, result)
         return {**result, "stale_items": [s.as_dict() for s in stale]} if stale else result
+
+
+def _free_text_gate_to_migrate(kb, conn, board: str, task, env: dict) -> Optional[ItemView]:
+    """The card's current free-text machine-gate park when this add is the same artifact typed
+    (``[awaiting-approval:merge] <PR> head=`` / ``send-email draft= thread= account=`` /
+    ``send-message channel= conversation=``): the add re-parks it in place as a bound item. None when
+    the current park is not a free-text gate, so the usual status refusal applies. Refused when the
+    park names another artifact or Jack already decided it: nothing is carried from a free-text park,
+    whose approval binds no draft content, and no decision is written."""
+    from hermes_cli.kanban_db_repark import latest_park_event
+    from tools.action_item_carry import CARRY_KINDS
+    from tools.action_item_dedupe import ACCOUNTS
+    from tools.action_item_decision import decision_for
+    from tools.action_item_kinds.registry import legacy_payload
+
+    park = latest_park_event(conn, task.id)
+    if park is None or park["kind"] != "blocked":
+        return None
+    view = load_item(kb, conn, board, task.id, int(park["id"]))
+    typed = legacy_payload(view.reason) if reason_item_hash(view.reason) is None else None
+    if typed is None or typed[0] not in CARRY_KINDS:
+        return None
+    kind, parked = typed
+    if kind != env["kind"]:
+        raise ItemRefused(f"card {task.id} is parked on a free-text {kind} gate ({view.id}); only an "
+                          f"{kind} item for the same artifact can replace it")
+    norm = (lambda key, value: ACCOUNTS.get(str(value), str(value)).lower() if key == "account" else value)
+    differ = sorted(key for key, value in parked.items()
+                    if key != "thread_url" and norm(key, value) != norm(key, env["payload"].get(key)))
+    if differ:
+        raise ItemRefused(f"card {task.id} is parked on a free-text gate ({view.id}) for another artifact: "
+                          f"its {', '.join(differ)} differ from this item's. Add the item for the parked "
+                          "artifact, or have the card unblocked first")
+    if decision_for(view, kb.list_comments(conn, task.id), None)["verdict"] is not None:
+        raise ItemRefused(f"Jack already decided {view.id}; its executor or the card's owner acts on that "
+                          "decision, so it is not re-parked")
+    return view
 
 
 def _refuse_second_open_item(conn, board: str, task, env: dict) -> list:
@@ -230,7 +272,7 @@ def update_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
                 (task.status == "running" and caller.env_task != task.id):
             raise ItemRefused(f"card {task.id} is {task.status}; it cannot be re-parked now")
         result = _write(kb, conn, board, task, caller, env, current=view)
-        return {**result, "replaces": view.id}
+        return _hand_back_if_carried(kb, conn, board, task, caller, {**result, "replaces": view.id})
 
 
 def withdraw_item(args: dict) -> dict:
@@ -263,11 +305,41 @@ def get_decision(args: dict) -> dict:
     from tools.action_item_decision import decision_for
     from tools.kanban_tools import _board
 
+    from tools.action_item_carry import artifact, card_decisions
+
     board, card, event_id = parse_item_id(args.get("id"))
     with _board(board) as (kb, conn):
         view = load_item(kb, conn, board, card, event_id)
+        task = kb.get_task(conn, card)
+        assignee = task.assignee if task else None
+        if artifact(view) is not None:  # a machine gate: an approval may carry to or from it
+            return card_decisions(kb, conn, board, card, assignee)[event_id]
         later = [e.created_at for e in kb.list_events(conn, card)
                  if e.kind in PARK_EVENTS and e.id > event_id]
-        task = kb.get_task(conn, card)
-        return decision_for(view, kb.list_comments(conn, card), later[0] if later else None,
-                            assignee=task.assignee if task else None)
+        return decision_for(view, kb.list_comments(conn, card), later[0] if later else None, assignee=assignee)
+
+
+def _hand_back_if_carried(kb, conn, board: str, task, caller: Caller, result: dict) -> dict:
+    """A re-park of the exact artifact Jack already approved on this card (``action_item_carry``):
+    report it, and for a send hand the card straight back so Jack is not asked again. The owner then
+    reads the carried approval with ``action_item_get_decision`` on the new id and acts once."""
+    from tools.action_item_carry import HAND_BACK_KINDS, card_decisions
+
+    event_id = int(result["id"].rsplit("@", 1)[1])
+    carried_from = card_decisions(kb, conn, board, task.id, task.assignee)[event_id]["carried_from"]
+    if carried_from is None:
+        return result
+    out = {**result, "carried_from": carried_from}
+    if result["render_as"] not in HAND_BACK_KINDS:
+        return {**out, "next": "Jack's approval carries over, but only the merge executor merges: the item "
+                               "stays parked for it"}
+    kb.add_comment(conn, task.id, author=caller.profile, body=(
+        f"[action-item-carried:{result['id']}] Jack's verified approval of {carried_from} covers this exact "
+        f"{result['render_as']} (same artifact, not acted on yet), so the card goes back to its owner "
+        "instead of asking Jack again"))
+    kb.unblock_task(conn, task.id)
+    landed = kb.get_task(conn, task.id)
+    return {**out, "card_status": landed.status if landed else None,
+            "next": f"Jack already approved this exact draft. Stop now: the card is back with its owner, whose "
+                    f"next run reads action_item_get_decision {result['id']} (verified, carried_from "
+                    f"{carried_from}), acts once and records [action-done:<gate>]"}
