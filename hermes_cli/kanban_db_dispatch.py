@@ -1039,12 +1039,12 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    gateway_stopped: bool = False  # the owner stopped it for its own restart: a reclaim (apply_attempt_note)
 
     @property
     def run_outcome(self) -> str:
-        # A rate-limited requeue is recorded as ``rate_limited`` so board history
-        # doesn't show a phantom crash for a quota wall.
-        return "rate_limited" if self.rate_limited else "crashed"
+        # Board history shows no phantom crash for a quota wall or the gateway's own restart.
+        return "reclaimed" if self.gateway_stopped else "rate_limited" if self.rate_limited else "crashed"
 
 
 def _classify_dead_worker(
@@ -1226,7 +1226,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
-            else:
+            elif not dead.gateway_stopped:  # a gateway-stopped attempt is requeued, never charged
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
     return sweep

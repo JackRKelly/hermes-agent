@@ -28,10 +28,11 @@ _TRANSIENT_OWNER_STATES = frozenset({'draining', 'starting'})
 _TRANSIENT_RPC_REASONS = frozenset({'runtime_draining', 'runtime_retired'})
 # Control-socket answers a restarting owner gives (an ``inaccessible`` owner's reason, from
 # discovery or the ticket fetch): a reset or half-written answer, or a replaced owner refusing a
-# stale instance. Unsafe nodes or peers, a refused authorization, a bad pointer or a failed start
-# stay final.
+# stale instance. ``service_start_failed`` is the service manager refusing a start while it is
+# itself relaunching the owner a restart just stopped (launchd's ``kickstart`` in that window).
+# Unsafe nodes or peers, a refused authorization or a bad pointer stay final.
 _RESTART_CONTROL_REASONS = frozenset({'invalid_control_peer', 'incomplete_control_response',
-                                      'invalid_control_response'})
+                                      'invalid_control_response', 'service_start_failed'})
 # Past the board lock wait: the owner's session setup and receipt before and after the write.
 ADMISSION_ANSWER_MARGIN_S = 60.0
 
@@ -72,8 +73,9 @@ async def run(params, board_db):
         seen = claim.answered
         try:
             # Never into a restart's after-turn wait: it cut this socket so the turn's submitter
-            # waits for the NEXT owner, and a worker polling its receipt inside the wait keeps the
-            # turn it waits on alive, holding `hermes update` until restart_after_turn_timeout.
+            # reads its receipt from the NEXT owner. The worker stays alive meanwhile (each
+            # ``restart_wait`` refusal is an owner answer), so its turn runs on to its end and the
+            # wait's own cap, not this worker, bounds how long the restart holds for it.
             with outside_restart_wait():
                 async with connect_gateway() as client:
                     # kanban.run subscribes this socket to the card's session, but only receipts
@@ -89,6 +91,15 @@ async def run(params, board_db):
         except (GatewayClientError, WebSocketException, OSError, TimeoutError) as exc:
             if not _restartable(exc):
                 raise
+            # Progress (a receipt this connection read) restarts the backoff; a holding answer
+            # does not, so the workers of one long restart wait back off to the 8-16 s ceiling.
+            progressed = claim.answered != seen
+            if _holding_for_restart(exc):
+                # The owner itself answered: it is in a restart's after-turn wait, which holds the
+                # restart until its in-flight turns (this card's among them) finish, up to its own
+                # cap. That is an owner keeping the attempt, not a silent one: giving up here ended
+                # the very turn the wait exists to let finish.
+                claim.answered = time.monotonic()
             if claim.silent_for() >= OWNER_WAIT_S:
                 # WebSocket errors can embed remote bodies; only our own messages are quoted.
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
@@ -97,7 +108,7 @@ async def run(params, board_db):
                 raise GatewayClientError(f'Kanban owner silent for {claim.silent_for():.0f}s: {detail}') from exc
         else:
             return _exit_code(receipt, params, board_db)
-        failures = 1 if claim.answered != seen else failures + 1
+        failures = 1 if progressed else failures + 1
         # Jittered (1-2 s first, up to 16 s): workers of one dead owner do not all redial, and so
         # start a replacement, in the same instant.
         await asyncio.sleep(jittered_backoff(failures, base_delay=1.0, max_delay=8.0, jitter_ratio=1.0))
@@ -111,6 +122,15 @@ def _restartable(exc):
     if isinstance(exc, GatewayUnavailableError):
         return exc.state in _TRANSIENT_OWNER_STATES or exc.reason_code in _RESTART_CONTROL_REASONS
     return True
+
+
+def _holding_for_restart(exc):
+    """True when *exc* is a live owner's ``draining``/``restart_wait`` answer (its control socket's
+    identify, read by ``connect_gateway`` inside ``outside_restart_wait``)."""
+    from gateway.drain_control import RESTART_WAIT_REASON
+    from hermes_cli.gateway_client import GatewayUnavailableError
+    return (isinstance(exc, GatewayUnavailableError) and exc.state == 'draining'
+            and exc.reason_code == RESTART_WAIT_REASON)
 
 
 async def _discard(events):

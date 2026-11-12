@@ -312,12 +312,26 @@ def _record_worker_result(context, code, last_output):
                  'last_output': last_output}, run_id=context['run_id'])
 
 
-def record_worker_loss(policy, reason, *, pid=None, bound=False):
+def record_worker_loss(policy, reason, *, pid=None, bound=False, stop_cause=None):
     """Append a run-scoped ``worker_lost`` event for this attempt to the card's board.
 
-    Dropped when the card has moved past the run (it says nothing about the current attempt).
-    Never raises: the caller's own loss handling must not depend on the board write.
+    ``stop_cause``: the gateway restart/shutdown Stop this worker was sent before it was lost
+    (it never acknowledged and was terminated), so the dispatcher books the gateway's stop, not
+    a crash. Dropped when the card has moved past the run (it says nothing about the current
+    attempt). Never raises: the caller's own loss handling must not depend on the board write.
     """
+    _append_attempt_event(policy, 'worker_lost', {'reason': str(reason)[:200], 'pid': pid, 'bound': bool(bound),
+                                                  **({'stop_cause': str(stop_cause)[:200]} if stop_cause else {})})
+
+
+def record_worker_stopped(policy, cause, *, pid=None):
+    """Append a run-scoped ``worker_stopped`` event: the gateway stopped this attempt's turn for a
+    restart or shutdown (*cause*), so its interrupted exit is the gateway's, never the card's.
+    Written before the turn settles, so it is on the board before the submitter can exit."""
+    _append_attempt_event(policy, 'worker_stopped', {'cause': str(cause)[:200], 'pid': pid})
+
+
+def _append_attempt_event(policy, kind, payload):
     try:
         context = json.loads(policy.kanban_json or 'null')
         if not context:
@@ -330,13 +344,11 @@ def record_worker_loss(policy, reason, *, pid=None, bound=False):
                                (context['task_id'],)).fetchone()
             if row is None or row[0] != 'running' or row[1] != run_id:
                 return
-            kb._append_event(conn, context['task_id'], 'worker_lost',
-                             {'reason': str(reason)[:200], 'claim_lock': context['claim_lock'],
-                              'run_id': run_id, 'pid': pid, 'bound': bool(bound)},
-                             run_id=run_id)
+            kb._append_event(conn, context['task_id'], kind,
+                             {**payload, 'claim_lock': context['claim_lock'], 'run_id': run_id}, run_id=run_id)
     except Exception:
         import logging
-        logging.getLogger(__name__).exception('kanban worker_lost record failed')
+        logging.getLogger(__name__).exception('kanban %s record failed', kind)
 
 
 def _bound_worker_matches(conn, context):
