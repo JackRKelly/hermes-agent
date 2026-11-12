@@ -71,7 +71,10 @@ ACTION_ITEM_ADD_SCHEMA = {
         "Agents never approve: only Jack's decision resolves an item. The requester and the card come "
         "from this session (its own Kanban task, or a card you own passed as `card`), never from "
         "arguments. Parking your own task ends your run: stop after a successful add. One item per "
-        "decision. " + _KIND_PAYLOADS),
+        "decision, and one open item per PR, email thread or conversation across every board: when another "
+        "card already holds one, the add is refused with its existing_id and how_to_clear; an older park "
+        "of the same PR at another head does not block, it comes back in stale_items to be cleared. "
+        + _KIND_PAYLOADS),
     "parameters": {
         "type": "object",
         "properties": {
@@ -142,7 +145,10 @@ def _handler(tool_name: str, op: Callable[[dict], dict]) -> Callable:
         try:
             return json.dumps(op(args))
         except (SchemaError, ItemRefused) as exc:
-            return tool_error(f"{tool_name} refused: {exc}. Nothing was written.")
+            existing = getattr(exc, "existing", None)
+            extra = {"existing_id": existing.id, "existing_card": existing.card, "existing_board": existing.board,
+                     "how_to_clear": existing.how_to_clear()} if existing is not None else {}
+            return tool_error(f"{tool_name} refused: {exc}. Nothing was written.", **extra)
         except Exception as exc:  # health: allow BLE001 -- tool boundary: logged with traceback, returned as a tool error
             logger.exception("%s failed", tool_name)
             return tool_error(f"{tool_name}: {exc}")
