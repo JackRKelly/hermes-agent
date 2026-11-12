@@ -155,7 +155,7 @@ def add_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
 
     caller = current_caller()
     card = _resolve_card(caller, args.get("card"))
-    env = build_envelope(args.get("kind"), payload=args.get("payload"), sources=sources,
+    env = build_envelope(args.get("kind"), payload=args.get("payload"), sources=sources, card=card,
                          **_envelope_args(args))
     with _board(args.get("board")) as (kb, conn):
         task = kb.get_task(conn, card)
@@ -265,7 +265,7 @@ def update_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
             payload.pop("content_hash", None)  # recomputed from the changed draft fields
         payload.update(args.get("payload") or {})
         fields = {key: (args[key] if key in args else old.get(key)) for key in ENVELOPE_ARGS}
-        env = build_envelope(old["kind"], payload=payload, sources=sources, **fields)
+        env = build_envelope(old["kind"], payload=payload, sources=sources, card=task.id, **fields)
         if canonical_json(env) == canonical_json(old):
             raise ItemRefused("nothing changed: the new item is identical to the current one")
         if task.status not in ("blocked", *ADDABLE_STATUSES) or \
