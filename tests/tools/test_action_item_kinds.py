@@ -229,6 +229,24 @@ def test_valid_items_of_every_kind_are_accepted():
         assert comment_hash16(comment_body(env)) in park_reason(env)
 
 
+def test_user_task_steps_are_stored_without_their_own_number():
+    # The exact shape Jack saw as "1. 1. In the agent browser, open ..." (Nov 12): the app numbers the steps.
+    steps = ["1. In the agent browser, open https://dashboard.stripe.com/login",
+             "2. Sign in to the Cybership Stripe account with \"Remember me on this device\" checked, and finish 2FA.",
+             "3) Confirm you can see Workbench > Logs in live mode, then leave the browser open.",
+             "- Mark this done.", "2FA stays as written", "1.5 GB is not a list marker"]
+    clean = ["In the agent browser, open https://dashboard.stripe.com/login",
+             "Sign in to the Cybership Stripe account with \"Remember me on this device\" checked, and finish 2FA.",
+             "Confirm you can see Workbench > Logs in live mode, then leave the browser open.",
+             "Mark this done.", "2FA stays as written", "1.5 GB is not a list marker"]
+    env = build("user_task", {"steps": steps, "where": "The agent browser"})
+    assert env["payload"]["steps"] == clean
+    # The binding hash covers the stored steps, so the read-time check passes and a re-add is the same item.
+    validate_envelope(env, HOSTS)
+    again = build("user_task", {"steps": clean, "where": "The agent browser"})
+    assert again["payload"]["steps_hash"] == env["payload"]["steps_hash"]
+
+
 # --- read-time fallback to `other` ---------------------------------------------------------------
 
 def test_unknown_kind_schema_or_payload_on_read_degrades_to_other_with_approve_off():

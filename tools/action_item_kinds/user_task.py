@@ -5,6 +5,7 @@ Resolved by Jack's ``done``; the card owner then verifies it really happened.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from tools.action_item_kinds import legacy
@@ -15,12 +16,25 @@ KIND = "user_task"
 AGENT_FIELDS = frozenset({"steps", "where"})
 
 
+# A step's own list marker ("1.", "2)", "- "): the app shows steps in a numbered list, so a stored marker
+# reads "1. 1. Sign in ..." (Jack, Nov 12). Only a marker followed by a space: "2FA" and "1.5 GB" stay.
+STEP_MARKER_RE = re.compile(r"^\s*(?:\d{1,3}[.)]|[-*\u2022])\s+")
+
+
+def normalize_steps(steps):
+    """Each step without its own list marker; anything that is not a list of strings is left to the schema."""
+    if not isinstance(steps, list):
+        return steps
+    return [STEP_MARKER_RE.sub("", s, count=1) if isinstance(s, str) else s for s in steps]
+
+
 def steps_hash(payload: dict) -> str:
     return prefixed_hash({"steps": payload.get("steps"), "where": payload.get("where")})
 
 
 def _enrich(agent: dict, sources) -> dict:
-    return {**agent, "steps_hash": steps_hash(agent)}
+    full = {**agent, "steps": normalize_steps(agent.get("steps"))} if "steps" in agent else dict(agent)
+    return {**full, "steps_hash": steps_hash(full)}
 
 
 def _check(env: dict) -> None:
