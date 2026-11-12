@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import types
 
-import tools.action_item_tools  # noqa: F401  (registers action_item_add)
+import tools.action_item_tools  # registers action_item_add
 from hermes_cli import __version__
 from tools import mcp_tool_agent as _mcp_agent
 from tools.registry import registry
