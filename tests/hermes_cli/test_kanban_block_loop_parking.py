@@ -114,3 +114,52 @@ def test_approval_gate_reblock_stays_blocked(kanban_home: Path, reason: str, kin
         assert task.block_recurrences == 2
         kinds = [e.kind for e in kb.list_events(conn, tid)]
         assert "block_loop_detected" not in kinds
+
+
+def _reblock_n(conn, reason, times: int, kind: str = "needs_input"):
+    tid = kb.create_task(conn, title="t", assignee="worker")
+    for i in range(times):
+        if i:
+            assert kb.unblock_task(conn, tid)
+        _claim(conn, tid)
+        assert kb.block_task(conn, tid, reason=reason, kind=kind)
+    return tid
+
+
+# Jack parks re-park on purpose after an answer, rejection or update (Nov 12: ~25 of them went to
+# triage overnight and the Action Items app, which lists only ``blocked`` cards, showed none).
+@pytest.mark.parametrize("reason", [
+    "[needs-jack:decision] Which fix should the crew build? then=ready item=8f37a1c2d4e5b6a7",
+    "[needs-jack:user-task] Sign in to the Railway dashboard and rotate the key then=ready",
+    "[decision] Consult Jack: ship plan A or plan B?",
+    "[needs-jack:other] Read the vendor reply then=ready item=2877c0d1e2f3a4b5",
+    "worker re-parked the typed action item then=ready item=2877c0d1e2f3a4b5",
+    "merge PR #5 when green [awaiting-approval:merge] sha=abc then=complete",
+])
+@pytest.mark.parametrize("times", [2, 3])
+def test_jack_park_reblock_stays_blocked(kanban_home: Path, reason: str, times: int) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, times)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_recurrences == times
+        last = [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+        assert last.kind == "blocked"
+        assert last.payload["recurrences"] == times
+
+
+@pytest.mark.parametrize("reason,kind", [
+    ("[captain:routing] no reviewer profile for this repo", "needs_input"),
+    ("worker needs input: which branch?", "needs_input"),
+    ("[captain:routing] re-parked; Jack already answered the [needs-jack:decision] item", "needs_input"),
+    ("[captain:routing] quoting the old park then=ready item=2877c0d1e2f3a4b5", "needs_input"),
+    ("[hold:jack] waiting on the vendor, see [decision] note", "needs_input"),
+    ("[needs-attention] CI red; old ask was item=2877c0d1e2f3a4b5", "needs_input"),
+    ("CI keeps failing", "capability"),
+])
+def test_non_jack_block_loop_still_goes_to_triage(kanban_home: Path, reason: str, kind: str) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, 2, kind=kind)
+        assert kb.get_task(conn, tid).status == "triage"
+        last = [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+        assert last.kind == "block_loop_detected"
