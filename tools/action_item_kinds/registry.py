@@ -23,6 +23,8 @@ from tools.action_item_kinds.schema_lite import load_schema, validate
 from tools.action_item_kinds.spec import FALLBACK_ACTIONS, KINDS_DIR, KindSpec, LiveSources
 
 KINDS_VERSION = 2
+# The envelope fields an agent passes as top-level tool parameters (never inside ``payload``).
+ENVELOPE_PARAMS = ("title", "summary", "ask", "why", "risk", "deadline", "links", "then", "batchable")
 KINDS: Mapping[str, KindSpec] = MappingProxyType({spec.kind: spec for spec in (
     pr_merge.SPEC, send_email.SPEC, send_message.SPEC, design_decision.SPEC, user_task.SPEC, other.SPEC,
 )})
@@ -53,8 +55,11 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
     spec.precheck(payload)
     tool_fields = sorted(set(payload) - spec.agent_fields)
     if tool_fields:
+        misplaced = [key for key in tool_fields if key in ENVELOPE_PARAMS]
+        hint = (f"; {misplaced} are top-level parameters of the call beside kind and payload, never payload "
+                "fields" if misplaced else "")
         raise SchemaError(f"payload: {tool_fields} are filled by the tool from the live source; "
-                          f"pass only {sorted(spec.agent_fields)}")
+                          f"pass only {sorted(spec.agent_fields)}{hint}")
     readability.check_new_envelope(title=title, summary=summary, risk=risk)
     if sources is None:
         from tools.action_item_kinds.github import GhSources

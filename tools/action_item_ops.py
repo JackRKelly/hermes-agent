@@ -22,7 +22,7 @@ from tools.action_item_kinds.core import (
     WITHDRAWN_PREFIX, SchemaError, canonical_json, check_text, comment_body, comment_hash16,
     reason_item_hash, refuse_decision_text,
 )
-from tools.action_item_kinds.registry import build_envelope, park_reason, spec_for
+from tools.action_item_kinds.registry import ENVELOPE_PARAMS, build_envelope, park_reason, spec_for
 from tools.action_item_kinds.spec import LiveSources
 from tools.action_item_view import (
     ItemRefused, ItemView, binding_problems, item_id, load_item, parse_item_id,
@@ -32,7 +32,7 @@ ADDABLE_STATUSES = ("running", "ready")
 # E.164 handles are payload data the redactor would mask; mask them first so the secret check
 # looks only at what remains.
 _PHONE_RE = re.compile(r"\+[1-9][0-9]{6,14}")
-ENVELOPE_ARGS = ("title", "summary", "ask", "why", "risk", "deadline", "links", "then", "batchable")
+ENVELOPE_ARGS = ENVELOPE_PARAMS
 
 
 @dataclass(frozen=True)
