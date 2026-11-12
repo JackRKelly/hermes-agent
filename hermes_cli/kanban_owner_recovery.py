@@ -213,9 +213,15 @@ def reclaim_error(conn, task_id, claim_lock) -> str:
 
 
 def apply_attempt_note(conn, task_id, pid, dead) -> None:
-    """Fold the owner's own record of how the attempt ended into ONE dead worker's booking.
+    """Fold the owner's own record of how the attempt ended into ONE dead worker's booking:
+    its note (``_fold_owner_note``), then whether the owner gateway itself stopped the attempt
+    (``_apply_gateway_stop``)."""
+    _fold_owner_note(conn, task_id, pid, dead)
+    _apply_gateway_stop(conn, task_id, pid, dead)
 
-    A bound interpreter whose ``worker_result`` says exit 0 after its managed execution was
+
+def _fold_owner_note(conn, task_id, pid, dead) -> None:
+    """A bound interpreter whose ``worker_result`` says exit 0 after its managed execution was
     lost reads as a protocol violation. The owner's ``worker_lost`` evidence outranks it: the
     turn never finished, so it books as a crash and charges the breaker, and the
     protocol-violation streak (which reads the persisted payload) does not count it.
@@ -240,6 +246,46 @@ def apply_attempt_note(conn, task_id, pid, dead) -> None:
     from hermes_cli.kanban_db_dispatch import WORKER_OUTPUT_SEP
     head, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
     dead.error_text = f"{head} [{note}]{sep}{output}"
+
+
+def gateway_stop_cause(conn, task_id) -> str:
+    """The restart/shutdown cause the owner recorded when IT stopped this run's turn, else ``""``.
+
+    Either a ``worker_stopped`` event (the worker acknowledged the gateway's Stop and its turn
+    settled interrupted) or a ``worker_lost`` carrying ``stop_cause`` (the worker was terminated
+    after that Stop), recorded under the run's own (still current) claim.
+    """
+    row = conn.execute("SELECT claim_lock FROM tasks WHERE id=?", (task_id,)).fetchone()
+    claim_lock = row["claim_lock"] if row is not None else None
+    for kind, key in (("worker_stopped", "cause"), ("worker_lost", "stop_cause")):
+        event = _latest_run_event(conn, task_id, kind)
+        cause = event.get(key)
+        if cause and event.get("claim_lock") == claim_lock:
+            return str(cause)[:200]
+    return ""
+
+
+def _apply_gateway_stop(conn, task_id, pid, dead) -> None:
+    """Rebook a dead worker the gateway itself stopped (its own restart or shutdown) as a reclaim.
+
+    The interruption is the host's, not the card's: it never charges the breaker, never joins
+    the same-error systemic trip, and the card goes back to its source phase for a fresh attempt
+    in the same workspace. A rate-limit requeue stays one, and a terminal provider error keeps
+    its immediate block: those say something about the profile the next attempt would repeat.
+    """
+    if dead.rate_limited or dead.terminal_provider:
+        return
+    cause = gateway_stop_cause(conn, task_id)
+    if not cause:
+        return
+    from hermes_cli.kanban_db_dispatch import WORKER_OUTPUT_SEP
+    _, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
+    dead.gateway_stopped, dead.protocol_violation = True, False
+    dead.event_kind = "reclaimed"
+    dead.event_payload.pop("protocol_violation", None)
+    dead.event_payload.update(gateway_stop=cause, exit_kind=dead.kind)
+    dead.error_text = (f"pid {pid}: the gateway stopped this attempt ({cause}); "
+                       f"requeued without counting a failure{sep}{output}")
 
 
 def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False) -> bool:

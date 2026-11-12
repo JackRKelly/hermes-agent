@@ -1,9 +1,11 @@
-"""A Kanban worker never re-enters an owner's restart after-turn wait.
+"""A Kanban worker never re-enters an owner's restart after-turn wait, and outlives it.
 
-The wait cuts every socket opened before it so their clients go to the NEXT owner. A worker that
-redials into the wait and keeps polling ``prompt.receipt`` stays alive, so ``_watch_submitter``
-never ends the card's turn and the restart (``hermes update``) is held until
-``agent.restart_after_turn_timeout``. The wait still admits interactive clients (#139041).
+The wait cuts every socket opened before it so their clients go to the NEXT owner; the worker
+reads its card's receipt from that owner, never polling inside the wait. The wait holds the
+restart until its in-flight turns finish (up to ``agent.restart_after_turn_timeout``), so its
+``draining``/``restart_wait`` refusal is the owner answering: a worker that counted it as
+silence gave up after ``OWNER_WAIT_S`` and ended (``_watch_submitter``) the very turn the wait
+was holding for. The wait still admits interactive clients (#139041).
 """
 
 import asyncio
@@ -54,11 +56,18 @@ async def test_a_machine_client_is_refused_by_a_restart_wait_and_mints_no_ticket
 
 class _RestartingOwner:
     """First connection: the claim is admitted and pending, then the restart wait cuts the socket.
-    Every later dial lands in the wait, where the turn stays pending (its LLM call is held)."""
+    Later dials land in the wait (the turn stays pending in the old owner) until ``wait_s`` of the
+    worker's clock has passed; then the wait ends with the turn finished and the old owner gone.
+    ``next_owner``: a new owner answers from then on with the settled receipt; without one every
+    dial afterwards finds no owner at all."""
 
-    def __init__(self):
+    def __init__(self, clock, *, wait_s, next_owner=True, after=None):
+        self.clock, self.wait_s, self.next_owner = clock, wait_s, next_owner
+        self.after = after or (lambda: OSError("Connection refused"))
         self.dials = 0
+        self.last_refusal = -1.0
         self.receipts_in_wait = 0
+        self.receipts_after = 0
 
     def connect(self):
         owner = self
@@ -66,11 +75,15 @@ class _RestartingOwner:
         @asynccontextmanager
         async def _connect(*_, **__):
             owner.dials += 1
-            in_wait = owner.dials > 1
+            first = owner.dials == 1
+            in_wait = not first and owner.clock[0] < owner.wait_s
             # The verdict the real connect_gateway gives a restart-wait owner (tested above).
             refuse = getattr(gateway_client, "_REFUSE_RESTART_WAIT", None)
             if in_wait and refuse is not None and refuse.get():
+                owner.last_refusal = owner.clock[0]
                 raise GUE(f"Gateway draining: {RESTART_WAIT_REASON}", "draining", RESTART_WAIT_REASON)
+            if not first and not in_wait and not owner.next_owner:
+                raise owner.after()
 
             class _Client:
                 events = asyncio.Queue()
@@ -78,35 +91,84 @@ class _RestartingOwner:
                 async def rpc(self, method, **params):
                     if method == "kanban.run":
                         return {"session_id": "s1", "receipt": {"status": "pending", "admission_id": "a1"}}
-                    if not in_wait:
+                    if first:
                         raise gateway_client.GatewayClientError("Gateway disconnected; turn outcome is unknown")
-                    owner.receipts_in_wait += 1
-                    if owner.receipts_in_wait > 50:
-                        raise AssertionError("the worker keeps polling its card inside the restart wait")
-                    return {"status": "pending"}
+                    if in_wait:
+                        owner.receipts_in_wait += 1
+                        if owner.receipts_in_wait > 50:
+                            raise AssertionError("the worker keeps polling its card inside the restart wait")
+                        return {"status": "pending"}
+                    owner.receipts_after += 1
+                    return {"status": "terminal", "admission_id": "a1"}
 
             yield _Client()
 
         return _connect
 
 
-@pytest.mark.asyncio
-async def test_a_worker_cut_by_a_restart_wait_waits_outside_it(monkeypatch, tmp_path):
-    clock = [0.0]
-    monkeypatch.setattr(kanban_worker_client, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+@pytest.fixture
+def clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(kanban_worker_client, "time", SimpleNamespace(monotonic=lambda: now[0]))
 
     async def _sleep(seconds):
-        clock[0] += seconds
+        now[0] += seconds
     monkeypatch.setattr(kanban_worker_client.asyncio, "sleep", _sleep)
-    owner = _RestartingOwner()
+    return now
+
+
+@pytest.mark.asyncio
+async def test_a_worker_outlives_a_restart_wait_longer_than_its_silence_budget(monkeypatch, tmp_path, clock):
+    """The live failure: the restart wait held 9 card turns (cap 1800 s) and every worker gave up
+    ~186 s in ("owner silent ... Gateway draining: restart_wait"), which ended its own turn. A
+    restart_wait refusal is the owner answering: the worker waits the whole wait out, reads nothing
+    from the restarting owner, and takes its result from the next one."""
+    from gateway import session_kanban
+    owner = _RestartingOwner(clock, wait_s=10 * kanban_worker_client.OWNER_WAIT_S)
+    monkeypatch.setattr(gateway_client, "connect_gateway", owner.connect())
+    monkeypatch.setattr(session_kanban, "worker_result", lambda *_: {"exit_code": 0, "last_output": "card closed"})
+
+    assert await kanban_worker_client.run({"task_id": "t1"}, str(tmp_path / "kanban.db")) == 0
+    assert clock[0] >= owner.wait_s
+    assert owner.receipts_in_wait == 0 and owner.receipts_after == 1
+    # Backed off to the ceiling while held, not redialling every second for the whole wait.
+    assert owner.dials < owner.wait_s / 4
+
+
+@pytest.mark.asyncio
+async def test_an_owner_that_never_comes_back_after_the_wait_still_fails_the_worker(monkeypatch, tmp_path, clock):
+    """Silence is counted from the owner's LAST answer (its final restart_wait refusal), so a host
+    whose gateway never returns still fails the worker OWNER_WAIT_S after the wait ended."""
+    owner = _RestartingOwner(clock, wait_s=1000.0, next_owner=False)
     monkeypatch.setattr(gateway_client, "connect_gateway", owner.connect())
 
-    # The worker waits for the next owner without reading anything from the restarting one, and an
-    # owner that never comes back still fails it at OWNER_WAIT_S (which ends the turn it held).
     with pytest.raises(gateway_client.GatewayClientError, match="owner silent"):
         await kanban_worker_client.run({"task_id": "t1"}, str(tmp_path / "kanban.db"))
+    budget = kanban_worker_client.OWNER_WAIT_S
+    assert owner.last_refusal > owner.wait_s - 20  # the wait was ridden out to its end
+    assert owner.last_refusal + budget <= clock[0] < owner.last_refusal + budget + 20
     assert owner.receipts_in_wait == 0
-    assert owner.dials > 2
+
+
+@pytest.mark.asyncio
+async def test_a_service_manager_refusing_a_start_mid_restart_is_waited_out(monkeypatch, tmp_path, clock):
+    """Right after a restart, launchd's own relaunch races the worker's start request and
+    ``kickstart`` fails (``service_start_failed``): that is the restart, not a dead owner."""
+    from gateway import session_kanban
+    refusals = [GUE("Gateway inaccessible: service_start_failed", "inaccessible", "service_start_failed")] * 3
+    owner = _RestartingOwner(clock, wait_s=0.0, next_owner=False, after=refusals.pop)
+    real = owner.connect()
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        owner.next_owner = not refusals  # the relaunched owner is up once the refusals ran out
+        async with real(*args, **kwargs) as client:
+            yield client
+    monkeypatch.setattr(gateway_client, "connect_gateway", connect)
+    monkeypatch.setattr(session_kanban, "worker_result", lambda *_: {"exit_code": 0, "last_output": "card closed"})
+
+    assert await kanban_worker_client.run({"task_id": "t1"}, str(tmp_path / "kanban.db")) == 0
+    assert refusals == [] and owner.receipts_after == 1
 
 
 class _Attached(Exception):

@@ -549,12 +549,14 @@ def _stopped_before_spawn(authority, ref, row):
     return True
 
 
-def _record_lost_attempt(authority, policy, exc, reason, scope):
+def _record_lost_attempt(authority, policy, exc, reason, scope, stop_cause=None):
     """Start the board disposition (``worker_lost``) for a lost Kanban card attempt; the task, or None.
 
     A worker that dies in ``worker.adopt`` never writes ``worker_bound``/``worker_result``, so
     without it the card's run learns nothing from its own loss. A deliberate Stop or a
-    superseded generation is not a loss. Tracked, so retirement joins the write.
+    superseded generation is not a loss. ``stop_cause``: the gateway restart/shutdown Stop the
+    worker was sent first, carried so the loss books as the gateway's. Tracked, so retirement
+    joins the write.
     """
     if (not getattr(policy, 'kanban_json', None) or isinstance(exc, asyncio.CancelledError)
             or reason in ('managed_worker_stopped', 'stale_generation')):
@@ -562,7 +564,22 @@ def _record_lost_attempt(authority, policy, exc, reason, scope):
     from gateway.session_kanban import record_worker_loss
     from gateway.session_runtime_workers import track_mutation
     return track_mutation(authority, asyncio.to_thread(partial(record_worker_loss, policy, reason,
-                                                               pid=(scope or {}).get('pid'), bound=scope is not None)))
+                                                               pid=(scope or {}).get('pid'), bound=scope is not None,
+                                                               stop_cause=stop_cause)))
+
+
+async def _record_gateway_stop(authority, policy, accepted, worker, scope):
+    """A Kanban turn the gateway interrupted for its own restart/shutdown: note that on the card's
+    run before the turn settles (the submitter exits on the settled receipt), so the dispatcher
+    re-queues the card instead of booking the interruption as the card's crash."""
+    if not (accepted.get('interrupted') and worker.stop_cause and getattr(policy, 'kanban_json', None)):
+        return
+    from gateway.session_kanban import record_worker_stopped
+    from gateway.session_runtime_workers import track_mutation
+    recording = track_mutation(authority, asyncio.to_thread(partial(record_worker_stopped, policy, worker.stop_cause,
+                                                                    pid=scope['pid'])))
+    # A busy board holds the settlement up as long as a loss note's at most (the write carries on, tracked).
+    await asyncio.wait({recording}, timeout=LOSS_RECORD_WAIT_S)
 
 
 async def _settle_lost(authority, row, scope, recording):
@@ -704,6 +721,7 @@ async def execute_managed(authority, ref, row, policy):
                 with suppress(subprocess.TimeoutExpired):
                     await asyncio.to_thread(process.wait, 10)
                 accepted = _with_stop_cause(accepted, worker)
+                await _record_gateway_stop(authority, policy, accepted, worker, scope)
                 # Like in-process execution, settlement belongs to the drain's stream lock.
                 authority.pending_results[row['admission_id']] = {
                     'result': {**accepted, 'local_viewer': True}, 'usage': usage,
@@ -722,7 +740,8 @@ async def execute_managed(authority, ref, row, policy):
                 return _interrupted_before_bootstrap(authority, row, worker.stop_cause)
             _record_lost_attempt(authority, policy, exc, reason, scope)  # nothing bound: a late note is dropped, never misbooked
             raise
-        await _settle_lost(authority, row, scope, _record_lost_attempt(authority, policy, exc, reason, scope))
+        await _settle_lost(authority, row, scope,
+                           _record_lost_attempt(authority, policy, exc, reason, scope, worker.stop_cause))
         live = authority.sessions[ref.session_id]
         with live.event_stream.lock:
             live.controls.snapshot(ref.session_id, None)
