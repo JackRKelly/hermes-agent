@@ -166,19 +166,24 @@ def add_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
             raise ItemRefused(f"card {card} is {task.status}: items are added to a card you are running, "
                               "or a ready card you own; a parked card is changed with action_item_update")
         board = _board_slug(kb, args.get("board"))
-        _refuse_second_open_item(conn, board, task, env)
-        return _write(kb, conn, board, task, caller, env)
+        stale = _refuse_second_open_item(conn, board, task, env)
+        result = _write(kb, conn, board, task, caller, env)
+        return {**result, "stale_items": [s.as_dict() for s in stale]} if stale else result
 
 
-def _refuse_second_open_item(conn, board: str, task, env: dict) -> None:
+def _refuse_second_open_item(conn, board: str, task, env: dict) -> list:
     """One open item per artifact across every board and profile (Jack, Nov 12): another card's open
-    item for the same PR / email thread / conversation refuses this add before anything is written."""
-    from tools.action_item_dedupe import DuplicateItem, dedupe_key, open_item_for
+    item for the same PR / email thread / conversation refuses this add before anything is written.
+    A pr_merge holder parked at another head than this add's live head is stale: it is returned to
+    be reported, not left blocking the fresh head."""
+    from tools.action_item_dedupe import DuplicateItem, dedupe_key, open_items_for, split_holders
 
     key = dedupe_key(env["kind"], env["payload"], park_reason(env), board, task.id, env.get("title"))
-    existing = open_item_for(key, this_conn=conn, this_card=task.id)
-    if existing is not None:
-        raise DuplicateItem(existing)
+    head = env["payload"].get("head_sha") if env["kind"] == "pr_merge" else None
+    blocking, stale = split_holders(open_items_for(key, this_conn=conn, this_card=task.id), head)
+    if blocking:
+        raise DuplicateItem(blocking[0], requested_head=head)
+    return stale
 
 
 def _open_item(kb, conn, raw_id: Any, caller: Caller) -> tuple[ItemView, Any]:
