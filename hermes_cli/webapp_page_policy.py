@@ -1,4 +1,5 @@
-"""CSP for the browser-hosted Desktop, independently of its preview documents."""
+"""CSP for the served SPA document: the browser-hosted Desktop (Webapp), independently of its
+preview documents, and the dashboard."""
 
 import base64
 import hashlib
@@ -31,10 +32,26 @@ class _ScriptHashes(HTMLParser):
             self.script = None
 
 
+def _dashboard_headers(html: str, headers: dict) -> dict:
+    """Script execution only: the dashboard is one SPA document, so this covers every route and
+    plugin page in it. Styles, fetches and images stay unrestricted (inline theme ``<style>``,
+    plugin CSS, chat sockets); same-origin plugin bundles load under ``'self'``."""
+    hashes = " ".join(_ScriptHashes(html).hashes)
+    policy = "; ".join((
+        f"script-src 'self' {hashes}",
+        "script-src-attr 'none'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+    ))
+    return {**headers, "Content-Security-Policy": policy, "X-Content-Type-Options": "nosniff"}
+
+
 def page_headers(request: Request, html: str, headers: dict) -> dict:
-    """Only gateway-served Webapp HTML gets this policy; native Desktop is not served here."""
+    """Gateway-served Webapp HTML gets the full policy, every other SPA document the dashboard's
+    script policy; native Desktop is not served here."""
     if getattr(request.app.state, "ui_surface", None) != "webapp":
-        return headers
+        return _dashboard_headers(html, headers)
     hashes = " ".join(_ScriptHashes(html).hashes)
     # Keep fetch and media sources open for voice, catalogs, Radio, update notes,
     # and local servers or sockets behind a Host-rewriting proxy.

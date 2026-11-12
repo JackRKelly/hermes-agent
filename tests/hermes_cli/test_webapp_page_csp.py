@@ -99,8 +99,3 @@ def test_every_spelling_of_the_entry_document_gets_the_policy(page, tmp_path, pa
     assert response.status_code == 200
     assert "'sha256-" in response.headers["content-security-policy"]
     assert "__HERMES_BASE_PATH__" in response.text
-
-
-def test_dashboard_keeps_its_existing_document_headers(page):
-    page.state.ui_surface = "dashboard"
-    assert "content-security-policy" not in TestClient(page).get("/").headers
