@@ -61,15 +61,24 @@ def diagnostic_event(ev) -> bool:
 
 # A block parked for Jack (an Action Item or a tagged decision) is delivered by the Action Items
 # queue, never by a chat ping or a wake turn: posting the reason would put the question itself in
-# a topic. Untagged needs_input blocks are not parks and still notify (orchestrator triage).
-_JACK_PARK_RE = re.compile(r"\[needs-jack[\]:]|\[decision\]|\[awaiting-approval:|\[action-item:", re.IGNORECASE)
+# a topic. The test is the one Action Items uses to put a block in Jack's queue (assistant
+# scripts/kanban_gates.py ``block_owner``): an approval gate, or a FIRST owner tag that is Jack's.
+# Anything else (a [captain:..] or [hold:..] block quoting a Jack tag, an untagged needs_input
+# block) still notifies, so no block is withheld here without landing in Jack's queue.
+_APPROVAL_GATE_RE = re.compile(r"\[awaiting-approval:[a-z-]+\]")
+_OWNER_TAG_RE = re.compile(r"\[(?P<owner>needs-jack|decision|captain|hold)(?::[\w-]+)?\]", re.IGNORECASE)
+_JACK_OWNER_TAGS = frozenset({"needs-jack", "decision"})
 
 
 def jack_park_event(ev) -> bool:
     """True for a ``blocked`` / ``block_loop_detected`` event whose reason parks the card for Jack."""
     if ev.kind not in {"blocked", "block_loop_detected"}:
         return False
-    return bool(_JACK_PARK_RE.search(str((ev.payload or {}).get("reason") or "")))
+    reason = str((ev.payload or {}).get("reason") or "")
+    if _APPROVAL_GATE_RE.search(reason):
+        return True
+    owner = _OWNER_TAG_RE.search(reason)
+    return bool(owner) and owner["owner"].lower() in _JACK_OWNER_TAGS
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
 # API outage must not permanently unsubscribe a live review-gate channel.

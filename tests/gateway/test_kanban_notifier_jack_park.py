@@ -60,7 +60,8 @@ def _runner(adapter):
     return runner
 
 
-def _card_with_event(kind, payload):
+def _card_with_event(kind, payload, *more):
+    """A card with a notify+wake topic sub and the events ``(kind, payload), *more`` in order."""
     conn = kbc.connect()
     try:
         task_id = kb.create_task(conn, title="receiving live status", assignee="engineering",
@@ -68,7 +69,8 @@ def _card_with_event(kind, payload):
         kbn.add_notify_sub(conn, task_id=task_id, platform="telegram", chat_id="chat-1", thread_id="topic-7",
                            chat_type="thread", delivery_mode="notify+wake",
                            delivery_metadata={"thread_id": "topic-7", "chat_type": "thread"})
-        kb._append_event(conn, task_id, kind=kind, payload=payload)
+        for ev_kind, ev_payload in ((kind, payload), *more):
+            kb._append_event(conn, task_id, kind=ev_kind, payload=ev_payload)
         return task_id
     finally:
         conn.close()
@@ -131,12 +133,32 @@ def test_routing_block_still_pings_and_wakes(tmp_path, monkeypatch, wake_spy):
     assert _unseen(task_id) == []
 
 
+def test_park_then_later_untagged_block_pings_only_the_later_block(tmp_path, monkeypatch, wake_spy):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "mixed.db"))
+    kb.init_db()
+    task_id = _card_with_event("block_loop_detected", PARKED_PAYLOAD,
+                               ("blocked", {"reason": "worker crashed twice on the receiving migration",
+                                            "kind": "needs_input"}))
+    adapter = RecordingAdapter()
+
+    asyncio.run(_run_one_tick(monkeypatch, _runner(adapter)))
+
+    assert len(adapter.sent) == 1
+    assert "worker crashed twice" in adapter.sent[0]["text"]
+    assert "Which fix should the crew build" not in adapter.sent[0]["text"]
+    assert len(wake_spy) == 1 and "Which fix should the crew build" not in (wake_spy[0] or "")
+    assert _unseen(task_id) == []
+
+
 @pytest.mark.parametrize("kind,reason,parked", [
     ("blocked", "[needs-jack] pick one", True),
     ("blocked", "[Needs-Jack:approval] ok?", True),
     ("blocked", "[decision] Consult Jack: which plan", True),
-    ("block_loop_detected", "[AWAITING-APPROVAL:pr_merge] merge #5", True),
-    ("blocked", "[action-item:other] do the thing", True),
+    ("blocked", "[decision:scope] option A or B?", True),
+    ("block_loop_detected", "[awaiting-approval:merge] merge #5 sha=abc", True),
+    ("blocked", "[captain:routing] re-parked; Jack already answered the [needs-jack:decision] item", False),
+    ("blocked", "[hold:jack] waiting on vendor, see [decision] note", False),
+    ("blocked", "push failed after posting the [action-item:v1] comment", False),
     ("blocked", "worker needs input: which branch?", False),
     ("blocked", "[needs-jackson] unrelated tag", False),
     ("changes_requested", "[needs-jack] review", False),
