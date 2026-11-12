@@ -116,8 +116,8 @@ def check_banned(text: str, where: str, example: str) -> None:
     hit = banned_token(text)
     if hit:
         raise fix(where, f'contains {hit[0]} ({hit[1]!r}); raw tags, park fields, card ids, local '
-                         f"paths, em dashes and board jargon are not shown to Jack, say it in plain words. {STYLE_HINT}",
-                  example)
+                         "paths, em dashes and board jargon are not shown to Jack, say it in plain words. "
+                         + STYLE_HINT, example)
 
 
 # A local path as the Action Items app finds one in item text (JackRKelly/assistant
