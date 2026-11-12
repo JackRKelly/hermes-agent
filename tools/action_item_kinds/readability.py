@@ -111,9 +111,12 @@ def check_chars(text: str, limit: int, where: str, example: str) -> None:
         raise fix(where, f"{len(text)} chars, max {limit}", example)
 
 
+TOP_LEVEL = "a top-level parameter beside kind and payload, never a payload field"
+
+
 def _required_line(value: Any, where: str, rule: str, example: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise fix(where, f"required, {rule}", example)
+        raise fix(where, f"required ({TOP_LEVEL}), {rule}", example)
     if "\n" in value or "\r" in value:
         raise fix(where, f"must be one line ({rule})", example)
     return value
@@ -132,7 +135,7 @@ def check_title(value: Any, where: str = "title") -> None:
 def check_summary(value: Any, where: str = "summary") -> None:
     rule = f"1-{SUMMARY_MAX_SENTENCES} sentences and at most {SUMMARY_MAX_CHARS} chars"
     if not isinstance(value, str) or not value.strip():
-        raise fix(where, f"required, {rule}", EXAMPLE_SUMMARY)
+        raise fix(where, f"required ({TOP_LEVEL}), {rule}", EXAMPLE_SUMMARY)
     check_banned(value, where, EXAMPLE_SUMMARY)
     count = sentences(value)
     if count > SUMMARY_MAX_SENTENCES:

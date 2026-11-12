@@ -229,6 +229,26 @@ def test_title_and_summary_are_required_by_the_tool_schema(board, monkeypatch):
     assert "title: required" in out["error"] and card_state(tid)[1] == []
 
 
+def test_title_and_summary_inside_payload_are_refused_with_where_they_go(board, monkeypatch):
+    """An agent that put the card's title and summary in payload is told they are top-level
+    parameters, and the same call with them moved up parks."""
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    phone = "+1512" + "5550199"  # fictional E.164 number
+    payload = {"channel": "sms", "account": "this-mac", "conversation_id": f"SMS;-;{phone}",
+               "contact": {"handle": phone}, "recipients": [{"handle": phone}],
+               "last_messages": [{"from": "them", "at": "2026-11-10T09:00:00-06:00", "text": "eta?"}],
+               "last_inbound_at": "2026-11-10T09:00:00-06:00", "draft_text": "On my way", "draft_ref": None}
+    rest = {"kind": "send_message", "ask": "Send this text?", "why": "They asked for an ETA.",
+            "risk": {"level": "low", "note": "One text."}}
+    refused = call("action_item_add", payload={**payload, **HUMAN}, **rest)
+    assert "['summary', 'title'] are top-level parameters of the call beside kind and payload" in refused["error"]
+    missing = call("action_item_add", payload=payload, **rest)
+    assert "title: required (a top-level parameter beside kind and payload" in missing["error"]
+    assert card_state(tid)[1] == []
+    assert call("action_item_add", payload=payload, **HUMAN, **rest)["ok"]
+
+
 def test_a_multi_question_decision_parks_and_reads_back_trusted(board, monkeypatch):
     tid, run_id = make_card("engineering", claim=True)
     as_worker(monkeypatch, "engineering", tid, run_id)

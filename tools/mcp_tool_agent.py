@@ -207,9 +207,12 @@ def reprobe_tool_availability() -> None:
 
 def tool_pin_version() -> str:
     """The code identity a tools[] pin was built by (checkout/build sha, else the release version).
-    Cached per process: an updated checkout only reaches a process through a restart."""
+    Cached per process: an updated checkout only reaches a process through a restart.
+    ``version_info`` is the live resolver; ``build_info.get_code_identity`` is a frozen old-updater
+    shim that never knows the sha, and keyed on it every build of one release read as the same code,
+    so a restarted gateway restored a pre-update session's stale tool schemas byte for byte."""
     from hermes_cli import __version__
-    from hermes_cli.build_info import get_code_identity
+    from hermes_cli.version_info import get_code_identity
     identity = get_code_identity()
     return identity.get("sha") or identity.get("version") or __version__
 
