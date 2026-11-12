@@ -61,9 +61,17 @@ dashboard completion. It reads classic branch protection and active ruleset
 required contexts, paginates exact-head check runs and legacy statuses, then
 re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
 required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
-neutral **required** evidence cannot complete the card. Neither can zero-run
-acceptance, unreadable policy or GitHub API failures. A repository without required
-checks needs a local-only contract. `gh` must be authenticated with read access to
+neutral **required** evidence cannot complete the card. Neither can unreadable
+policy or GitHub API failures (5xx and network errors fail closed).
+
+When the base branch has no required checks (no rulesets, no classic protection),
+every check run and latest legacy status at the exact head must be `success`
+instead. Private repositories on GitHub's free plan answer the REST rules endpoint
+with 403/404; that counts as "no rulesets" only after GraphQL confirms the
+repository has none, otherwise the card stays refused. Zero checks at the head are
+accepted only when no enabled workflow can run there: none whose file is in the head
+commit, and no GitHub-managed `dynamic/` workflow such as CodeQL. Otherwise the card
+waits for CI. `gh` must be authenticated with read access to
 the repository's checks and rules; no remote writes are performed by this gate.
 Acceptance reads run as the **assignee profile's** `gh` login — its `GH_TOKEN` /
 `GH_CONFIG_DIR` from the profile's own `.env`, never the ambient login of the

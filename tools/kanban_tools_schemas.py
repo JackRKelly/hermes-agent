@@ -499,7 +499,8 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "completion_contract": _prop("string", (
             "Declare at creation: local-only (default), OWNER/REPO for PR publication, or an exact GitHub PR URL. "
-            "PR tasks cannot complete until repository-required exact-head CI passes. On publication pass metadata.published_pr."
+            "PR tasks cannot complete until exact-head CI passes (the repository's required checks, or every check when none are required). "
+            "On publication pass metadata.published_pr."
         )),
         "goal_max_turns": _prop("integer", (
                 "Turn budget for goal_mode workers. Caps how many "
