@@ -68,3 +68,12 @@ def test_a_pin_from_this_build_keeps_its_bytes(monkeypatch):
     _mcp_agent.restore_agent_tool_prefix(agent, {"version": NEW_BUILD, "tools": [sent_before]})
 
     assert agent.tools == [sent_before]
+
+
+def test_without_a_sha_the_pin_is_the_release(monkeypatch):
+    """No stamp and no git: the resolver reports version "unknown"; keying on that would never move."""
+    monkeypatch.setattr("hermes_cli.version_info.get_code_identity",
+                        lambda refresh=False: {"sha": None, "short_sha": None, "version": "unknown",
+                                               "source": "unknown", "commit_date": None})
+
+    assert _mcp_agent.tool_pin_version() == __version__
