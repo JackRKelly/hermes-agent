@@ -57,6 +57,19 @@ def diagnostic_event(ev) -> bool:
     if ev.kind in {"blocked", "block_loop_detected"}:
         return (ev.payload or {}).get("kind") != "needs_input"
     return ev.kind == "status" and (ev.payload or {}).get("status") in {"blocked", "triage"}
+
+
+# A block parked for Jack (an Action Item or a tagged decision) is delivered by the Action Items
+# queue, never by a chat ping or a wake turn: posting the reason would put the question itself in
+# a topic. Untagged needs_input blocks are not parks and still notify (orchestrator triage).
+_JACK_PARK_RE = re.compile(r"\[needs-jack[\]:]|\[decision\]|\[awaiting-approval:|\[action-item:", re.IGNORECASE)
+
+
+def jack_park_event(ev) -> bool:
+    """True for a ``blocked`` / ``block_loop_detected`` event whose reason parks the card for Jack."""
+    if ev.kind not in {"blocked", "block_loop_detected"}:
+        return False
+    return bool(_JACK_PARK_RE.search(str((ev.payload or {}).get("reason") or "")))
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
 # API outage must not permanently unsubscribe a live review-gate channel.
@@ -745,7 +758,23 @@ class _KanbanNotification:
                 return False
         return True
 
+    def _withhold_jack_parks(self) -> bool:
+        """Drop Jack-park events from the batch (no ping, no wake); True when nothing is left to deliver.
+
+        Withheld, not deferred: the claim still settles, so a parked event is never re-sent.
+        """
+        parked = [ev.id for ev in self.d["events"] if jack_park_event(ev)]
+        if not parked:
+            return False
+        logger.info("kanban notifier: withheld Jack-park event(s) %s for %s on %s/%s",
+                    parked, self.task_id, self.platform_str, self.sub["chat_id"])
+        self.d = {**self.d, "events": [ev for ev in self.d["events"] if not jack_park_event(ev)]}
+        return not self.d["events"]
+
     async def deliver(self) -> None:
+        if self._withhold_jack_parks():
+            await self.advance()
+            return
         try:
             self.plat = self.platform_cls(self.platform_str)
         except ValueError:
