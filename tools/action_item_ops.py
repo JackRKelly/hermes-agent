@@ -165,7 +165,20 @@ def add_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
         if task.status not in ADDABLE_STATUSES or (task.status == "running" and caller.env_task != card):
             raise ItemRefused(f"card {card} is {task.status}: items are added to a card you are running, "
                               "or a ready card you own; a parked card is changed with action_item_update")
-        return _write(kb, conn, _board_slug(kb, args.get("board")), task, caller, env)
+        board = _board_slug(kb, args.get("board"))
+        _refuse_second_open_item(conn, board, task, env)
+        return _write(kb, conn, board, task, caller, env)
+
+
+def _refuse_second_open_item(conn, board: str, task, env: dict) -> None:
+    """One open item per artifact across every board and profile (Jack, Nov 12): another card's open
+    item for the same PR / email thread / conversation refuses this add before anything is written."""
+    from tools.action_item_dedupe import DuplicateItem, dedupe_key, open_item_for
+
+    key = dedupe_key(env["kind"], env["payload"], park_reason(env), board, task.id, env.get("title"))
+    existing = open_item_for(key, this_conn=conn, this_card=task.id)
+    if existing is not None:
+        raise DuplicateItem(existing)
 
 
 def _open_item(kb, conn, raw_id: Any, caller: Caller) -> tuple[ItemView, Any]:
