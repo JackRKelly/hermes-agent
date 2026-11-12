@@ -61,6 +61,19 @@ _KIND_PAYLOADS = (
     "user_task: {steps: [...], where}. other: {title, body, links?}. A refusal names the field, the rule "
     "and a conforming example: fix it and call again once."
 )
+# Jack, Nov 12 (JackRKelly/assistant docs/action-items-card-guide.md section 7): how the texts he reads
+# are written, and the one place a local path may appear.
+_WRITING = (
+    " Writing for Jack (ask, why, risk.note, body, steps, effects, rec_reason): name PRs and Linear "
+    "issues inline as #n, owner/repo#n or CYB-n (the app links them in place; never paste their URLs); "
+    "wrap commands, env var names (`REDIS_PUBLIC_URL`), Redis/SQL keywords (`KEYS`, `FLUSH`, `EVAL`, "
+    "`CONFIG`, `SELECT`), file names and identifiers in backticks; put a multi-step command in a fenced "
+    "block with its language (```bash, sql, redis, json, ts or python); write steps as `1.` / `2.` lines. "
+    "Never print a local path: a file the card shows (a post's image, a screenshot) is named by its "
+    "path inside this card's own workspace (<kanban root>/kanban/workspaces/<card id>/) or LinkedIn "
+    "preview dir (<kanban root>/state/linkedin/previews/<card id>/) and the app embeds it; any other "
+    "local path is refused."
+)
 
 ACTION_ITEM_ADD_SCHEMA = {
     "name": "action_item_add",
@@ -77,7 +90,7 @@ ACTION_ITEM_ADD_SCHEMA = {
         "Re-adding the exact draft Jack already approved on this card returns carried_from and hands a "
         "send back to you instead of asking him again. On a card parked with a free-text gate for the "
         "same PR head or draft, the add replaces that park (migrated_from). "
-        + _KIND_PAYLOADS),
+        + _KIND_PAYLOADS + _WRITING),
     "parameters": {
         "type": "object",
         "properties": {

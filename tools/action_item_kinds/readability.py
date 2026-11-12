@@ -8,12 +8,20 @@ They are add-time rules: ``build_envelope`` (so ``action_item_add`` and ``action
 enforces them on every new item. An item stored before they existed still loads, so the read-time
 schemas only carry the hard length caps. Every refusal names the field, the rule, the offending
 token or length, a conforming example and the guide, so the calling agent can fix it in one retry.
+
+BANNED (mirrored by the app's adapter) refuses every local path in the title, summary, questions and
+option labels. The other texts Jack reads (ask, why, risk.note, an ``other`` body, steps, option
+effects, rec_reason) refuse a local path too, with one exception the app needs: a file inside the
+card's own workspace or LinkedIn preview dir, named by its path, which the app embeds. That
+exception depends on the card, so ``check_item_paths`` takes the card id the tool resolved.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 from tools.action_item_kinds.core import SchemaError
@@ -48,6 +56,12 @@ EXAMPLE_QUESTIONS = [
         {"key": "discard", "label": "Discard it", "recommended": True},
         {"key": "keep", "label": "Keep it", "recommended": False}]},
 ]
+
+# Jack, Nov 12: how text he reads is written. Every banned-content and local-path refusal repeats it,
+# and the action_item_add description carries the same rules (the guide's section 7).
+STYLE_HINT = ("Name PRs and Linear issues inline as #n, owner/repo#n or CYB-n (the app links them); wrap "
+              "commands, env var names, Redis/SQL keywords, file names and identifiers in backticks")
+
 
 def _literals(kind: str, *tokens: str) -> list[tuple[str, re.Pattern]]:
     return [(kind, re.compile(re.escape(t), re.IGNORECASE)) for t in tokens]
@@ -102,8 +116,104 @@ def check_banned(text: str, where: str, example: str) -> None:
     hit = banned_token(text)
     if hit:
         raise fix(where, f'contains {hit[0]} ({hit[1]!r}); raw tags, park fields, card ids, local '
-                         "paths, em dashes and board jargon are not shown to Jack, say it in plain words",
-                  example)
+                         "paths, em dashes and board jargon are not shown to Jack, say it in plain words. "
+                         + STYLE_HINT, example)
+
+
+# A local path as the Action Items app finds one in item text (JackRKelly/assistant
+# ``scripts/action_items_face.py`` PATH_RE): what it embeds when the path is inside the card's own
+# workspace, and otherwise blanks.
+PATH_RE = re.compile(r"(?:~|/Users|/private|/var|/tmp|/home|/opt)/\S+|\S*\.hermes/\S*")
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_WORD_START_RE = re.compile(r"[\s(\[{\"'`=<*]")
+_ALWAYS_LOCAL_RE = re.compile(r"/Users/|~/|/private/|\.hermes/", re.IGNORECASE)
+_PATH_EDGE = ".,;:()[]{}<>\"'`*"
+EXAMPLE_PLAIN_FILE = "the rollout report is attached to the card"
+
+
+def card_file_dirs(card: str) -> tuple[Path, Path]:
+    """The two places a card may name a file it shows (the app embeds an image named by its path):
+    its own kanban workspace and its LinkedIn preview dir, under the shared board root."""
+    from hermes_cli.kanban_db import kanban_home
+
+    root = kanban_home()
+    return root / "kanban" / "workspaces" / card, root / "state" / "linkedin" / "previews" / card
+
+
+def _inside(raw: str, dirs: tuple[Path, ...]) -> bool:
+    """Lexical: ``raw`` (``~`` expanded, ``..`` folded) names something below one of ``dirs``. The
+    agent's path is never touched on disk; the app resolves symlinks itself before it serves a file."""
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        return False
+    path = Path(os.path.normpath(expanded))
+    roots = {Path(os.path.normpath(d)) for d in dirs} | {d.resolve() for d in dirs}
+    return any(path != d and path.is_relative_to(d) for d in roots)
+
+
+def foreign_local_path(text: str, card: Optional[str]) -> Optional[str]:
+    """The first local path in ``text`` that is not a file inside ``card``'s own workspace or
+    LinkedIn preview dir, else None. With no card every local path is foreign. A path inside a URL
+    is part of the URL, not a local path."""
+    urls = [m.span() for m in _URL_RE.finditer(text)]
+    dirs = card_file_dirs(card) if card else ()
+    for match in PATH_RE.finditer(text):
+        if any(start <= match.start() < end for start, end in urls):
+            continue
+        # "src/home/page.tsx" is a repo path, not /home; a home or Hermes path is local wherever it sits.
+        mid_word = match.start() > 0 and not _WORD_START_RE.match(text[match.start() - 1])
+        if mid_word and not _ALWAYS_LOCAL_RE.search(match.group(0)):
+            continue
+        raw = match.group(0).strip(_PATH_EDGE)
+        if not raw or not (dirs and _inside(raw, dirs)):
+            return raw or match.group(0)
+    return None
+
+
+def check_local_paths(text: Any, where: str, card: Optional[str]) -> None:
+    """Refuse a local path Jack would see printed; a file inside the card's own workspace or LinkedIn
+    preview dir is the one exception, because the app replaces that path with the file itself."""
+    if not isinstance(text, str):
+        return
+    raw = foreign_local_path(text, card)
+    if raw is None:
+        return
+    if card:
+        workspace, previews = card_file_dirs(card)
+        allowed = (f"only a file inside this card's own workspace ({workspace}/) or LinkedIn preview dir "
+                   f"({previews}/) may be named by its path, and the app embeds it")
+        example: str = f"Image: {workspace}/post-image.png"
+    else:
+        allowed = "only a file inside the card's own workspace may be named, and this call names no card"
+        example = EXAMPLE_PLAIN_FILE
+    raise fix(where, f"contains a local path ({raw!r}) Jack would see printed; {allowed}. Otherwise say "
+                     f"it in plain words. {STYLE_HINT}", example)
+
+
+# Each kind's payload texts Jack reads, beside ask, why and risk.note (title, summary, questions and
+# option labels already refuse every local path through BANNED). A send's draft is the message itself.
+def _payload_texts(kind: str, payload: dict) -> list[tuple[str, Any]]:
+    if kind == "other":
+        return [("payload.title", payload.get("title")), ("payload.body", payload.get("body"))]
+    if kind == "user_task":
+        steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+        return [(f"payload.steps[{i}]", s) for i, s in enumerate(steps)] + [("payload.where", payload.get("where"))]
+    if kind == "design_decision":
+        texts: list[tuple[str, Any]] = [("payload.rec_reason", payload.get("rec_reason"))]
+        questions = payload.get("questions") if isinstance(payload.get("questions"), list) else []
+        for i, q in enumerate(x for x in questions if isinstance(x, dict)):
+            options = q.get("options") if isinstance(q.get("options"), list) else []
+            texts += [(f"payload.questions[{i}].options[{j}].effect", o.get("effect"))
+                      for j, o in enumerate(o for o in options if isinstance(o, dict))]
+        return texts
+    return []
+
+
+def check_item_paths(kind: str, payload: dict, *, ask: Any, why: Any, risk: Any, card: Optional[str]) -> None:
+    """The add-time local-path rule on every human-facing text of a new item (Jack, Nov 12)."""
+    note = risk.get("note") if isinstance(risk, dict) else None
+    for where, text in [("ask", ask), ("why", why), ("risk.note", note), *_payload_texts(kind, payload)]:
+        check_local_paths(text, where, card)
 
 
 def check_chars(text: str, limit: int, where: str, example: str) -> None:

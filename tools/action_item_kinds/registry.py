@@ -45,10 +45,13 @@ def spec_for(kind: Any) -> KindSpec:
 
 def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: Any, why: Any, risk: Any,
                    deadline: Any = None, links: Any = None, then: Any = None, batchable: Any = None,
-                   sources: Optional[LiveSources] = None, hosts: Optional[Iterable[str]] = None) -> dict:
+                   sources: Optional[LiveSources] = None, hosts: Optional[Iterable[str]] = None,
+                   card: Optional[str] = None) -> dict:
     """A validated envelope from an agent's call: tool fields are filled by the kind's ``enrich``
     (reading the live source), never taken from the agent. The add-time readability rules
-    (``readability.py``) apply here only, so a stored item still reads. Raises ``SchemaError``."""
+    (``readability.py``) apply here only, so a stored item still reads. ``card`` is the card the item
+    parks on: its own workspace is the one place a text may name a file by path; with no card, every
+    local path is refused. Raises ``SchemaError``."""
     spec = spec_for(kind)
     if not isinstance(payload, dict):
         raise SchemaError("payload: must be an object")
@@ -61,6 +64,7 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
         raise SchemaError(f"payload: {tool_fields} are filled by the tool from the live source; "
                           f"pass only {sorted(spec.agent_fields)}{hint}")
     readability.check_new_envelope(title=title, summary=summary, risk=risk)
+    readability.check_item_paths(spec.kind, payload, ask=ask, why=why, risk=risk, card=card)
     if sources is None:
         from tools.action_item_kinds.github import GhSources
         sources = GhSources()
