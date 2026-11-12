@@ -280,10 +280,13 @@ def mount_spa(application: FastAPI):
         dist = web_dist()
         file_path = dist / full_path
         index = dist / "index.html"
-        if (not policy(application.state).html_token and file_path.is_file() and index.is_file()
-                and file_path.samefile(index)):
+        if file_path.is_file() and index.is_file() and file_path.samefile(index):
             # No spelling of the entry document may bypass bootstrap or policy.
-            return _serve_index(request, prefix)
+            if not policy(application.state).html_token:
+                return _serve_index(request, prefix)
+            # The dashboard serves the built file itself, still under the document policy.
+            from hermes_cli.webapp_page_policy import page_headers
+            return FileResponse(index, headers=page_headers(request, index.read_text(encoding="utf-8"), {}))
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
         if (
             full_path
