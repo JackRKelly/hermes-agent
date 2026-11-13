@@ -133,6 +133,7 @@ _TAG_RE = re.compile(r"\[[a-z-]+(?::[^\]\s]*)?\]", re.IGNORECASE)
 _REC_RE = re.compile(r"(?:^|(?<=\s))Rec(?:ommendation|ommended)?\s*:\s*(?P<rec>.*)$", re.IGNORECASE)
 # "keep or discard?", "UPS or FedEx for label buys?": the two words around an "or" of the question.
 _ALTERNATIVES_RE = re.compile(r"(?:^|(?<=[\s:,(]))([\w-]+),?\s+or\s+([\w-]+)(?=[\s?.,;:)]|$)", re.IGNORECASE)
+_DECISION_PARK_RE = re.compile(r"\[decision(?::[^\]\s]*)?\]", re.IGNORECASE)
 _APPROVE_WORDS = frozenset({"approve", "approved", "approval", "reject", "rejected"})
 
 
@@ -219,10 +220,18 @@ def legacy_questions(reason: str) -> Optional[dict]:
     alternatives. A question with no derivable option has ``options: []`` (a free-text answer).
     Never an approve-style option. ``source_text`` is the raw park for the Details view. This is a
     read-only projection, not an agent payload: it is never stored or hashed.
+
+    A ``[needs-jack:...]`` or ``[decision]`` park whose text says nothing needs Jack
+    (``readability.NO_OP_RE``) reads as no questions, so it never renders as answerable (nor as an
+    ``other`` with Approve).
     """
-    if not reason or not legacy.NEEDS_JACK_RE.search(reason):
+    if not reason:
         return None
     text = _clean(reason)
+    if (legacy.NEEDS_JACK_RE.search(reason) or _DECISION_PARK_RE.search(reason)) and rd.NO_OP_RE.search(text):
+        return {"questions": [], "source_text": reason}
+    if not legacy.NEEDS_JACK_RE.search(reason):
+        return None
     rec_match = _REC_RE.search(text)
     body = text[:rec_match.start()].strip() if rec_match else text
     rec_parts = [p.strip(" .") for p in rec_match["rec"].split(";")] if rec_match else []

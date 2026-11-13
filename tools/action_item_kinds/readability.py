@@ -266,6 +266,28 @@ def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
                              "\"OK for me to ...?\"", EXAMPLE_USER_TASK)
 
 
+# A decision that says there is nothing to decide (a stuck-work check that found nothing, Nov 13). The
+# same pattern as JackRKelly/assistant's; change both in the same pair of PRs.
+NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.I)  # noqa: E501
+NO_OP_PROBLEM = ("This says nothing needs Jack: complete the card with a one-line summary instead, or tag it "
+                 "[captain:<topic>] for Captain triage")
+
+
+def check_no_op(kind: str, payload: dict, *, title: Any, summary: Any, ask: Any, why: Any) -> None:
+    """Refuse a ``design_decision`` whose own text says nothing needs Jack: there is nothing to answer."""
+    if kind != "design_decision":
+        return
+    texts = [("title", title, EXAMPLE_TITLE), ("summary", summary, EXAMPLE_SUMMARY), ("ask", ask, EXAMPLE_QUESTION),
+             ("why", why, EXAMPLE_SUMMARY), ("payload.rec_reason", payload.get("rec_reason"), EXAMPLE_REC_REASON)]
+    questions = payload.get("questions")
+    for i, q in enumerate(questions if isinstance(questions, list) else []):
+        if isinstance(q, dict):
+            texts.append((f"payload.questions[{i}].question", q.get("question"), EXAMPLE_QUESTION))
+    for where, text, example in texts:
+        if isinstance(text, str) and NO_OP_RE.search(text):
+            raise fix(where, NO_OP_PROBLEM, example)
+
+
 def check_chars(text: str, limit: int, where: str, example: str) -> None:
     if len(text) > limit:
         raise fix(where, f"{len(text)} chars, max {limit}", example)
