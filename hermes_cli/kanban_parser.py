@@ -386,6 +386,7 @@ _SPECS = [
         _arg("--interval", type=float, default=0.5, help="Poll interval in seconds (default: 0.5)"),
     ], help="Live-stream task_events to the terminal (Ctrl+C to exit)"),
     _cmd("stats", [_json_flag()], help="Per-status + per-assignee counts + oldest-ready age"),
+    _cmd("health", [_json_flag()], help="Dispatch health: provider breakers, held-back counts, idle runs"),
     _cmd("notify-subscribe", [
         _TASK_ID,
         *_NOTIFY_TARGET,

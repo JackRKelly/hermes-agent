@@ -1146,6 +1146,25 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_health(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_db_health as kbh
+    with kbc.connect_closing() as conn:
+        doc = kbh.live_health(conn, kb.kanban_db_path())
+    if _json_out(args, doc):
+        return 0
+    for p in doc["providers"]:
+        print(f"provider {p['provider']}: {p['state']} ({p['reason']}) since {_fmt_ts(p['opened_at'])}"
+              f"{' resets ' + _fmt_ts(p['reset_at']) if p['reset_at'] else ''}; profiles {', '.join(p['profiles'])}")
+        if p["message"]:
+            print(f"  {p['message']}")
+    d = doc["dispatch"]
+    held = ", ".join(f"{k}={v}" for k, v in d["held_back"].items() if v) or "nothing"
+    print(f"ready spawnable {d['ready_spawnable']}, bad ticks {d['bad_ticks']}, held back: {held}")
+    for i in doc["idle"]:
+        print(f"idle {i['state']}: {i['task_id']} run {i['run_id']} ({i['profile']}) {i['idle_seconds']}s")
+    return 0
+
+
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
     delivery_metadata = {
         key: value
@@ -1326,6 +1345,7 @@ _HANDLERS = {
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
     "daemon": _cmd_daemon, "watch": _cmd_watch, "stats": _cmd_stats,
+    "health": _cmd_health,
     "log": _cmd_log, "runs": _cmd_runs, "heartbeat": _cmd_heartbeat,
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,

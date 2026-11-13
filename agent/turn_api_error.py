@@ -372,6 +372,11 @@ def settle_unrecovered_error(
         logger.info("%sFree-tier cooldown outlasts the attended wait — ending retries after attempt %s",
                     agent.log_prefix, retry_count)
         retry_count = max_retries
+    if is_rate_limited and retry_count < max_retries:
+        from agent.kanban_turn_recovery import quota_wait_ends_turn
+        if quota_wait_ends_turn(api_error, error_context):  # free the slot now: exit 75, requeue
+            logger.info("%sKanban worker: rate-limit wait exceeds 60s, ending retries", agent.log_prefix)
+            retry_count = max_retries
     if retry_count >= max_retries:
         # Before fallback, rebuild the primary client once per API call block for
         # transient transport errors (stale pool, TCP reset).

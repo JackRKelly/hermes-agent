@@ -776,6 +776,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
                 conn.executescript(_kb.SCHEMA_SQL)
+                from hermes_cli.kanban_db_provider_breaker import BREAKER_SCHEMA_SQL
+                conn.executescript(BREAKER_SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 _INITIALIZED_PATHS.add(resolved)
 

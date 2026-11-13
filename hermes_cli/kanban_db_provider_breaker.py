@@ -404,6 +404,23 @@ def observe_dead_worker(conn: sqlite3.Connection, row, dead, *, board: Optional[
     )
 
 
+def rebook_tripped(conn: sqlite3.Connection, sweep):
+    """A 78 booked earlier in the same sweep, before a later exit tripped its provider's breaker,
+    is provider-wide too: take it out of the crash accounting so ``_account_crashes`` does not park
+    its card (it is already back in its retry status with the failure uncounted)."""
+    kept = []
+    for detail in sweep.crash_details:
+        tid, dead = detail[0], detail[3]
+        row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (tid,)).fetchone() if dead.terminal_provider else None
+        if row is not None and row["assignee"] and _active(conn, row["assignee"]) is not None:
+            sweep.crashed.remove(tid)
+            sweep.rate_limited.append(tid)
+            continue
+        kept.append(detail)
+    sweep.crash_details = kept
+    return sweep
+
+
 # --------------------------------------------------------------------------- dispatch gate
 
 
@@ -466,6 +483,8 @@ def paused(conn: sqlite3.Connection, profile: str, now: Optional[int] = None, *,
 def take_probe(conn: sqlite3.Connection, profile: str, task_id: str, now: Optional[int] = None) -> bool:
     """Claim the half-open probe slot for ``task_id``; True when it may spawn (closed: always)."""
     now = int(time.time()) if now is None else int(now)
+    if _active(conn, profile) is None:
+        return True  # closed: no write transaction on the hot path
     with _write(conn):
         rec = _active(conn, profile)
         if rec is None:
