@@ -494,6 +494,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `on_kanban_worker_stale_claim` | Observer | After a TTL-expired claim is reclaimed; live-PID extensions don't fire. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `worker_pid`, `heartbeat_stale`, `retry_status` | Identifiers and claim metadata only. |
 | `on_kanban_task_updated` | Observer | After a committed task-field write outside the claim/complete/block lifecycle (assign, overrides, dashboard editors). Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `changed_fields` | `changed_fields` carries field names only, never values; the named title/body values in the board DB may contain user/project content. |
 | `on_kanban_dispatch_tick` | Observer | Once per dispatcher tick, strictly after the dispatch lock is released; idle and contended ticks fire too. Return ignored. | `board`, `profile_name`, `dry_run`, `outcome`, `result` | `result` is the tick's `DispatchResult` and carries task ids, assignees, and workspace paths. |
+| [`transform_kanban_notification`](#transform_kanban_notification) | Transform | In the gateway's Kanban notifier, once per event text ping about to be sent (events with a core message only; after blocks parked for the owner are withheld), off the event loop and timeout-bounded. First valid result wins, in registration order: a non-blank string or `{"text": ...}` replaces the ping; `""` or `{"silent": true}` sends nothing and uploads no artifacts, yet the event counts as delivered and is never re-sent; `None`, anything invalid, a raise or a timeout keeps `default_text`. Wake turns are unchanged. Shell hooks supported. | `event_kind`, `event_id`, `event_payload`, `task_id`, `board`, `task_title`, `task_assignee`, `task_status`, `run_summary`, `default_text`, `platform`, `chat_id`, `thread_id`, `notifier_profile`, `delivery_mode` | Task titles and the full run handoff may contain project/user content; the returned text is posted to the subscribed chat. |
 
 ---
 
@@ -1880,6 +1881,40 @@ Five additional observers (RFC #58548) extend the kanban family. All are observe
 - **`on_kanban_task_updated`** — after a committed task-field write outside the claim/complete/block lifecycle (`assign_task`, model/reasoning overrides, dashboard editors). Adds `changed_fields` — field names only, never values.
 - **`on_kanban_dispatch_tick`** — once per dispatcher tick, strictly after the dispatch lock is released, including idle and lock-contended ticks. Payload: `board`, `profile_name`, `dry_run`, `outcome`, `result`.
 
+### `transform_kanban_notification`
+
+Fires in the **gateway's Kanban notifier**, once for each event text ping it is about to send to a subscribed chat (`hermes kanban notify-subscribe`). It fires only for events that have a core message (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`, `status`, `review_requested`, `changes_requested`, `block_loop_detected`), and only when a text ping would really go out: blocks parked for the owner's queue are withheld before the hook runs, and wake-only subscriptions, non-push adapters and pings already sent never reach it. The wake turn that `notify+wake` subscriptions start is not changed by this hook. The call runs off the gateway event loop and is bounded by `plugins.hook_callback_timeout`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event_kind` | `str` | The task event kind (`completed`, `blocked`, …). |
+| `event_id` | `int` | The task event id. |
+| `event_payload` | `dict` | A copy of the event payload (its `summary` is clipped near 400 characters). |
+| `task_id` | `str` | The card id. |
+| `board` | `str \| None` | The board slug. |
+| `task_title`, `task_assignee`, `task_status` | `str \| None` | The card's current title, assignee and status. |
+| `run_summary` | `str \| None` | The **full** handoff summary of the event's run (`task_runs`) when the event belongs to a run, else the task result. |
+| `default_text` | `str` | The ping Hermes would send without the hook. |
+| `platform`, `chat_id`, `thread_id` | `str \| None` | The subscription's destination. |
+| `notifier_profile` | `str \| None` | The profile the subscription is stamped with. |
+| `delivery_mode` | `str` | `notify` or `notify+wake`. |
+
+**Return value** (first valid result wins, in registration order):
+
+| Python plugin | Shell hook stdout | Effect |
+|---|---|---|
+| non-blank `str`, or `{"text": "..."}` | `{"text": "..."}` | Replaces the ping text. |
+| `""`, or `{"silent": true}` | `{"silent": true}` | No text ping and no artifact upload for this event. The event still counts as delivered: it is never re-sent. |
+| `None`, anything else, a raise or a timeout | empty, non-JSON or any other JSON | The ping goes out with `default_text`. Invalid results are logged once. |
+
+**Which profile's hooks run.** Plugin managers and shell hooks are per profile home, not process-global. On a multiplexed gateway the ping is transformed inside the subscription's profile scope, so a subscription stamped `notifier_profile: engineering` runs the `engineering` profile's plugins and the `hooks:` block in `profiles/engineering/config.yaml`, which the gateway registers for every served profile. A gateway that is not multiplexed, and a subscription with no `notifier_profile`, use the profile the gateway was launched with.
+
+```yaml
+hooks:
+  transform_kanban_notification:
+    - command: "~/.hermes/agent-hooks/card_ping.py"
+```
+
 ---
 
 ## Shell Hooks
@@ -1984,6 +2019,10 @@ The same field is included by the shared outbound-webhook payload builder.
 // Keep the agent going at the verify gate (pre_verify); both shapes accepted:
 {"action": "continue", "message": "Run the formatter, then finish."}
 {"decision": "block",  "reason":  "Run the formatter, then finish."}
+
+// Rewrite or drop a Kanban card ping (transform_kanban_notification):
+{"text": "✅ Fix the receiving status — done"}
+{"silent": true}
 
 // Silent no-op — any empty / non-matching output is fine:
 ```

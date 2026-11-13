@@ -680,8 +680,17 @@ def _parse_pre_llm_call(data: dict[str, Any]) -> Optional[dict[str, Any]]:
     return _parse_context(data)
 
 
+def _parse_transform_kanban_notification(data: dict[str, Any]) -> Optional[dict[str, Any]]:
+    # {"silent": true} drops the ping; {"text": "..."} replaces it; anything else keeps the default.
+    if data.get("silent") is True:
+        return {"silent": True}
+    text = data.get("text")
+    return {"text": text} if isinstance(text, str) and text.strip() else None
+
+
 _RESPONSE_PARSERS: dict[str, Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = {
     "pre_tool_call": _parse_pre_tool_call, "pre_verify": _parse_pre_verify, "pre_llm_call": _parse_pre_llm_call,
+    "transform_kanban_notification": _parse_transform_kanban_notification,
 }
 
 
