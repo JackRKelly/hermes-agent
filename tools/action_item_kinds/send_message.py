@@ -10,7 +10,7 @@ come from a full read: ``_check_slack_current`` re-reads the thread and the chan
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Iterable, Optional
 
 from tools.action_item_kinds.core import EMAIL_RE, SchemaError, prefixed_hash
@@ -152,7 +152,7 @@ def _epoch(iso: str) -> float:
 
 
 def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+    return datetime.fromtimestamp(ts, UTC).isoformat(timespec="seconds")
 
 
 def _who(message: dict) -> str:

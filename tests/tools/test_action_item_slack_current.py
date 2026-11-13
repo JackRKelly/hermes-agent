@@ -8,7 +8,7 @@ message, from anyone, is missing; an unreadable conversation refuses too.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -26,7 +26,7 @@ CUSTOMER, TEAMMATE, JACK = "U01ANN", "U02BOB", "U03JACK"
 
 def iso(ts: float) -> str:
     """``at`` as an agent writes it: cut to the second, in Jack's offset."""
-    return datetime.fromtimestamp(int(ts), timezone.utc).astimezone().isoformat()
+    return datetime.fromtimestamp(int(ts), UTC).astimezone().isoformat()
 
 
 def msg(ts: float, user: str, text: str, **extra) -> dict:
@@ -45,8 +45,8 @@ class FakeSlack(LiveSources):
         self.reads.append((channel_id, thread_ts, oldest))
         if self.error:
             raise SourceUnavailable(self.error)
-        keep = lambda ms: [m for m in ms if float(m["ts"]) >= oldest]  # noqa: E731
-        return {"thread": keep(self.thread), "channel": keep(self.channel)}
+        return {"thread": [m for m in self.thread if float(m["ts"]) >= oldest],
+                "channel": [m for m in self.channel if float(m["ts"]) >= oldest]}
 
 
 ROOT_MSG = msg(ROOT, CUSTOMER, "Can we move the pickup to Thursday?", user_profile={"real_name": "Ann Customer"})
@@ -83,7 +83,7 @@ def test_a_thread_only_read_missing_a_newer_reply_is_refused():
         build(payload([entry(ROOT, "Can we move the pickup to Thursday?")]), slack)
     text = str(err.value)
     assert text.startswith("payload.last_messages: the Slack conversation has 1 message(s)")
-    assert f"Ann Customer ({CUSTOMER}) at {datetime.fromtimestamp(late, timezone.utc).isoformat(timespec='seconds')}" \
+    assert f"Ann Customer ({CUSTOMER}) at {datetime.fromtimestamp(late, UTC).isoformat(timespec='seconds')}" \
         in text and "in the thread" in text and '"Hello? Need an answer today"' in text
     assert "conversations.replies" in text and "conversations.history" in text
 
@@ -166,7 +166,6 @@ def test_the_tool_refuses_a_stale_slack_park_and_writes_nothing(monkeypatch, tmp
     from tests.tools.test_action_item_tools import as_worker, call, card_state, make_card
     from hermes_cli import kanban_db as kb
     from tools.registry import invalidate_check_fn_cache
-    import tools.action_item_tools  # noqa: F401  (registers the tools)
 
     home = tmp_path / ".hermes"
     home.mkdir()
