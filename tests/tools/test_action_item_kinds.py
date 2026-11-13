@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime
 
 import pytest
 
@@ -69,6 +70,15 @@ class FakePR(LiveSources):
 
     def github_merge_method(self, repo):
         return "squash"
+
+
+class SlackRead(LiveSources):
+    """The Slack conversation of ``message_payload()``: its one message, nothing newer."""
+
+    def slack_conversation(self, channel_id, thread_ts, oldest):
+        at = message_payload()["last_messages"][0]["at"]
+        return {"thread": [{"ts": f"{datetime.fromisoformat(at).timestamp():.6f}", "user": "U01ABCDEF"}],
+                "channel": []}
 
 
 ENVELOPE = {"title": "Merge: product page skeleton fix", "summary": "The product page never loads. This PR fixes it.",
@@ -212,7 +222,7 @@ def test_valid_items_of_every_kind_are_accepted():
     items = {
         "pr_merge": ({"repo": "o/r", "number": 1, "head_sha": "a" * 40}, FakePR()),
         "send_email": ({k: v for k, v in email_env()["payload"].items()}, None),
-        "send_message": (message_payload(), None),
+        "send_message": (message_payload(), SlackRead()),
         "design_decision": ({"rec_reason": "Cheaper.", "questions": [{"key": "q1", "question": "Refresh the 14 labels?",
             "options": [{"key": "now", "label": "Now", "effect": "Refresh today", "recommended": True},
                         {"key": "later", "label": "Later", "recommended": False}]}]}, None),
