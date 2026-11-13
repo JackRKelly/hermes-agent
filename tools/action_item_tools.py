@@ -59,7 +59,9 @@ _KIND_PAYLOADS = (
     "recommended}] with exactly one recommended and key \"other\" reserved, allow_other? (default true: Jack "
     f"may answer in his own words)}}], rec_reason? <={rd.REC_REASON_MAX_CHARS} chars}}. Several questions go in "
     "ONE item as questions[], never numbered in one question; Jack answers them, there is no approve. "
-    "user_task: {steps: [...], where}. other: {title, body, links?}. A refusal names the field, the rule "
+    "user_task: {steps: [...], where}: anything Jack does himself (run SQL or a command, sign in, click, pay), "
+    "answered Done. other: {title, body, links?}: only what an agent does after Jack approves. A refusal names "
+    "the field, the rule "
     "and a conforming example: fix it and call again once."
 )
 # Jack, Nov 12 (JackRKelly/assistant docs/action-items-card-guide.md section 7): how the texts he reads

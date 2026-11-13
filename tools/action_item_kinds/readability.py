@@ -216,6 +216,56 @@ def check_item_paths(kind: str, payload: dict, *, ask: Any, why: Any, risk: Any,
         check_local_paths(text, where, card)
 
 
+# Jack, Nov 13: "Run this SQL to pause two webhooks" was parked as ``other``, so the app offered Approve
+# for something Jack does himself. A task Jack performs is a ``user_task`` (Done / Can't do it); ``other``
+# and ``design_decision`` are for what an agent does once Jack approves or answers. Jack's own action
+# reads as an imperative at the start of the ask or title ("Run ...", "Please paste ...", "Can you sign
+# in ...") or as "mark this done"; "OK for me to run ...?" and "Should we run ...?" stay approvals.
+# Mirrored by JackRKelly/assistant ``scripts/action_items_face.py`` SELF_TASK_RE (the app's fallback).
+_SELF_VERBS = (r"run|paste|execute|click|upload|call|phone|pay|install|enter|"
+               r"sign(?:\s+(?:in|into|up|on))?|log\s*(?:in|into|on)")
+SELF_TASK_RE = re.compile(r"^\W*(?:(?:jack|please)\b[,:]?\s+)*(?:(?:can|could|will|would)\s+you\s+(?:please\s+)?)?"
+                          rf"(?P<verb>{_SELF_VERBS})\b", re.IGNORECASE)
+MARK_DONE_RE = re.compile(r"\bmark\s+(?:this|it)?\s*(?:as\s+)?done\b", re.IGNORECASE)
+# In an ``other`` body: an instruction to Jack ("... read-only. Paste the block below ...", "you need to
+# run ..."). "Paste" opens a sentence or a list item; nobody but Jack pastes.
+_BODY_SELF_RE = re.compile(rf"(?:^|(?<=[\n.!?:]))\s*(?:\d{{1,2}}[.)]\s+)?paste\b|"
+                           rf"\byou(?:'ll)?\s+(?:need\s+to|have\s+to|must|should)\s+(?:{_SELF_VERBS})\b",
+                           re.IGNORECASE)
+EXAMPLE_USER_TASK = {"kind": "user_task", "ask": "Run the pause SQL in prod, then mark done?", "payload": {
+    "steps": ["Open a prod Postgres session with write access",
+              "Run `UPDATE outbound_webhook_endpoint SET paused = true WHERE id IN (...) RETURNING id;`",
+              "Check it returns 2 rows"],
+    "where": "Prod Postgres write session"}}
+
+
+def self_task_hit(text: Any, *, lead: bool = True, body: bool = False) -> Optional[str]:
+    """The words in ``text`` that ask Jack to do something himself, else None: a leading imperative
+    (``lead``), "mark this done", and in a body an instruction to Jack (``body``)."""
+    if not isinstance(text, str):
+        return None
+    found = (lead and SELF_TASK_RE.search(text)) or MARK_DONE_RE.search(text) or (body and _BODY_SELF_RE.search(text))
+    return " ".join(found.group(0).split()).lstrip("0123456789.) ") if found else None
+
+
+def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
+    """Refuse an ``other`` or ``design_decision`` that asks Jack to perform the action himself: it is a
+    ``user_task``, so the app shows Done / Can't do it, never Approve (Jack, Nov 13)."""
+    if kind not in ("other", "design_decision"):
+        return
+    texts = [("ask", ask, False), ("title", title, False)]
+    if kind == "other":
+        texts += [("payload.title", payload.get("title"), False), ("payload.body", payload.get("body"), True)]
+    for where, text, body in texts:
+        hit = self_task_hit(text, lead=not body, body=body)
+        if hit:
+            raise fix(where, f"asks Jack to do it himself ({hit!r}); a task Jack performs (run or paste SQL or a "
+                             "command, sign in, click, upload, call, sign, pay, install) is kind=\"user_task\" "
+                             f"with steps[] and where, so the app shows Done, never kind=\"{kind}\" with "
+                             "Approve. Keep other for what an agent does after Jack approves, asked as "
+                             "\"OK for me to ...?\"", EXAMPLE_USER_TASK)
+
+
 def check_chars(text: str, limit: int, where: str, example: str) -> None:
     if len(text) > limit:
         raise fix(where, f"{len(text)} chars, max {limit}", example)

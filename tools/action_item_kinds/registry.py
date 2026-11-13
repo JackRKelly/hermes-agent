@@ -65,6 +65,7 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
                           f"pass only {sorted(spec.agent_fields)}{hint}")
     readability.check_new_envelope(title=title, summary=summary, risk=risk)
     readability.check_item_paths(spec.kind, payload, ask=ask, why=why, risk=risk, card=card)
+    readability.check_self_task(spec.kind, payload, ask=ask, title=title)
     if sources is None:
         sources = host_sources()
     full = spec.enrich(dict(payload), sources)
