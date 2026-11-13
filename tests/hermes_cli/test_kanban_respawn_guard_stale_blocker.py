@@ -1,7 +1,8 @@
-"""A quota/auth stamp left by an older run must not park a card whose latest run handed off (#119070).
+"""A quota/auth stamp left by an older run must not park a card whose later runs did not fail on it (#119070).
 
-The rate-limit requeue stamps ``tasks.last_failure_error`` with quota text and nothing on the
-handoff paths clears it, so ``check_respawn_guard`` must judge the stamp by the latest ended run.
+The rate-limit requeue stamps ``tasks.last_failure_error`` with quota text, and nothing on the handoff,
+stale-claim or reclaim paths rewrites it, so ``check_respawn_guard`` must judge the latest ended run's
+own error, not the column.
 """
 
 from __future__ import annotations
@@ -35,8 +36,8 @@ def _rate_limited_then_review(conn) -> str:
     kb.claim_task(conn, tid)
     rl_run = kb.get_task(conn, tid).current_run_id
     conn.execute(
-        "UPDATE task_runs SET outcome='rate_limited', status='rate_limited', ended_at=? WHERE id=?",
-        (int(time.time()) - 1000, rl_run),
+        "UPDATE task_runs SET outcome='rate_limited', status='rate_limited', ended_at=?, error=? WHERE id=?",
+        (int(time.time()) - 1000, QUOTA_STAMP, rl_run),
     )
     conn.execute(
         "UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, claim_expires=NULL, "
@@ -50,6 +51,17 @@ def _rate_limited_then_review(conn) -> str:
     return tid
 
 
+def _reviewer_run_ends(conn, tid: str, outcome: str, error: str) -> None:
+    """A reviewer run ends after the handoff; ended_at strictly later so it is the latest run."""
+    now = int(time.time())
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, error) "
+            "VALUES (?, 'reviewer', ?, ?, ?, ?, ?)",
+            (tid, outcome, outcome, now, now + 5, error),
+        )
+
+
 def test_review_handoff_after_rate_limited_run_spawns_the_reviewer(kanban_home):
     with kbc.connect() as conn:
         tid = _rate_limited_then_review(conn)
@@ -60,19 +72,26 @@ def test_review_handoff_after_rate_limited_run_spawns_the_reviewer(kanban_home):
         assert kbd.check_respawn_guard(conn, tid, lane="review") is None
 
 
-def test_quota_failure_after_the_handoff_still_guards(kanban_home):
-    """A failure run that is itself the latest keeps the blocker: the stamp is its own diagnosis."""
+@pytest.mark.parametrize("outcome,error", [
+    # The texts ``release_stale_claims`` and ``reconcile_orphaned_running`` write; neither touches the column.
+    ("stale", "no heartbeat ever after 4000s running"),
+    ("reclaimed", "orphaned running card (broken claim bookkeeping)"),
+])
+def test_unrelated_failure_after_the_handoff_does_not_revive_the_stale_stamp(kanban_home, outcome, error):
     with kbc.connect() as conn:
         tid = _rate_limited_then_review(conn)
-        now = int(time.time())
+        _reviewer_run_ends(conn, tid, outcome, error)
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.last_failure_error == QUOTA_STAMP
+        assert kbd.check_respawn_guard(conn, tid, lane="review") is None
+
+
+def test_quota_failure_after_the_handoff_still_guards(kanban_home):
+    """A latest run that itself failed on quota keeps the blocker: the error is its own diagnosis."""
+    with kbc.connect() as conn:
+        tid = _rate_limited_then_review(conn)
+        quota = "provider returned 429: quota exceeded"
+        _reviewer_run_ends(conn, tid, "timed_out", quota)
         with kb.write_txn(conn):
-            # The reviewer run times out on a quota wall; ended_at strictly after the handoff run
-            # so the "latest run" query deterministically picks it.
-            conn.execute(
-                "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) "
-                "VALUES (?, 'reviewer', 'timed_out', 'timed_out', ?, ?)",
-                (tid, now, now + 5),
-            )
-            conn.execute("UPDATE tasks SET last_failure_error=? WHERE id=?",
-                         ("provider returned 429: quota exceeded", tid))
+            conn.execute("UPDATE tasks SET last_failure_error=? WHERE id=?", (quota, tid))
         assert kbd.check_respawn_guard(conn, tid, lane="review") == "blocker_auth"

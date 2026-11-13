@@ -66,7 +66,6 @@ _RESPAWN_BLOCKER_RE = re.compile(
     r"invalid[\s_]api[\s_]key)\b",
     re.IGNORECASE,
 )
-_STALE_BLOCKER_OUTCOMES = frozenset({"crashed", "completed", "review_requested", "changes_requested", "blocked", "scheduled"})
 
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
@@ -1592,7 +1591,7 @@ def check_respawn_guard(
     #    reaches the breaker.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
     latest_run = conn.execute(
-        "SELECT outcome, ended_at, metadata FROM task_runs "
+        "SELECT outcome, ended_at, metadata, error FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
         "ORDER BY ended_at DESC LIMIT 1",
         (task_id,),
@@ -1615,11 +1614,11 @@ def check_respawn_guard(
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
         return None
 
-    # 2. Quota / auth blocker: retrying will not help. Not after a crash, whose text is captured output (#117097),
-    #    nor after a handoff: no handoff stamps the column, so the text is an older run's (#119070).
-    err = _kb._lossy_text(row["last_failure_error"])
-    latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome not in _STALE_BLOCKER_OUTCOMES and _RESPAWN_BLOCKER_RE.search(err):
+    # 2. Quota / auth blocker: retrying will not help. Judged on the latest ended run's own error: the column
+    #    outlives the run that stamped it, so a later handoff or stale run inherited it forever (#119070); the
+    #    column speaks only when no run has ended. Not after a crash, whose text is captured output (#117097).
+    err = _kb._lossy_text(row["last_failure_error"] if latest_run is None else latest_run["error"])
+    if err and (latest_run is None or latest_run["outcome"] != "crashed") and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
