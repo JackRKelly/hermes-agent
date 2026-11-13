@@ -66,8 +66,7 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
     readability.check_new_envelope(title=title, summary=summary, risk=risk)
     readability.check_item_paths(spec.kind, payload, ask=ask, why=why, risk=risk, card=card)
     if sources is None:
-        from tools.action_item_kinds.github import GhSources
-        sources = GhSources()
+        sources = host_sources()
     full = spec.enrich(dict(payload), sources)
     env: dict = {"kind": spec.kind, "schema": spec.current_schema, "title": title, "summary": summary,
                  "ask": ask, "why": why, "risk": risk, "deadline": deadline,
@@ -78,7 +77,19 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
     if batchable is not None:
         env["batchable"] = batchable
     validate_envelope(env, hosts)
+    spec.current_check(full, sources)
     return env
+
+
+def host_sources() -> LiveSources:
+    """The readers this host has: ``gh`` for GitHub, the profile's Slack user token for Slack."""
+    from tools.action_item_kinds.github import GhSources
+    from tools.action_item_kinds.slack import SlackSources
+
+    class HostSources(GhSources, SlackSources):
+        pass
+
+    return HostSources()
 
 
 def validate_envelope(env: Any, hosts: Optional[Iterable[str]] = None) -> KindSpec:

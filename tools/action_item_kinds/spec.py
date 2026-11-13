@@ -41,6 +41,12 @@ class LiveSources:
         """``{last_inbound_at}`` of the thread."""
         raise SourceUnavailable("no message-thread reader in hermes-agent; the card owner re-checks")
 
+    def slack_conversation(self, channel_id: str, thread_ts: str, oldest: float) -> dict:
+        """``{"thread": [...], "channel": [...]}``: the raw Slack messages (``ts``, ``user``, ``text``,
+        ...) of ``conversations.replies`` for the thread and ``conversations.history`` of the channel,
+        each from ``oldest`` (epoch seconds, inclusive) on."""
+        raise SourceUnavailable("no Slack reader configured")
+
 
 def load_versions(kind: str, *versions: int) -> dict[int, dict]:
     return {v: load_schema(KINDS_DIR / f"{kind}.v{v}.schema.json") for v in versions}
@@ -85,6 +91,9 @@ class KindSpec:
     # Add-time rules on the agent payload (readability.py), run before the schema so a refusal
     # carries its fix; never run on read, so an item stored before a rule existed still loads.
     precheck: Callable[[dict], None] = lambda payload: None
+    # Add-time proof that the payload was written from a complete, current read of its live source
+    # (send_message on Slack); runs after the schema, on add and update only, never on read.
+    current_check: Callable[[dict, LiveSources], None] = lambda payload, sources: None
     park_params: Callable[[dict], tuple[str, list[tuple[str, str]]]] = lambda env: (env["ask"], [])
     default_then: str = "ready"
     then_values: tuple[str, ...] = ("complete", "ready")

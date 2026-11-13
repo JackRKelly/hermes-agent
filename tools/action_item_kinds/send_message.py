@@ -2,12 +2,15 @@
 
 iMessage, SMS, Google Voice and Slack. The draft lives in the payload (``draft_text``); the tool
 computes ``content_hash`` and the default links. Per-channel forms the JSON Schema cannot express
-(account, conversation id, handle) are checked in ``_check``.
+(account, conversation id, handle) are checked in ``_check``. On add and update, a Slack draft must
+come from a full read: ``_check_slack_current`` re-reads the thread and the channel and refuses when
+``last_messages`` misses any message since its earliest entry.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any, Iterable, Optional
 
 from tools.action_item_kinds.core import EMAIL_RE, SchemaError, prefixed_hash
@@ -130,6 +133,109 @@ def _live_check(payload: dict, sources: LiveSources) -> dict:
     return live_result(["newer inbound message"] if newer else [])
 
 
+# Membership and channel-settings events are not part of the conversation an agent answers.
+SKIPPED_SUBTYPES = frozenset({
+    "channel_join", "channel_leave", "channel_topic", "channel_purpose", "channel_name", "channel_archive",
+    "channel_unarchive", "group_join", "group_leave", "group_topic", "group_purpose", "group_name",
+})
+# ``at`` is ISO 8601 and may be cut to the second; a Slack ``ts`` carries microseconds.
+MATCH_SECONDS = 1.0
+SHOW_MISSING = 5
+SLACK_FIX = ("Re-read the thread (conversations.replies) AND the channel history (conversations.history) "
+             "since your earliest message, then pass the newest messages of both as last_messages in time "
+             "order (at most 5, dropping the oldest), each `at` taken from the message's ts, and "
+             "last_inbound_at = the newest one not from Jack")
+
+
+def _epoch(iso: str) -> float:
+    return datetime.fromisoformat(iso).timestamp()
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, UTC).isoformat(timespec="seconds")
+
+
+def _who(message: dict) -> str:
+    profile = message.get("user_profile") or {}
+    name = (profile.get("real_name") or profile.get("display_name") or message.get("username")
+            or (message.get("bot_profile") or {}).get("name") or "")
+    ident = message.get("user") or message.get("bot_id") or ""
+    return f"{name} ({ident})" if name and ident else name or ident or "unknown author"
+
+
+def _live_messages(read: dict) -> list[dict]:
+    """Thread replies and channel messages merged by ``ts`` (the thread root and a broadcast reply
+    appear in both reads), oldest first."""
+    seen: dict[str, dict] = {}
+    for where in ("thread", "channel"):
+        for message in read.get(where) or []:
+            ts = str(message.get("ts") or "")
+            if message.get("subtype") in SKIPPED_SUBTYPES or ts in seen:
+                continue
+            try:
+                at = float(ts)
+            except ValueError:
+                continue
+            text = " ".join(str(message.get("text") or "").split())
+            seen[ts] = {"ts": at, "where": where, "who": _who(message),
+                        "excerpt": text[:80] + ("..." if len(text) > 80 else "")}
+    return sorted(seen.values(), key=lambda m: m["ts"])
+
+
+def _match(supplied: list[float], live: list[dict]) -> tuple[list[int], set[float]]:
+    """Pair each supplied ``at`` with the nearest unpaired live message within ``MATCH_SECONDS``:
+    the indexes left unpaired and the live timestamps paired."""
+    unpaired, paired = [], set()
+    for i in sorted(range(len(supplied)), key=lambda k: supplied[k]):
+        near = [m["ts"] for m in live if m["ts"] not in paired and abs(m["ts"] - supplied[i]) < MATCH_SECONDS]
+        if near:
+            paired.add(min(near, key=lambda ts: abs(ts - supplied[i])))
+        else:
+            unpaired.append(i)
+    return unpaired, paired
+
+
+def _check_slack_current(payload: dict, sources: LiveSources) -> None:
+    """Refuse a Slack draft parked from a stale or thread-only read: every message in the thread
+    and in the channel since the earliest ``last_messages`` entry, from any author, must be in
+    ``last_messages``. An unreadable conversation refuses too: nothing is parked unverified."""
+    if payload["channel"] != "slack":
+        return
+    channel_id, thread_ts = SLACK_CONVERSATION_RE.match(payload["conversation_id"]).groups()
+    supplied = [_epoch(m["at"]) for m in payload["last_messages"]]
+    try:
+        read = sources.slack_conversation(channel_id, thread_ts, min(supplied) - MATCH_SECONDS)
+    except SourceUnavailable as exc:
+        raise SchemaError(f"payload.last_messages: cannot verify the Slack conversation is current ({exc}), "
+                          "so nothing was parked. Park it once Slack can be read; the conversation must be "
+                          "re-read in full first") from exc
+    live = _live_messages(read)
+    unpaired, paired = _match(supplied, live)
+    if unpaired:
+        i = unpaired[0]
+        raise SchemaError(f"payload.last_messages[{i}].at: no message in the Slack thread or channel at "
+                          f"{payload['last_messages'][i]['at']}. {SLACK_FIX}")
+    start = min(paired)
+    missing = [m for m in live if m["ts"] >= start and m["ts"] not in paired]
+    if missing:
+        shown = "; ".join(f"{m['who']} at {_iso(m['ts'])} in the {m['where']}: \"{m['excerpt']}\""
+                          for m in missing[-SHOW_MISSING:])
+        more = f" (newest {SHOW_MISSING} of {len(missing)})" if len(missing) > SHOW_MISSING else ""
+        raise SchemaError(f"payload.last_messages: the Slack conversation has {len(missing)} message(s) since "
+                          f"{_iso(start)} that last_messages does not include{more}: {shown}. {SLACK_FIX}")
+    # The read-time live check compares ``last_inbound_at`` with the thread's: it must be the newest
+    # message not from Jack, or that check reports drift on an item that was current when parked.
+    inbound = [at for at, m in zip(supplied, payload["last_messages"]) if m["from"] == "them"]
+    last_inbound = _epoch(payload["last_inbound_at"])
+    if inbound:
+        stale, expected = abs(last_inbound - max(inbound)) >= MATCH_SECONDS, _iso(max(inbound))
+    else:  # every message in the window is Jack's: the last inbound one is older than the window
+        stale, expected = last_inbound >= start + MATCH_SECONDS, f"before {_iso(start)}"
+    if stale:
+        raise SchemaError(f"payload.last_inbound_at: must be the newest message not from Jack ({expected}), "
+                          f"not {payload['last_inbound_at']}. {SLACK_FIX}")
+
+
 def _legacy(reason: str) -> Optional[dict]:
     gate = legacy.parse_gate(reason)
     if not gate or gate[0] != "send-message":
@@ -146,7 +252,8 @@ SPEC = KindSpec(
     binding_fields=("channel", "account", "conversation_id", "draft_ref", "content_hash"),
     allowed_actions=("approve", "reject", "edit", "snooze", "later"),
     executor=None, enrich=_enrich, live_check=_live_check, legacy_parse=_legacy,
-    check=_check, park_params=_park, default_then="complete", then_values=("complete",),
+    check=_check, current_check=_check_slack_current, park_params=_park, default_then="complete",
+    then_values=("complete",),
     source_key=lambda p: source_key(str(p.get("channel") or ""), str(p.get("account") or ""),
                                     str(p.get("conversation_id") or "")),
     default_links=default_links,
