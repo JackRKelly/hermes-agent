@@ -66,6 +66,7 @@ _RESPAWN_BLOCKER_RE = re.compile(
     r"invalid[\s_]api[\s_]key)\b",
     re.IGNORECASE,
 )
+_STALE_BLOCKER_OUTCOMES = frozenset({"crashed", "completed", "review_requested", "changes_requested", "blocked", "scheduled"})
 
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
@@ -1614,13 +1615,11 @@ def check_respawn_guard(
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
         return None
 
-    # 2. Quota / auth blocker: retrying immediately will not help.  A plain
-    # crash is different: its persisted error includes the worker's last
-    # captured output, which is context rather than a diagnosis and may contain
-    # benign commands such as ``claude auth status`` (#117097).
+    # 2. Quota / auth blocker: retrying will not help. Not after a crash, whose text is captured output (#117097),
+    #    nor after a handoff: no handoff stamps the column, so the text is an older run's (#119070).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if err and latest_outcome not in _STALE_BLOCKER_OUTCOMES and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
