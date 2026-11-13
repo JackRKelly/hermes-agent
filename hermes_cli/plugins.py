@@ -173,6 +173,14 @@ VALID_HOOKS: set[str] = {
     # dispatch_tick (once per dispatch_once, strictly AFTER the dispatch lock is released): board,
     #   profile_name, dry_run, outcome ("ok"|"skipped_locked"|"idle"), result: DispatchResult
     #   (privacy: task ids, assignees, workspace paths).
+    # transform_kanban_notification: in the GATEWAY notifier, once per Kanban event text ping about to
+    # be sent (after Jack-park withholding), off the event loop, in the subscription's notifier
+    # profile scope (multiplex) else the launch profile's. Kwargs: event_kind, event_id,
+    # event_payload, task_id, board, task_title, task_assignee, task_status, run_summary (full run
+    # handoff), default_text, platform, chat_id, thread_id, notifier_profile, delivery_mode. First
+    # valid result wins: non-blank str / {"text"} replaces; "" / {"silent": true} sends nothing (no
+    # artifacts) yet the event counts as delivered; anything else keeps default_text. Wake turns unchanged.
+    "transform_kanban_notification",
     "on_kanban_worker_spawned", "on_kanban_worker_exited", "on_kanban_worker_stale_claim",
     "on_kanban_task_updated", "on_kanban_dispatch_tick",
     # gateway_platform_event: normalized envelopes only, never raw SDK objects or adapter handles.

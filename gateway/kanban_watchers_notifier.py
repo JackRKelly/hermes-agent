@@ -333,7 +333,15 @@ class _Collector:
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
-        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
+        # Full run handoffs for ``transform_kanban_notification``: the event payload carries a
+        # ~400-char first line only. Read here, on the connection the claim already holds.
+        run_summaries = {}
+        for run_id in {ev.run_id for ev in events if ev.run_id}:
+            run = self.kb.get_run(conn, run_id)
+            if run is not None:
+                run_summaries[run_id] = run.summary
+        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug,
+                "run_summaries": run_summaries}
 
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
@@ -496,6 +504,45 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "changes_requested": _fmt_changes_requested,
     "block_loop_detected": _fmt_block_loop_detected,
 }
+
+
+# --- transform_kanban_notification (plugin + shell hooks may rewrite or silence a ping) ---
+
+_TRANSFORM_HOOK = "transform_kanban_notification"
+_TRANSFORM_LOGGED: set[str] = set()
+
+
+def _log_transform_once(key: str, fmt: str, *args: Any) -> None:
+    if key in _TRANSFORM_LOGGED:
+        logger.debug(fmt, *args)
+        return
+    _TRANSFORM_LOGGED.add(key)
+    logger.warning(fmt, *args)
+
+
+def _invoke_transform_hook(kwargs: dict[str, Any]) -> list[Any]:
+    """Blocking: the active profile's hook results in registration order ([] when none is registered)."""
+    from hermes_cli.plugins import has_hook, invoke_hook
+    if not has_hook(_TRANSFORM_HOOK):
+        return []
+    return invoke_hook(_TRANSFORM_HOOK, **kwargs)
+
+
+def _pick_transform_result(results: list[Any]) -> tuple[bool, Optional[str]]:
+    """First valid result: ``(True, None)`` silences, ``(False, text)`` replaces, ``(False, None)`` keeps the
+    default. Valid: a string (blank = silence), ``{"text": <non-blank str>}`` or ``{"silent": true}``."""
+    for result in results:
+        if isinstance(result, str):
+            return (False, result) if result.strip() else (True, None)
+        if isinstance(result, dict):
+            if result.get("silent") is True:
+                return True, None
+            text = result.get("text")
+            if isinstance(text, str) and text.strip():
+                return False, text
+        _log_transform_once(f"invalid:{type(result).__name__}", "kanban notifier: ignoring an invalid "
+                            "transform_kanban_notification result %.200r", result)
+    return False, None
 
 
 # --- Delivery of one claimed batch (one subscription, N events) ---
@@ -721,6 +768,43 @@ class _KanbanNotification:
                 logger.debug("kanban notifier: artifact delivery for %s failed: %s", self.task_id, art_exc)
         return True
 
+    def _transform_kwargs(self, ev: Any, default_text: str) -> dict[str, Any]:
+        """JSON-safe ``transform_kanban_notification`` payload for one event."""
+        task, sub = self.task, self.sub
+        run_summaries = self.d.get("run_summaries") or {}
+        if ev.run_id and ev.run_id in run_summaries:
+            run_summary = run_summaries[ev.run_id]
+        else:
+            run_summary = task.result if task else None
+        return {
+            "event_kind": ev.kind, "event_id": ev.id,
+            "event_payload": dict(ev.payload) if isinstance(ev.payload, dict) else {},
+            "task_id": self.task_id, "board": self.board_slug or None,
+            "task_title": task.title if task else None, "task_assignee": task.assignee if task else None,
+            "task_status": task.status if task else None, "run_summary": run_summary,
+            "default_text": default_text, "platform": self.platform_str, "chat_id": sub["chat_id"],
+            "thread_id": sub.get("thread_id") or None, "notifier_profile": self.sub_profile or None,
+            "delivery_mode": sub.get("delivery_mode") or "notify",
+        }
+
+    async def _transform(self, ev: Any, default_text: str) -> Optional[str]:
+        """Ping text after ``transform_kanban_notification``; ``None`` when a hook silenced it.
+
+        Runs off the event loop (a shell hook is a subprocess) with this context copied, so the
+        hooks consulted are those of the profile whose scope ``_owner_scope`` bound.
+        """
+        try:
+            results = await asyncio.to_thread(_invoke_transform_hook, self._transform_kwargs(ev, default_text))
+        except Exception as exc:  # health: allow BLE001 -- plugin discovery is user code; the ping must still go
+            _log_transform_once("dispatch", "kanban notifier: transform_kanban_notification failed (%s); "
+                                "sending the default text", exc)
+            return default_text
+        silenced, text = _pick_transform_result(results)
+        if silenced:
+            logger.debug("kanban notifier: transform hook silenced the %s ping for %s", ev.kind, self.task_id)
+            return None
+        return text if text is not None else default_text
+
     async def _send_pings(self) -> bool:
         """Send every text ping; False when a send failed (claim already rewound/dropped)."""
         for ev in self.d["events"]:
@@ -742,8 +826,10 @@ class _KanbanNotification:
                 continue
             if ev.id <= self.sub.get("last_ping_event_id", 0):
                 continue
+            text = await self._transform(ev, msg)
             try:
-                if await self._send_event(ev, msg) is False:
+                # ``None``: a hook silenced this ping. Recorded as sent, so it is never re-sent.
+                if text is not None and await self._send_event(ev, text) is False:
                     continue
                 await _to_thread_process_service(partial(
                     self.runner._kanban_sub_op, self.board_slug, "record_notify_ping", self.sub,
