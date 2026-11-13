@@ -26,6 +26,7 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli.kanban_db_dispatch_argv import _hermes_path_argv, _looks_like_path, _path_search_names
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
@@ -2462,37 +2463,6 @@ def _module_hermes_argv() -> list[str]:
     return [sys.executable, "-P", "-m", "hermes_cli.main"]
 
 
-def _absolute_hermes_path(path: str) -> str:
-    """Return an absolute filesystem path for a resolved Hermes shim."""
-    expanded = os.path.expanduser(path)
-    return expanded if os.path.isabs(expanded) else os.path.abspath(expanded)
-
-
-def _looks_like_path(value: str) -> bool:
-    """Return true when a command override is an explicit path, not a name."""
-    expanded = os.path.expanduser(value)
-    return (
-        expanded.startswith("~")
-        or os.path.isabs(expanded)
-        or bool(os.path.dirname(expanded))
-        or "\\" in expanded
-        or bool(re.match(r"^[A-Za-z]:", expanded))
-    )
-
-
-def _is_windows_batch_shim(path: str) -> bool:
-    """Return true for Windows shell/batch shims that should not be argv[0]."""
-    return path.lower().endswith((".cmd", ".bat"))
-
-
-def _path_search_names(command: str) -> list[str]:
-    """Return executable names to try for an unqualified command."""
-    if not _kb._IS_WINDOWS or os.path.splitext(command)[1]:
-        return [command]
-    raw = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
-    return [command + ext for ext in raw.split(";") if ext]
-
-
 def _safe_which_no_cwd(command: str) -> Optional[str]:
     """Resolve a bare command from PATH without implicit current-dir search.
 
@@ -2509,15 +2479,6 @@ def _safe_which_no_cwd(command: str) -> Optional[str]:
             if os.path.isfile(candidate) and (_kb._IS_WINDOWS or os.access(candidate, os.X_OK)):
                 return candidate
     return None
-
-
-def _hermes_path_argv(path: str) -> list[str]:
-    """argv for a resolved Hermes executable path. Windows batch shims
-    (``.cmd``/``.bat``) are unsafe as argv[0] because the argument vector
-    includes task-derived values; prefer the module form."""
-    if _kb._IS_WINDOWS and _is_windows_batch_shim(path):
-        return _module_hermes_argv()
-    return [_absolute_hermes_path(path)]
 
 
 def _resolve_hermes_argv() -> list[str]:
