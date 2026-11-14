@@ -267,33 +267,41 @@ def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
 
 
 # A decision that says there is nothing to decide (a stuck-work check that found nothing, Nov 13). The
-# rule is the shared fixture ``tests/fixtures/no_op_rule.v2.json``, committed byte-identical in
-# JackRKelly/assistant (``scripts/kanban_gates.py``); its test pins these four patterns and every case.
+# rule is conservative: a text is a no-op only when EVERY sentence is a no-op phrase or a closed generic
+# ask, with no other words; a label, a colon, a scope or any extra word makes it a real ask. It is the
+# shared fixture ``tests/fixtures/no_op_rule.v3.json``, committed byte-identical in JackRKelly/assistant
+# (``scripts/kanban_gates.py``); its test pins these five patterns and every case.
 NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.IGNORECASE)
-# A sentence or clause that is entirely a generic ask ("What next?", "Anything else?") asks nothing (the
-# fallback the Nov 13 item showed). Anchored to the text start or a . ; : ! ?, so the "or what?" of a real
-# question ("ship now or what?") is never removed.
-GENERIC_ASK_RE = re.compile(r"(?:^|(?<=[.;:!?]))\s*\b(?:what(?: should (?:happen|we do)| do we do| now)?(?: next)?|anything else)\s*\?", re.IGNORECASE)
-# A question or option list: a real ask, wherever it sits.
-ASK_LEFT_RE = re.compile(r"\?|\boptions?\s*[:(]|\brec(?:ommend(?:ation|ed)?)?\s*:", re.IGNORECASE)
-URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+# A whole sentence of no-op phrases ("Nothing to fix and nothing needs Jack").
+NO_OP_SENTENCE_RE = re.compile(rf"(?:{NO_OP_RE.pattern})(?:\s*(?:,\s*and|,|and)\s*(?:{NO_OP_RE.pattern}))*",
+                               re.IGNORECASE)
+# A whole sentence that is a generic ask from this closed list ("What next?", "Anything else?").
+GENERIC_ASK_RE = re.compile(r"what(?: should (?:happen|we do)| do we do)? next|what now|anything else", re.IGNORECASE)
+# Words that are not part of the message: the autopilot's "Consult Jack:" lead and "(from t_x)" provenance.
+NO_OP_NOISE_RE = re.compile(r"^\s*consult jack\s*:|\(from (?:t_\w+|the card)\)", re.IGNORECASE)
+SENTENCE_SPLIT_RE = re.compile(r"[.;!?]+(?=\s|$)|\s/\s", re.IGNORECASE)
+
+
+def _no_op_sentences(text: str) -> list[str]:
+    parts = SENTENCE_SPLIT_RE.split(NO_OP_NOISE_RE.sub(" ", text))
+    return [s for s in (" ".join(p.split()).strip(" ,") for p in parts) if s]
 
 
 def is_no_op_text(text: Any, *, has_real_question: bool = False) -> bool:
-    """True when ``text`` says nothing needs Jack and asks nothing real. The phrase alone never makes a
-    text a no-op: remove every URL and ``NO_OP_RE`` phrase, then every sentence or clause that is only a
-    generic ask ("What next?", ``GENERIC_ASK_RE``); a question or option list left over (``ASK_LEFT_RE``)
-    is a real ask, even in the same sentence as the phrase ("No action needed on staging, but should prod
-    go now or Monday?") or ending in a generic word ("Prod: ship now or what?"). ``has_real_question``
-    (another question of the item is real) also clears a text whose only no-op phrases are "nothing
-    else ...": "else" means something did. Shared fixture: ``tests/fixtures/no_op_rule.v2.json``."""
-    if not isinstance(text, str) or not NO_OP_RE.search(text):
+    """True when every sentence of ``text`` is a no-op phrase (``NO_OP_SENTENCE_RE``) or a closed generic
+    ask (``GENERIC_ASK_RE``), with no other words, and at least one is a no-op phrase. Anything else, a
+    label ("Prod: what now?"), a scope ("on staging") or one extra word, is a real ask: a wrong "real"
+    only lets an item through, a wrong "no-op" hides a question from Jack. ``has_real_question`` (another
+    question of the item is real) also clears a text whose no-op phrases all say "nothing else ...":
+    "else" means something did. Shared fixture: ``tests/fixtures/no_op_rule.v3.json``."""
+    if not isinstance(text, str):
         return False
-    left = GENERIC_ASK_RE.sub(" ", NO_OP_RE.sub(" ", URL_RE.sub(" ", text)))
-    if ASK_LEFT_RE.search(left):
+    sentences = _no_op_sentences(text)
+    no_op = [s for s in sentences if NO_OP_SENTENCE_RE.fullmatch(s)]
+    if not no_op or any(s not in no_op and not GENERIC_ASK_RE.fullmatch(s) for s in sentences):
         return False
     return not (has_real_question
-                and all(m.group(0).lower().startswith("nothing else") for m in NO_OP_RE.finditer(text)))
+                and all(m.group(0).lower().startswith("nothing else") for s in no_op for m in NO_OP_RE.finditer(s)))
 
 
 NO_OP_PROBLEM = ("This says nothing needs Jack: complete the card with a one-line summary instead, or tag it "

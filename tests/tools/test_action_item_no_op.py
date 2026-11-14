@@ -37,9 +37,9 @@ def build(p: dict, **overrides) -> dict:
 @pytest.mark.parametrize("where, call", [
     ("summary", {"summary": "Nothing to fix and nothing needs Jack."}),
     ("payload.questions[0].question", {"p": payload("Nothing here needs Jack; what next?")}),
-    ("title", {"title": "No decision needed for the deploy"}),
-    ("ask", {"ask": "Not a decision for Jack, just a heads-up."}),
-    ("why", {"why": "Nothing to do here."}),
+    ("title", {"title": "No decision needed"}),
+    ("ask", {"ask": "Not a decision for Jack."}),
+    ("why", {"why": "Nothing to do."}),
     ("payload.rec_reason", {"p": payload(rec_reason="No action is required.")}),
 ])
 def test_a_decision_that_says_nothing_needs_jack_is_refused_with_the_fix(where, call):
@@ -85,14 +85,15 @@ def test_nothing_else_still_refuses_when_no_question_is_real():
         build(payload("Nothing else needs Jack; what next?"), summary="Checked it. Nothing else needs Jack.")
 
 
-RULE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "no_op_rule.v2.json").read_text(encoding="utf-8-sig"))
+RULE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "no_op_rule.v3.json").read_text(encoding="utf-8-sig"))
 
 
 def test_the_patterns_are_the_shared_fixture():
-    """``tests/fixtures/no_op_rule.v2.json`` is committed byte-identical in JackRKelly/assistant."""
+    """``tests/fixtures/no_op_rule.v3.json`` is committed byte-identical in JackRKelly/assistant."""
     assert RULE["flags"] == "IGNORECASE"
-    for name, pattern in (("no_op_re", rd.NO_OP_RE), ("generic_ask_re", rd.GENERIC_ASK_RE),
-                          ("ask_left_re", rd.ASK_LEFT_RE), ("url_re", rd.URL_RE)):
+    for name, pattern in (("no_op_re", rd.NO_OP_RE), ("no_op_sentence_re", rd.NO_OP_SENTENCE_RE),
+                          ("generic_ask_re", rd.GENERIC_ASK_RE), ("no_op_noise_re", rd.NO_OP_NOISE_RE),
+                          ("sentence_split_re", rd.SENTENCE_SPLIT_RE)):
         assert pattern.pattern == RULE[name] and pattern.flags & re.IGNORECASE, name
 
 
@@ -134,3 +135,19 @@ def test_a_real_needs_jack_park_still_reads_as_its_question():
     assert legacy_questions("[needs-jack:decision] Consult Jack: pick a vendor then=ready")["questions"][0][
         "question"] == "Consult Jack: pick a vendor"
     assert legacy_questions("[decision] Pick a vendor") is None
+
+
+@pytest.mark.parametrize("reason", [
+    "[decision] What next? Nothing needs Jack.",
+    "[needs-jack:decision] What next? Nothing needs Jack. then=ready",
+])
+def test_a_tagged_park_strips_its_tag_before_the_generic_ask(reason):
+    """The tag is removed first, so "What next?" right after "] " still starts the text."""
+    assert legacy_questions(reason)["questions"] == []
+
+
+@pytest.mark.parametrize("text", ["No action needed on staging. Prod: what now?",
+                                  "Nothing to fix on staging. For prod: what should we do next?"])
+def test_an_ask_after_a_topic_label_is_real(text):
+    build(payload(text))
+    assert legacy_questions(f"[needs-jack:decision] {text} then=ready")["questions"], text
