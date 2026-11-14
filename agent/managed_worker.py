@@ -412,8 +412,7 @@ def execute(frame, channel):
             if result.get('final_response') is None and (result.get('interrupted') or result.get('failed')):
                 result['final_response'] = ''
             channel.send('result', result=result_frame(result))
-            if not controls.finish.wait(30):
-                raise ValueError('managed_finish_timeout')
+            await_owner_finish(controls)
             store.finish()
             channel.send('finished')
     finally:
@@ -425,6 +424,25 @@ def execute(frame, channel):
         finally:
             with contextlib.suppress(Exception):  # a failing socket close never replaces the turn's outcome
                 rpc.close()
+
+
+# How often a worker still waiting for the owner's ``finish`` logs that it is waiting.
+FINISH_LATE_LOG_S = 30
+
+
+def await_owner_finish(controls):
+    """Wait for the owner's ``finish`` after the result frame, for as long as the owner lives.
+
+    The owner answers an accepted result with ``finish`` and every refusal by closing this worker
+    (``ManagedWorker.close``: SIGTERM, then SIGKILL); its death closes the control pipe, which sets
+    ``finish`` and arms ``_die_with_owner``. So a missing ``finish`` on an open pipe only means a
+    slow owner, and a fixed deadline here turned an accepted, completed turn into an ``unknown``
+    loss (the owner's late ``finish`` then met a closed pipe). Never a result of its own making:
+    the durable ``execution.finish`` still follows only the owner's word."""
+    waited = 0
+    while not controls.finish.wait(FINISH_LATE_LOG_S):
+        waited += FINISH_LATE_LOG_S
+        logger.warning('managed_finish_late: result sent %ds ago; still waiting for the owner', waited)
 
 
 def _construct_agent(frame, factory, policy, **kwargs):

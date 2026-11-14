@@ -4,8 +4,12 @@ Only explicit local compute registrations are enabled here. A delegated child is
 the owner on its parent's receipt stream (gateway/session_worker_child.py), never registered.
 """
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import contextvars
+import functools
 import hmac
 import os
+import threading
 
 from gateway.session_admission import admission_fingerprint
 from hermes_state_runtime import (
@@ -14,6 +18,25 @@ from hermes_state_runtime import (
 )
 
 _SCOPE = {'profile_id', 'session_id', 'execution_id', 'generation', 'pid', 'birth', 'secret'}
+
+# Worker receipts commit on their own threads, never the loop's shared default executor: that pool
+# (min(32, cpu + 4) threads) also carries hundreds of unrelated ``to_thread`` callers, some of which
+# block for seconds, and a receipt queued behind them runs into the worker's receipt deadline.
+# Concurrency here is one call per live worker connection (``WorkerRPC`` serializes its own calls).
+WORKER_RPC_THREADS = 8
+_executor = None
+_executor_lock = threading.Lock()
+
+
+async def run_worker_rpc(fn, /, *args, **kwargs):
+    """``asyncio.to_thread`` on the worker-RPC pool: same context copy, same cancellation."""
+    global _executor
+    with _executor_lock:
+        if _executor is None:
+            _executor = ThreadPoolExecutor(max_workers=WORKER_RPC_THREADS, thread_name_prefix='worker-rpc')
+    context = contextvars.copy_context()
+    return await asyncio.get_running_loop().run_in_executor(
+        _executor, functools.partial(context.run, fn, *args, **kwargs))
 
 
 def _claim(connection, ref, params):
@@ -85,15 +108,15 @@ async def worker_request(connection, ref, params, *, operation):
         authority.authorize(connection.actor, ref, 'worker:adopt')
         if params['kind'] != 'compute':
             raise RuntimeStoreError('unsupported_producer')
-        return await asyncio.to_thread(register_worker_execution, authority.db, epoch=authority.epoch,
+        return await run_worker_rpc(register_worker_execution, authority.db, epoch=authority.epoch,
             **scope, kind='compute', adoption_secret=claim, require_idle=True)
     if 'worker:adopt' not in connection.actor.capabilities:
         raise RuntimeStoreError('permission_denied')
     _verify(connection, ref, params, claim)
     if operation == 'adopt':
-        return await asyncio.to_thread(adopt_worker_execution, authority.db, epoch=authority.epoch,
+        return await run_worker_rpc(adopt_worker_execution, authority.db, epoch=authority.epoch,
                                        **scope, adoption_secret=claim)
-    result = await asyncio.to_thread(mutate_worker_execution, authority.db, epoch=params['epoch'],
+    result = await run_worker_rpc(mutate_worker_execution, authority.db, epoch=params['epoch'],
         **scope, sequence=params['sequence'], operation=params['operation'], payload=params['payload'])
     if params['operation'] == 'execution.finish':
         # Queued input parked behind this worker; nothing else would restart its FIFO.

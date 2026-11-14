@@ -77,6 +77,26 @@ def call_off_event_loop(fn, *args, **kwargs):
         return pool.submit(context.run, fn, *args, **kwargs).result()
 
 
+# A call's receipt deadline. The owner commits ``worker.persist`` under its own transcript write
+# patience (``SessionDB._TRANSCRIPT_WRITE_PATIENCE_S``, 60 s), so a shorter client deadline gave up on
+# writes the owner was still allowed to land. An owner stall (busy host, starved loop) delays every
+# connection's reply at once; the request was already delivered on a live ordered socket, so the call
+# keeps waiting for that same reply (never a resend) and fails only when the socket closes (at once)
+# or this budget runs out. RECEIPT_LATE_S is when the wait is logged as late.
+RECEIPT_LATE_S = 20.0
+RECEIPT_BUDGET_S = 120.0
+
+
+def await_receipt(link, method, request_id):
+    """The reply to the one request in flight on ``link``, within ``RECEIPT_BUDGET_S``."""
+    try:
+        return link.receive(RECEIPT_LATE_S)
+    except TimeoutError:
+        logger.warning('worker_receipt_late: no owner reply to %s (id %s) after %.0fs; waiting up to %.0fs',
+                       method, request_id, RECEIPT_LATE_S, RECEIPT_BUDGET_S)
+    return link.receive(max(0.0, RECEIPT_BUDGET_S - RECEIPT_LATE_S))
+
+
 class _OwnerLink:
     """One owner WebSocket and the only thread that reads it. Events the owner broadcasts to every
     transport are discarded as they arrive, idle or not: left queued, websockets' bounded receive
@@ -194,7 +214,7 @@ class WorkerRPC:
                     self._drop()
                     link = self._connection()
                     link.send(request_id, message)
-                response = link.receive(20)
+                response = await_receipt(link, method, request_id)
             except BaseException:
                 # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()
