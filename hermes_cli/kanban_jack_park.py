@@ -37,3 +37,21 @@ def is_jack_park_reason(reason: Optional[str]) -> bool:
     from tools.action_item_kinds.core import reason_item_hash
 
     return reason_item_hash(reason) is not None
+
+
+_CONTINUE_RE = re.compile(r"\[captain:continue\]", re.IGNORECASE)
+
+
+def is_captain_continue_reason(reason: Optional[str]) -> bool:
+    """True when the FIRST marker is ``[captain:continue]``: a clean handoff Captain re-runs.
+
+    The worker stopped at a safe point (step budget, phase boundary) and Captain resumes the same
+    card, so a re-block for that cause is the workflow, not a loop. Other ``[captain:<topic>]``
+    reasons are problems Captain must look at and keep the triage escalation.
+    """
+    reason = reason or ""
+    first = min(
+        (m for rx in (_APPROVAL_GATE_RE, _ATTENTION_RE, _OWNER_TAG_RE) if (m := rx.search(reason))),
+        key=lambda m: m.start(), default=None,
+    )
+    return first is not None and bool(_CONTINUE_RE.fullmatch(first.group(0)))

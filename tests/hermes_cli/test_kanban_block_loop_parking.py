@@ -148,8 +148,40 @@ def test_jack_park_reblock_stays_blocked(kanban_home: Path, reason: str, times: 
         assert last.payload["recurrences"] == times
 
 
+# A clean ``[captain:continue]`` handoff (Nov 14: a prod rollout card hit its step budget at a safe
+# point, re-parked for Captain to re-run, and was bounced to triage, where promote/block/unblock all
+# refuse it) re-parks by design, like a Jack park: it stays blocked and the recurrences still count.
+@pytest.mark.parametrize("reason", [
+    "[captain:continue] Phase 1 done, nothing half-changed; re-run to continue from the handoff.",
+    "[Captain:Continue] Re-run; Jack's answer [needs-jack:decision] item=2877c0d1e2f3a4b5 covers it.",
+])
+@pytest.mark.parametrize("times", [2, 3])
+def test_captain_continue_reblock_stays_blocked(kanban_home: Path, reason: str, times: int) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, times)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_recurrences == times
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert "block_loop_detected" not in kinds
+
+
+def test_captain_continue_after_a_jack_park_stays_blocked(kanban_home: Path) -> None:
+    # The field sequence: a needs_input Jack park, Jack answers, then the worker hands off.
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, "[needs-jack:decision] Go ahead? then=ready item=2877c0d1e2f3a4b5", 1)
+        assert kb.unblock_task(conn, tid)
+        _claim(conn, tid)
+        assert kb.block_task(conn, tid, reason="[captain:continue] Re-run to continue", kind="needs_input")
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_recurrences) == ("blocked", 2)
+
+
 @pytest.mark.parametrize("reason,kind", [
     ("[captain:routing] no reviewer profile for this repo", "needs_input"),
+    ("[captain:continue-later] not the continue marker", "needs_input"),
+    ("[needs-attention] CI red [captain:continue] after the fix", "needs_input"),
+    ("[captain:routing] stuck; the last handoff was [captain:continue]", "needs_input"),
     ("worker needs input: which branch?", "needs_input"),
     ("[captain:routing] re-parked; Jack already answered the [needs-jack:decision] item", "needs_input"),
     ("[captain:routing] quoting the old park then=ready item=2877c0d1e2f3a4b5", "needs_input"),
