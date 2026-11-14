@@ -1905,11 +1905,13 @@ DEFAULT_CONFIG = {
         "max_in_progress_per_profile": None,
         # Provider breaker: `failures` exits 75 (quota) / 78 (login) of one provider (a profile's
         # model.provider) within `window_seconds` pause every profile on it; while half-open one
-        # ready card probes every `probe_seconds`. State: kanban.db, `hermes kanban health --json`.
-        "provider_breaker": {"failures": 3, "window_seconds": 300, "probe_seconds": 90},
-        # A running worker with no model turn or tool call for this many minutes is flagged, and
-        # reclaimed (requeued, not a failure) after the grace; the 3rd in a row goes to triage. 0 = off.
-        "idle_reclaim_minutes": 15,
+        # ready card probes every `probe_seconds`, and at least every `max_probe_wait_seconds` even
+        # before a far reset. `hermes kanban health --json` shows it; `--probe/--reset P` act on it.
+        "provider_breaker": {"failures": 3, "window_seconds": 300, "probe_seconds": 90, "max_probe_wait_seconds": 1800},
+        # Opt-in (0 = off): a running worker with no message, heartbeat or child-session activity and
+        # no tool in flight for this many minutes is flagged, then reclaimed (requeued, not a failure)
+        # after the grace; the 3rd in a row goes to triage.
+        "idle_reclaim_minutes": 0,
         "idle_reclaim_grace_minutes": 5,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing

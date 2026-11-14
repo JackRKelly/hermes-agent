@@ -8,6 +8,7 @@ provider-wide.
 
 from __future__ import annotations
 
+import argparse
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def board(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
     monkeypatch.setattr(kbd, "_recent_worker_exits", {})
@@ -144,7 +146,8 @@ def test_known_reset_holds_probes_until_credentials_change(board):
         kbpb.record_exit(conn, "p1", "rate_limited", text="You've hit your weekly limit, resets in 2 days. "
                          f"reset_at={now + 2 * 86400}", now=now)
     rec = _breaker(conn)
-    assert rec["reset_at"] == now + 2 * 86400 and rec["next_probe_at"] == rec["reset_at"]
+    # A far reset still gets a slow probe: never more than max_probe_wait_seconds away.
+    assert rec["reset_at"] == now + 2 * 86400 and rec["next_probe_at"] == now + kbpb.DEFAULT_MAX_PROBE_WAIT_SECONDS
     kbpb.refresh(conn, now=now + 600)
     assert _breaker(conn)["state"] == "open"  # probe time passed, reset_at did not
 
@@ -222,3 +225,97 @@ def test_parse_reset_at_month_day_is_in_the_future():
 def test_message_is_redacted_and_bounded():
     msg = kbpb.redact_message("bad key sk-ant-api03-" + "A" * 80 + " " + "x" * 400)
     assert len(msg) <= kbpb.MESSAGE_MAX_CHARS and "A" * 40 not in msg
+
+
+@pytest.mark.parametrize("secret", [
+    "sk-ant-api03-" + "Zq7xR2mK9pL4vN8wT1yB6cD3fG5hJ0sA" * 2,
+    "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTQyIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+])
+def test_real_token_shapes_never_reach_the_stored_message(board, secret):
+    conn, _ = board
+    for _ in range(3):
+        kbpb.record_exit(conn, "p1", "rate_limited", text=f"429 weekly limit for {secret} resets Nov 17")
+    stored = _breaker(conn)["message"]
+    assert "weekly limit" in stored
+    assert secret not in stored and secret.split()[-1][:24] not in stored
+
+
+def test_far_reset_still_probes_after_max_wait(board):
+    conn, _ = board
+    now = int(time.time())
+    for _ in range(3):
+        kbpb.record_exit(conn, "p1", "rate_limited", text=f"weekly limit reset_at={now + 4 * 86400}", now=now)
+    kbpb.refresh(conn, now=now + kbpb.DEFAULT_MAX_PROBE_WAIT_SECONDS - 1)
+    assert _breaker(conn)["state"] == "open"
+    kbpb.refresh(conn, now=now + kbpb.DEFAULT_MAX_PROBE_WAIT_SECONDS)
+    assert _breaker(conn)["state"] == "half_open"
+    assert kbpb.take_probe(conn, "p2", "t_probe", now=now + kbpb.DEFAULT_MAX_PROBE_WAIT_SECONDS)
+
+
+def test_claude_code_login_change_half_opens(board, tmp_path):
+    """A Claude-subscription profile has no auth.json: its login is Claude Code's shared OAuth file.
+    Swapping the account there (Nov 13 16:48) must half-open the breaker before reset_at."""
+    conn, _ = board
+    now = int(time.time())
+    for _ in range(3):
+        kbpb.record_exit(conn, "p1", "rate_limited", text=f"reset_at={now + 2 * 86400}", now=now)
+    kbpb.refresh(conn, now=now + 60)
+    assert _breaker(conn)["state"] == "open"
+    login = tmp_path / ".claude" / ".credentials.json"
+    login.parent.mkdir()
+    login.write_text("{}")
+    kbpb.refresh(conn, now=now + 61)
+    assert _breaker(conn)["state"] == "half_open"
+
+
+def test_operator_probe_and_reset_through_cli(board, capsys):
+    from hermes_cli import kanban as kcli
+    conn, _ = board
+    now = int(time.time())
+    for _ in range(3):
+        kbpb.record_exit(conn, "p1", "rate_limited", text=f"reset_at={now + 2 * 86400}", now=now)
+    trip = _breaker(conn)["trip_id"]
+
+    assert kcli._cmd_health(argparse.Namespace(json=True, probe=CLAUDE, reset=None)) == 0
+    rec = _breaker(conn)
+    assert rec["state"] == "half_open" and rec["trip_id"] == trip
+    assert kbpb.take_probe(conn, "p2", "t_probe")
+
+    assert kcli._cmd_health(argparse.Namespace(json=True, probe=None, reset=CLAUDE)) == 0
+    assert _breaker(conn)["state"] == "closed" and not kbpb.paused(conn, "p1")
+    assert kcli._cmd_health(argparse.Namespace(json=True, probe=None, reset=CLAUDE)) == 1  # nothing open
+    assert "no open breaker" in capsys.readouterr().err
+
+
+def test_config_yaml_drives_breaker(board):
+    conn, home = board
+    (home / "config.yaml").write_text(
+        "kanban:\n  provider_breaker:\n    failures: 2\n    window_seconds: 60\n"
+        "    probe_seconds: 30\n    max_probe_wait_seconds: 120\n")
+    assert kbpb.settings() == kbpb.BreakerSettings(failures=2, window_seconds=60, probe_seconds=30,
+                                                   max_probe_wait_seconds=120)
+    t0 = int(time.time()) - 500
+    kbpb.record_exit(conn, "p1", "rate_limited", now=t0)
+    kbpb.record_exit(conn, "p1", "rate_limited", now=t0 + 61)  # outside the 60 s window
+    assert _breaker(conn)["state"] == "closed"
+    kbpb.record_exit(conn, "p1", "rate_limited", text=f"reset_at={t0 + 86400}", now=t0 + 62)
+    rec = _breaker(conn)
+    assert rec["state"] == "open" and rec["next_probe_at"] == t0 + 62 + 120
+
+
+def test_auth_trip_releases_a_card_a_lone_78_parked_in_the_window(board):
+    conn, _ = board
+    first = kb.create_task(conn, title="first", assignee="p1")
+    _run_and_exit(conn, first, kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE, host_pid=86001)
+    kbd.detect_crashed_workers(conn)
+    assert kb.get_task(conn, first).status == "blocked"  # alone, it parked
+
+    for _ in range(2):
+        kbpb.record_exit(conn, "p2", "terminal_provider", text="no usable login")
+
+    assert _breaker(conn)["reason"] == "auth"
+    task = kb.get_task(conn, first)
+    assert task.status == "ready" and task.consecutive_failures == 0
+    unblocked = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'unblocked'",
+                             (first,)).fetchall()
+    assert unblocked and '"provider_breaker"' in unblocked[-1]["payload"]

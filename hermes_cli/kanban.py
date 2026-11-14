@@ -1148,7 +1148,15 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 def _cmd_health(args: argparse.Namespace) -> int:
     from hermes_cli import kanban_db_health as kbh
+    from hermes_cli import kanban_db_provider_breaker as kbpb
     with kbc.connect_closing() as conn:
+        for provider, act, verb in ((getattr(args, "probe", None), kbpb.probe_now, "half-open: one probe on the next tick"),
+                                    (getattr(args, "reset", None), kbpb.reset_breaker, "closed")):
+            if provider:
+                if not act(conn, provider):
+                    print(f"provider {provider}: no open breaker", file=sys.stderr)
+                    return 1
+                print(f"provider {provider}: {verb}", file=sys.stderr)
         doc = kbh.live_health(conn, kb.kanban_db_path())
     if _json_out(args, doc):
         return 0

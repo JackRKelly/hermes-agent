@@ -996,6 +996,7 @@ hermes kanban dispatch [--dry-run] [--max N]           # one-shot pass
 hermes kanban daemon --force                           # DEPRECATED — standalone dispatcher (use `hermes gateway start` instead)
         [--failure-limit N] [--pidfile PATH] [-v]
 hermes kanban stats [--json]                           # per-status + per-assignee counts
+hermes kanban health [--json] [--probe P] [--reset P]  # provider breakers, held-back counts, idle runs
 hermes kanban log <id> [--tail BYTES]                  # worker log from ~/.hermes/kanban/logs/
 hermes kanban notify-subscribe <id>                    # gateway bridge hook (used by /kanban in the gateway)
         --platform <name> --chat-id <id> [--thread-id <id>] [--user-id <id>]
@@ -1047,6 +1048,25 @@ The dispatcher refuses to re-spawn a ready task when it hit a quota/auth/429 err
 To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`.
 
 `recent_success` and `active_pr` hold the **ready** lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, either move it to the review lane with `hermes kanban request-review <id>` (accepted from `ready` as well as `running`; the review-lane spawn is not subject to either guard) or hand the ready card to that profile with `hermes kanban assign <id> <profile>`: a handoff recorded *after* the PR comment — an operator reassign, a reviewer's changes-requested verdict, or a review reopen — lifts `active_pr` for the profile now named on the card, because that PR is exactly what it must work on. Only a change to a *different* profile counts: re-assigning the same profile, unassigning, or the dispatcher's own `kanban.default_assignee` fill-in does not lift the guard, so the assignee that opened the PR is still not re-spawned against it after a crash, reclaim or no-op reassign, and a newer PR comment posted after the handoff guards again. A deliberate re-queue after a success (drag `done→ready`, `unblock`, re-promotion) also lifts `recent_success`, so a manual re-run is never silently held for the whole window.
+
+### Provider breaker, idle reclaim and dispatch health
+
+**Provider breaker.** A quota wall (exit 75) or a lost login (exit 78) belongs to the provider, not to one card. The dispatcher keeps one breaker per resolved `model.provider` of the assignee profile (the profile name when it has none), stored in `kanban.db`, so every profile on one subscription shares it. `failures` such exits within `window_seconds` open it: nothing of that provider spawns (held back as `provider_paused`; other providers are unaffected). After `probe_seconds`, or at the provider's parsed reset time when later, but never more than `max_probe_wait_seconds` away, it goes half-open and lets exactly one ready card spawn as a probe. A probe that ends without a 75/78 (or survives `probe_seconds`) closes it; one that hits the wall again re-opens it under the same trip id. A credential change half-opens it at once: each profile's `auth.json`/`.env` and, for a Claude/Anthropic provider, Claude Code's shared login file are compared by `stat` only (a macOS Keychain swap is invisible to that; the probe cadence bounds it). While a breaker is not closed an exit 78 is requeued like a quota exit instead of parking the card, and an auth trip releases cards a lone 78 parked inside the window. A lone 78 with no breaker still parks.
+
+**Idle reclaim (opt-in).** With `kanban.idle_reclaim_minutes` set above 0, a running worker with no new session message (its own or a delegated child session's), no heartbeat and no tool call in flight for that long gets an `idle_flagged` event, and `idle_reclaim_grace_minutes` later is terminated and requeued with run outcome `reclaimed` (reason `idle`), never counted as a failure. The third idle reclaim in a row sends the card to `triage` with `block_loop_detected`.
+
+**Health.** Every dispatcher tick writes `<board db>.health.json` atomically (schema 1: `providers`, `dispatch.held_back`, `bad_ticks`, `idle`, `failure_rate`); `hermes kanban health --json` prints the live document. `--probe <provider>` half-opens a breaker for one probe on the next tick; `--reset <provider>` closes it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `kanban.provider_breaker.failures` | 3 | exits 75/78 of one provider that open its breaker |
+| `kanban.provider_breaker.window_seconds` | 300 | window those exits are counted in |
+| `kanban.provider_breaker.probe_seconds` | 90 | half-open probe interval |
+| `kanban.provider_breaker.max_probe_wait_seconds` | 1800 | longest wait for a probe, even before a far reset |
+| `kanban.idle_reclaim_minutes` | 0 (off) | minutes without progress before a run is flagged |
+| `kanban.idle_reclaim_grace_minutes` | 5 | minutes after the flag before the reclaim |
+
+A kanban worker whose quota error carries a Retry-After or reset more than 60 s away ends its retries and exits 75 at once, freeing its slot; 60 s or less still retries in place.
 
 ### Drag-to-delete and bulk delete (dashboard)
 

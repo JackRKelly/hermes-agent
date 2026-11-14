@@ -11,8 +11,12 @@ States: ``closed`` (normal), ``open`` (nothing of that provider spawns: held bac
 ``provider_paused``), ``half_open`` (exactly one ready card may spawn as a probe every
 ``probe_seconds``). Trip: ``failures`` exits 75/78 of one provider within ``window_seconds``.
 A probe run that survives ``probe_seconds`` or ends any other way closes the breaker; a probe that
-exits 75/78 re-opens it under the same ``trip_id``. Probes wait for a parsed ``reset_at`` unless
-the credential fingerprint changes (an account was added or re-logged), which half-opens at once.
+exits 75/78 re-opens it under the same ``trip_id``. Probes wait for a parsed ``reset_at``, but
+never longer than ``max_probe_wait_seconds`` (a quota wall that lifts early, or a login swapped
+somewhere the fingerprint cannot see, costs one probe per interval, not days). A credential
+fingerprint change (an account added or re-logged) half-opens at once. An operator can force a
+probe (:func:`probe_now`) or close a breaker (:func:`reset_breaker`): ``hermes kanban health
+--probe/--reset <provider>``.
 
 While the breaker is not closed an exit 78 is provider-wide, so it is booked like a rate-limited
 requeue instead of parking the card; a trip on auth also releases the cards a lone 78 parked inside
@@ -58,6 +62,7 @@ CREATE TABLE IF NOT EXISTS provider_breakers (
 DEFAULT_FAILURES = 3
 DEFAULT_WINDOW_SECONDS = 300
 DEFAULT_PROBE_SECONDS = 90
+DEFAULT_MAX_PROBE_WAIT_SECONDS = 1800
 MESSAGE_MAX_CHARS = 200
 
 _EXIT_KINDS = {"rate_limited": "quota", "terminal_provider": "auth"}
@@ -68,6 +73,7 @@ class BreakerSettings:
     failures: int = DEFAULT_FAILURES
     window_seconds: int = DEFAULT_WINDOW_SECONDS
     probe_seconds: int = DEFAULT_PROBE_SECONDS
+    max_probe_wait_seconds: int = DEFAULT_MAX_PROBE_WAIT_SECONDS
 
 
 def _positive(value: Any, default: int) -> int:
@@ -79,7 +85,8 @@ def _positive(value: Any, default: int) -> int:
 
 
 def settings() -> BreakerSettings:
-    """``kanban.provider_breaker.{failures,window_seconds,probe_seconds}`` (defaults 3/300/90)."""
+    """``kanban.provider_breaker.{failures,window_seconds,probe_seconds,max_probe_wait_seconds}``
+    (defaults 3/300/90/1800)."""
     from hermes_cli.config_backend import ConfigBackendUnavailable
     try:
         from hermes_cli.config import load_config
@@ -92,6 +99,7 @@ def settings() -> BreakerSettings:
         failures=_positive(section.get("failures"), DEFAULT_FAILURES),
         window_seconds=_positive(section.get("window_seconds"), DEFAULT_WINDOW_SECONDS),
         probe_seconds=_positive(section.get("probe_seconds"), DEFAULT_PROBE_SECONDS),
+        max_probe_wait_seconds=_positive(section.get("max_probe_wait_seconds"), DEFAULT_MAX_PROBE_WAIT_SECONDS),
     )
 
 
@@ -135,22 +143,44 @@ def provider_for_profile(profile: str) -> str:
     return resolved
 
 
+def _stat_part(label: str, path: Optional[Path]) -> str:
+    try:
+        st = path.stat() if path is not None else None
+    except OSError:
+        st = None
+    return f"{label}:{st.st_mtime_ns}:{st.st_size}" if st else f"{label}:-"
+
+
+def _claude_login_path() -> Optional[Path]:
+    """Claude Code's shared OAuth file (``CLAUDE_CONFIG_DIR`` aware), the login every Claude
+    subscription profile borrows; it has no per-profile ``auth.json``."""
+    try:
+        from agent.anthropic_credentials import claude_code_credentials_path
+        return claude_code_credentials_path()
+    except (ImportError, OSError, RuntimeError):
+        return None
+
+
 def _profile_fingerprint(profile: str) -> str:
     home = _profile_home(profile)
-    parts = []
-    for leaf in ("auth.json", ".env"):
-        try:
-            st = (home / leaf).stat() if home is not None else None
-        except OSError:
-            st = None
-        parts.append(f"{leaf}:{st.st_mtime_ns}:{st.st_size}" if st else f"{leaf}:-")
+    parts = [_stat_part(leaf, home / leaf if home is not None else None) for leaf in ("auth.json", ".env")]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def credential_fingerprint(profiles: list[str]) -> dict[str, str]:
+def _uses_claude_login(provider: str) -> bool:
+    name = (provider or "").lower()
+    return "claude" in name or "anthropic" in name
+
+
+def credential_fingerprint(profiles: list[str], provider: str = "") -> dict[str, str]:
     """Non-secret per-profile hash of the provider's auth identity: ``(mtime_ns, size)`` of each
-    profile's ``auth.json`` (credential pool) and ``.env``. Only ``stat`` is called; no file is read."""
-    return {profile: _profile_fingerprint(profile) for profile in sorted(set(profiles))}
+    profile's ``auth.json`` (credential pool) and ``.env``, plus Claude Code's shared login file for a
+    Claude/Anthropic provider (key ``claude_code``). Only ``stat`` is called; no file is read. A
+    macOS Keychain login is invisible to ``stat``: ``max_probe_wait_seconds`` bounds that case."""
+    out = {profile: _profile_fingerprint(profile) for profile in sorted(set(profiles))}
+    if _uses_claude_login(provider):
+        out["claude_code"] = hashlib.sha256(_stat_part("claude_code", _claude_login_path()).encode()).hexdigest()[:16]
+    return out
 
 
 def _fingerprint_changed(rec: dict) -> Optional[dict[str, str]]:
@@ -160,7 +190,7 @@ def _fingerprint_changed(rec: dict) -> Optional[dict[str, str]]:
         stored = json.loads(rec.get("fingerprint") or "{}")
     except (TypeError, ValueError):
         stored = {}
-    current = credential_fingerprint(rec["profiles"])
+    current = credential_fingerprint(rec["profiles"], rec.get("provider") or "")
     changed = any(current.get(p) != h for p, h in stored.items() if p in current)
     rec["fingerprint"] = json.dumps(current, sort_keys=True)
     return current if changed else None
@@ -285,7 +315,9 @@ def all_breakers(conn: sqlite3.Connection) -> list[dict]:
 
 
 def _next_probe(now: int, reset_at: Optional[int], cfg: BreakerSettings) -> int:
-    return max(now + cfg.probe_seconds, int(reset_at or 0))
+    """After ``probe_seconds``, or at ``reset_at`` when later, but never past ``max_probe_wait_seconds``."""
+    wait = min(max(cfg.probe_seconds, int(reset_at or 0) - now), max(cfg.max_probe_wait_seconds, cfg.probe_seconds))
+    return now + wait
 
 
 def _close(rec: dict, now: int) -> None:
@@ -321,7 +353,7 @@ def record_exit(conn: sqlite3.Connection, profile: str, kind: str, *, text: str 
             tripped = True
             rec.update(state="open", reason=_EXIT_KINDS.get(kind, "quota"), opened_at=now, closed_at=None,
                        trip_id=f"{provider}:{now}:{secrets.token_hex(3)}", reset_at=reset_at if reset_at and reset_at > now else None,
-                       fingerprint=json.dumps(credential_fingerprint(rec["profiles"]), sort_keys=True),
+                       fingerprint=json.dumps(credential_fingerprint(rec["profiles"], provider), sort_keys=True),
                        probe_task_id=None, probe_started_at=None)
             rec["next_probe_at"] = _next_probe(now, rec["reset_at"], cfg)
             log.warning("kanban provider breaker %s OPEN (%s, trip %s): %s", provider, rec["reason"],
@@ -329,7 +361,7 @@ def record_exit(conn: sqlite3.Connection, profile: str, kind: str, *, text: str 
         elif rec["state"] == "half_open":
             # The probe (or a run spawned before the trip) hit the wall again: same trip.
             rec.update(state="open", probe_task_id=None, probe_started_at=None,
-                       fingerprint=json.dumps(credential_fingerprint(rec["profiles"]), sort_keys=True))
+                       fingerprint=json.dumps(credential_fingerprint(rec["profiles"], provider), sort_keys=True))
             rec["next_probe_at"] = _next_probe(now, rec.get("reset_at"), cfg)
         _save(conn, rec, now)
         if tripped and rec["reason"] == "auth":
@@ -494,4 +526,34 @@ def take_probe(conn: sqlite3.Connection, profile: str, task_id: str, now: Option
         rec.update(probe_task_id=task_id, probe_started_at=now, next_probe_at=now + settings().probe_seconds)
         _save(conn, rec, now)
     log.warning("kanban provider breaker %s probing with %s", rec["provider"], task_id)
+    return True
+
+
+# --------------------------------------------------------------------------- operator
+
+
+def probe_now(conn: sqlite3.Connection, provider: str, now: Optional[int] = None) -> bool:
+    """Operator: half-open ``provider`` now so the next tick spawns one probe; False when it has
+    no open breaker."""
+    now = int(time.time()) if now is None else int(now)
+    with _write(conn):
+        rec = _load(conn, provider)
+        if rec is None or rec["state"] == "closed":
+            return False
+        rec.update(state="half_open", next_probe_at=now, probe_task_id=None, probe_started_at=None)
+        _save(conn, rec, now)
+    log.warning("kanban provider breaker %s HALF_OPEN: operator probe (trip %s)", provider, rec.get("trip_id"))
+    return True
+
+
+def reset_breaker(conn: sqlite3.Connection, provider: str, now: Optional[int] = None) -> bool:
+    """Operator: close ``provider``'s breaker (its cards spawn again on the next tick); False when
+    it has no open breaker."""
+    now = int(time.time()) if now is None else int(now)
+    with _write(conn):
+        rec = _load(conn, provider)
+        if rec is None or rec["state"] == "closed":
+            return False
+        _close(rec, now)
+        _save(conn, rec, now)
     return True

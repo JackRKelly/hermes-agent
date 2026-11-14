@@ -5,19 +5,23 @@
 long tool call (``gh pr checks --watch``) or a wedged loop looks alive forever and holds a
 ``max_in_progress`` slot.
 
-Progress here is the worker's own conversation, not its heartbeat: the newest row the run wrote
-to its session's ``messages`` table (every model turn and every tool result is persisted as it
-happens), found through the run's ``owner_admitted`` receipt (``db`` + ``session_id``). The run's
-start counts as progress too. A single tool call longer than the threshold writes no row, so it
-counts as no progress. A run with no owner receipt has no readable activity source and is never
-judged here.
+Progress here is any sign the worker is still doing something: the newest row the run (or a
+child session it delegated to, ``sessions.parent_session_id``) wrote to the session ``messages``
+table, the card's ``last_heartbeat_at``, or the run's start, whichever is latest. The session is
+found through the run's ``owner_admitted`` receipt (``db`` + ``session_id``). A run whose newest
+row is an assistant ``tool_calls`` row is inside a tool call (the result row is written only when
+the tool returns) and is never judged: the tool's own timeout bounds it, not this sweep. A run with
+no owner receipt has no readable activity source and is never judged either. What is left is a
+worker that stopped heartbeating and writing without dying, which the 60-minute stale-heartbeat
+reclaim would otherwise hold for an hour.
 
-After ``kanban.idle_reclaim_minutes`` (default 15, 0 disables) without progress the run gets an
-``idle_flagged`` event; still idle ``kanban.idle_reclaim_grace_minutes`` (default 5) later, the
-worker is terminated and the card requeued with run outcome ``reclaimed`` (event ``reclaimed``,
-payload ``reason: idle``), never counted as a failure. Each idle reclaim feeds the block-loop
-counters (``block_kind = 'idle_reclaim'``): the ``IDLE_RECLAIM_ESCALATE_AFTER``-th in a row
-routes the card to ``triage`` with ``block_loop_detected`` instead of cycling it.
+Off by default: ``kanban.idle_reclaim_minutes`` 0. Set it (e.g. 15) to opt in. After that many
+minutes without progress the run gets an ``idle_flagged`` event; still idle
+``kanban.idle_reclaim_grace_minutes`` (default 5) later, the worker is terminated and the card
+requeued with run outcome ``reclaimed`` (event ``reclaimed``, payload ``reason: idle``), never
+counted as a failure. Each idle reclaim feeds the block-loop counters (``block_kind =
+'idle_reclaim'``): the ``IDLE_RECLAIM_ESCALATE_AFTER``-th in a row routes the card to ``triage``
+with ``block_loop_detected`` instead of cycling it.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
-DEFAULT_IDLE_RECLAIM_MINUTES = 15
+DEFAULT_IDLE_RECLAIM_MINUTES = 0  # opt-in
 DEFAULT_IDLE_RECLAIM_GRACE_MINUTES = 5
 IDLE_RECLAIM_ESCALATE_AFTER = 3
 IDLE_BLOCK_KIND = "idle_reclaim"
@@ -58,27 +62,43 @@ def idle_settings() -> tuple[int, int]:
     return threshold * 60, grace * 60
 
 
-def session_last_message_at(receipt: dict) -> Optional[float]:
-    """Newest ``messages.timestamp`` of the run's session, read-only; None when unreadable."""
+_NO_TOOL_CALLS = ("", "[]", "null")
+
+
+def session_activity(receipt: dict) -> tuple[Optional[float], bool]:
+    """``(newest message timestamp of the session and its child sessions, tool_in_flight)``,
+    read-only; ``(None, False)`` when unreadable."""
     try:
         uri = Path(receipt["db"]).as_uri() + "?mode=ro"
+        sid = receipt["session_id"]
         with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as db:
-            row = db.execute("SELECT MAX(timestamp) FROM messages WHERE session_id = ?",
-                             (receipt["session_id"],)).fetchone()
+            last = db.execute("SELECT role, tool_calls, timestamp FROM messages WHERE session_id = ? "
+                              "ORDER BY timestamp DESC, rowid DESC LIMIT 1", (sid,)).fetchone()
+            try:
+                child = db.execute("SELECT MAX(m.timestamp) FROM messages m JOIN sessions s ON s.id = m.session_id "
+                                   "WHERE s.parent_session_id = ?", (sid,)).fetchone()[0]
+            except sqlite3.OperationalError:  # no sessions table: no children to read
+                child = None
     except (KeyError, TypeError, ValueError, OSError, sqlite3.Error):
-        return None
-    return float(row[0]) if row and row[0] is not None else None
+        return None, False
+    if last is None:
+        return (float(child) if child is not None else None), False
+    in_flight = last[0] == "assistant" and str(last[1] or "").strip() not in _NO_TOOL_CALLS
+    return max(float(last[2]), float(child or 0)), in_flight
 
 
-def last_progress_at(conn: sqlite3.Connection, task_id: str, run_started_at: Optional[int]) -> Optional[int]:
-    """Epoch of the run's latest model turn or tool call (its start at the earliest), or None
-    when the run has no owner receipt to read activity from."""
+def last_progress_at(conn: sqlite3.Connection, task_id: str, run_started_at: Optional[int],
+                     heartbeat_at: Optional[int] = None) -> Optional[int]:
+    """Epoch of the run's latest message (own or a child session's), heartbeat or start; None
+    when the run has no owner receipt or is inside a tool call (never judged)."""
     from hermes_cli.kanban_owner_recovery import _owner_receipt
     receipt = _owner_receipt(conn, task_id)
     if not receipt or not receipt.get("session_id"):
         return None
-    last = session_last_message_at(receipt)
-    return int(max(last or 0, run_started_at or 0)) or None
+    last, in_flight = session_activity(receipt)
+    if in_flight:
+        return None
+    return int(max(last or 0, run_started_at or 0, heartbeat_at or 0)) or None
 
 
 def _flag_event(conn: sqlite3.Connection, task_id: str, run_id: int) -> Optional[tuple[int, dict]]:
@@ -100,12 +120,13 @@ def sweep_idle_runs(conn: sqlite3.Connection, *, now: Optional[int] = None, sign
     reclaimed: list[str] = []
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, t.claim_lock, t.current_run_id, t.assignee, "
-        "r.started_at AS run_started_at FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+        "t.last_heartbeat_at, r.started_at AS run_started_at FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.worker_pid IS NOT NULL").fetchall()
     for row in rows:
         if not str(row["claim_lock"] or "").startswith(kb._host_prefix()) or owner_reclaim_blocked(conn, row["id"]):
             continue
-        progress = last_progress_at(conn, row["id"], kb._to_epoch(row["run_started_at"]))
+        progress = last_progress_at(conn, row["id"], kb._to_epoch(row["run_started_at"]),
+                                    kb._to_epoch(row["last_heartbeat_at"]))
         if progress is None or now - progress < threshold:
             continue
         flag = _flag_event(conn, row["id"], row["current_run_id"])
@@ -114,7 +135,7 @@ def sweep_idle_runs(conn: sqlite3.Connection, *, now: Optional[int] = None, sign
                 kb._append_event(conn, row["id"], "idle_flagged", {
                     "idle_seconds": now - progress, "last_progress_at": progress,
                     "threshold_seconds": threshold, "grace_seconds": grace,
-                    "source": "session_messages"}, run_id=row["current_run_id"])
+                    "source": "session_messages+heartbeat"}, run_id=row["current_run_id"])
             flagged.append(row["id"])
             continue
         if now - flag[0] >= grace and _reclaim_idle_run(conn, row, progress, now, signal_fn=signal_fn):
@@ -150,7 +171,7 @@ def _reclaim_idle_run(conn: sqlite3.Connection, row, progress: int, now: int, *,
         payload = {"reason": "idle", "idle_seconds": now - progress, "last_progress_at": progress,
                    "idle_reclaims": recurrences, "retry_status": status, **termination}
         run_id = kb._end_run(conn, tid, outcome="reclaimed", status="reclaimed",
-                             error=f"idle: no model turn or tool call for {now - progress}s", metadata=payload)
+                             error=f"idle: no message, tool call or heartbeat for {now - progress}s", metadata=payload)
         kb._append_event(conn, tid, "reclaimed", payload, run_id=run_id)
         if escalate:
             kb._append_event(conn, tid, "block_loop_detected", {
