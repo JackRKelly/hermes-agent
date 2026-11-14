@@ -117,6 +117,11 @@ class LoopLagMonitor:
 
     def check(self, now):
         """One observation off the loop; public so a test can drive it deterministically."""
+        if self.loop.is_closed():
+            self._stopped.set()
+            return
+        if not self.loop.is_running():  # a loop that is not running is not stalled
+            return
         beat = self.beat
         late = now - beat - self.interval
         if late > self.threshold and self._reported_beat != beat:

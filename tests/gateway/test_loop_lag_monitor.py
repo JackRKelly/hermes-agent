@@ -46,6 +46,18 @@ def test_a_blocked_loop_is_reported_with_its_stack_and_its_lateness(caplog):
     assert '_blocking_section_on_the_loop' in blocked[0]
 
 
+def test_a_closed_loop_is_not_reported_as_stalled_and_ends_the_monitor(caplog):
+    from gateway.loop_lag_monitor import start_loop_lag_monitor
+    caplog.set_level(logging.WARNING, logger='gateway.loop_lag_monitor')
+
+    async def main():
+        return start_loop_lag_monitor(asyncio.get_running_loop(), interval=0.1, threshold=0.5)
+    monitor = asyncio.run(main())  # never stopped: the loop just closes under it
+    monitor.check(time.monotonic() + 60)
+    assert not _messages(caplog, 'blocked for')
+    wait_until(lambda: not monitor._thread.is_alive(), timeout=10, what='the monitor thread to exit')
+
+
 def test_a_saturated_default_executor_is_reported_with_what_its_threads_run(caplog):
     from gateway.loop_lag_monitor import LoopLagMonitor, executor_state
     caplog.set_level(logging.WARNING, logger='gateway.loop_lag_monitor')
