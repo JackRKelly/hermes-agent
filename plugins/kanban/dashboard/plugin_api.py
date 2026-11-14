@@ -88,13 +88,38 @@ def _existing_board_slug(slug: str) -> str:
     return normed
 
 
-def _conn(board: Optional[str] = None):
-    """Connect to the already-normalised ``board`` (``None`` = active). ``init_db`` is
-    idempotent; running it here lets a fresh install self-heal if POST /tasks arrives first."""
+# Resolved DB path -> identity of the file this process last ran ``init_db`` on.
+# ``init_db`` forces the migration pass and the full ``PRAGMA integrity_check``
+# (a large share of every ``/board`` read on a big board), so the dashboard runs
+# it once per DB file per process, not once per request.
+_INITIALIZED_DB_FILES: dict[str, tuple] = {}
+
+
+def _db_file_identity(path: Path) -> Optional[tuple]:
+    """``(st_dev, st_ino, birth time)`` of ``path``, or ``None`` when it is missing."""
     try:
-        kanban_db.init_db(board=board)
-    except Exception as exc:
-        log.warning("kanban init_db failed: %s", exc)
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, getattr(st, "st_birthtime", None))
+
+
+def _conn(board: Optional[str] = None):
+    """Connect to the already-normalised ``board`` (``None`` = active). The first
+    request per DB file runs ``init_db`` so a fresh install self-heals if POST /tasks
+    arrives first; it runs again only if the file goes missing or is replaced."""
+    path = kanban_db.kanban_db_path(board=board)
+    key = str(path.resolve())
+    identity = _db_file_identity(path)
+    if identity is None or _INITIALIZED_DB_FILES.get(key) != identity:
+        try:
+            kanban_db.init_db(board=board)
+        except Exception as exc:
+            log.warning("kanban init_db failed: %s", exc)
+        else:
+            identity = _db_file_identity(path)
+            if identity is not None:
+                _INITIALIZED_DB_FILES[key] = identity
     return kbc.connect(board=board)
 
 
