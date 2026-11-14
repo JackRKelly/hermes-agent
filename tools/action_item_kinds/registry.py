@@ -30,11 +30,8 @@ KINDS: Mapping[str, KindSpec] = MappingProxyType({spec.kind: spec for spec in (
 )})
 ENVELOPE_VERSION = 2
 ENVELOPE_SCHEMA = load_schema(KINDS_DIR / f"envelope.v{ENVELOPE_VERSION}.schema.json")
-# Legacy free-text parks, most specific first: ``user_task`` takes a ``[needs-jack:sign-in...]`` park with text
-# (even a no-op one); ``design_decision`` takes a remaining ``[needs-jack`` park that has question text, plus a
-# ``[needs-jack`` or ``[decision]`` park that says nothing needs Jack and asks nothing real (no-op cases read as no
-# questions, so never answerable); ``other`` takes anything left, including a ``[needs-jack`` park with no question
-# text (nothing after the tag, or only a "Rec:" line; a textless ``[needs-jack:sign-in]`` too).
+# Legacy free-text parks, most specific first. The kind each park reads as, by tag and by the text after it, is
+# the table in the ``design_decision`` module docstring (a test asserts every cell against this order).
 _LEGACY_ORDER = ("pr_merge", "send_email", "send_message", "user_task", "design_decision", "other")
 _FIELD_RE = re.compile(r"^((?:envelope|payload)[\w.\[\]]*)\s*:")
 

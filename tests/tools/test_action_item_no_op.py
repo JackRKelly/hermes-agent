@@ -146,6 +146,39 @@ def test_a_needs_jack_park_with_no_question_text_reads_as_other(reason):
     assert typed is not None and typed[0] == "other"
 
 
+# One sample per tag and per text column of the design_decision module docstring's table.
+_TABLE_TAGS = {"``[needs-jack]``": "[needs-jack]", "``[needs-jack:sign-in]``": "[needs-jack:sign-in]",
+               "``[needs-jack:<other>]``": "[needs-jack:deploy]", "``[decision]``": "[decision]"}
+_TABLE_TEXTS = ("", " Rec: ship Monday", " Ship now or Monday?", " Nothing needs Jack.")
+
+
+def _documented_park_kinds() -> list[tuple[str, str]]:
+    """(park reason, documented kind) for every cell of the docstring table."""
+    from tools.action_item_kinds import design_decision
+    rows = [line for line in (design_decision.__doc__ or "").splitlines() if line.startswith("``[")]
+    cells = []
+    for row in rows:
+        tag, *kinds = row.split()
+        assert len(kinds) == len(_TABLE_TEXTS), row
+        cells += [(_TABLE_TAGS[tag] + text, kind) for text, kind in zip(_TABLE_TEXTS, kinds)]
+    assert len(cells) == len(_TABLE_TAGS) * len(_TABLE_TEXTS)
+    return cells
+
+
+@pytest.mark.parametrize(("reason", "documented"), _documented_park_kinds())
+def test_every_cell_of_the_documented_park_table_matches_the_code(reason, documented):
+    """The docstring table is the contract: each park reads as exactly the kind its cell names."""
+    typed = legacy_payload(reason)
+    assert typed is not None, reason
+    kind, parsed = typed
+    if documented == "dd(0q)":
+        assert (kind, parsed["questions"]) == ("design_decision", []), reason
+    else:
+        assert kind == documented, reason
+        if kind == "design_decision":
+            assert parsed["questions"], reason
+
+
 @pytest.mark.parametrize("reason", [
     "[decision] What next? Nothing needs Jack.",
     "[needs-jack:decision] What next? Nothing needs Jack. then=ready",
