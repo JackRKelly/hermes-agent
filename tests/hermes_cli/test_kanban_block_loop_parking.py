@@ -151,8 +151,9 @@ def test_jack_park_reblock_stays_blocked(kanban_home: Path, reason: str, times: 
 
 # A clean continue handoff (Nov 14: a prod rollout card hit its step budget at a safe point,
 # re-parked for Captain to re-run, and was bounced to triage, where promote/block/unblock all refuse
-# it) re-parks by design: it stays blocked, with the recurrences still counted, up to the higher
-# continue limit. Captain's runbook puts continue, continuation and turn-budget in one class.
+# it) re-parks by design: it stays blocked, with the recurrences still counted, until it is the
+# continue limit'th handoff in a row. Captain's runbook puts continue, continuation and turn-budget
+# in one class.
 _CONTINUE_LIMIT = kb_jp.CONTINUE_RECURRENCE_LIMIT
 _CONTINUE_REASONS = [
     ("[captain:continue] Phase 1 done, nothing half-changed; re-run to continue from the handoff.", "needs_input"),
@@ -182,7 +183,7 @@ def test_captain_continue_loop_goes_to_triage_at_the_continue_limit(kanban_home:
         assert kb.get_task(conn, tid).status == "triage"
         last = [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
         assert last.kind == "block_loop_detected"
-        assert (last.payload["recurrences"], last.payload["limit"]) == (_CONTINUE_LIMIT, _CONTINUE_LIMIT)
+        assert (last.payload["continues"], last.payload["limit"]) == (_CONTINUE_LIMIT, _CONTINUE_LIMIT)
 
 
 def test_captain_continue_after_a_jack_park_stays_blocked(kanban_home: Path) -> None:
@@ -194,6 +195,45 @@ def test_captain_continue_after_a_jack_park_stays_blocked(kanban_home: Path) -> 
         assert kb.block_task(conn, tid, reason="[captain:continue] Re-run to continue", kind="needs_input")
         task = kb.get_task(conn, tid)
         assert (task.status, task.block_recurrences) == ("blocked", 2)
+
+
+def _next_block(conn, tid, reason, kind="needs_input"):
+    assert kb.unblock_task(conn, tid)
+    _claim(conn, tid)
+    assert kb.block_task(conn, tid, reason=reason, kind=kind)
+    return [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+
+
+def test_captain_continue_after_many_jack_parks_stays_blocked(kanban_home: Path) -> None:
+    # The rollout card's path: Jack parks at every phase raise the shared per-kind counter past the
+    # continue limit, and the next continue handoff must still stay blocked (Nov 14, t_bbaa3111).
+    park = "[needs-jack:decision] Phase gate: go ahead? then=ready item=2877c0d1e2f3a4b5"
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, park, _CONTINUE_LIMIT + 1)
+        last = _next_block(conn, tid, "[captain:continue] Phase done; re-run to continue")
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_recurrences) == ("blocked", _CONTINUE_LIMIT + 2)
+        assert (last.kind, last.payload["continues"]) == ("blocked", 1)
+
+
+def test_a_jack_park_ends_a_run_of_continue_handoffs(kanban_home: Path) -> None:
+    cont = "[captain:continue] Re-run to continue"
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, cont, _CONTINUE_LIMIT - 1)
+        _next_block(conn, tid, "[needs-jack:decision] Which way? then=ready item=2877c0d1e2f3a4b5")
+        last = _next_block(conn, tid, cont)
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert last.payload["continues"] == 1
+
+
+def test_continue_handoffs_count_across_block_kinds(kanban_home: Path) -> None:
+    # A turn-budget stop files ``transient``, a phase handoff ``needs_input``: one run of handoffs.
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, "[captain:turn-budget] Out of turns; re-run", _CONTINUE_LIMIT - 1, kind="transient")
+        last = _next_block(conn, tid, "[captain:continue] Re-run to continue", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+        assert (last.kind, last.payload["continues"], last.payload["limit"]) == (
+            "block_loop_detected", _CONTINUE_LIMIT, _CONTINUE_LIMIT)
 
 
 @pytest.mark.parametrize("reason,kind", [

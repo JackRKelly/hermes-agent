@@ -9,6 +9,7 @@ reason with no owner tag that binds a typed action item (``item=<hash16>``) is J
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 
@@ -44,9 +45,34 @@ def is_jack_park_reason(reason: Optional[str]) -> bool:
 _CONTINUE_RE = re.compile(r"\[captain:(?:continue|continuation|turn-budget)\]", re.IGNORECASE)
 
 # A continue handoff re-parks by design, but Captain (an agent) unblocks it with no human step, so
-# a card that keeps handing off for the same cause is looping. Past this many recurrences it takes
-# the normal triage route.
+# a card that hands off this many times in a row (see ``continue_streak``) is looping: the handoff
+# that reaches this count takes the normal triage route.
 CONTINUE_RECURRENCE_LIMIT = 5
+
+# Every event that ends a run of continue handoffs when it is not itself a continue block.
+_STREAK_EVENT_KINDS = ("blocked", "block_loop_detected", "dependency_wait", "completed")
+
+
+def continue_streak(conn, task_id: str) -> int:
+    """Continue handoffs in a row on this card, newest first, before the block being written now.
+
+    Counted from the event log, not the per-kind ``block_recurrences`` counter, which every
+    same-kind block raises (Jack parks included) and only completion clears. The run ends at the
+    last completion or the last block of any other cause: a Jack park or a triage bounce is a human
+    step, and another cause is the normal breaker's to count. Call inside the block write txn.
+    """
+    rows = conn.execute(
+        f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN "
+        f"({','.join('?' * len(_STREAK_EVENT_KINDS))}) ORDER BY id DESC",
+        (task_id, *_STREAK_EVENT_KINDS),
+    )
+    streak = 0
+    for kind, payload in rows:
+        reason = (json.loads(payload or "{}") or {}).get("reason")
+        if kind != "blocked" or not is_captain_continue_reason(reason):
+            break
+        streak += 1
+    return streak
 
 
 def is_captain_continue_reason(reason: Optional[str]) -> bool:
