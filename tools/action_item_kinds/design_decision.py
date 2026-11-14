@@ -14,7 +14,11 @@ needs Jack and asks no real question) only decides what reaches this kind:
 - ``[needs-jack:sign-in...]`` with text: ``user_task`` (one step, answered Done), even when the
   text is a no-op; this kind never sees it.
 - ``[needs-jack]`` or ``[needs-jack:<what>]`` with any other ``<what>``: a no-op reads as a
-  design_decision with no questions (never answerable); otherwise as questions.
+  design_decision with no questions (never answerable); a park with question text reads as
+  questions.
+- Any ``[needs-jack...]`` park with no question text (nothing after the tag, or only a "Rec:"
+  line), a textless ``[needs-jack:sign-in]`` included: no questions can be derived, so
+  ``legacy_questions`` returns None and the park reads as ``other``.
 - ``[decision]``: a no-op reads as a design_decision with no questions; otherwise ``other``.
 """
 
@@ -232,7 +236,8 @@ def legacy_questions(reason: str) -> Optional[dict]:
     A no-op park (``readability.is_no_op_text``) tagged ``[needs-jack]``, ``[needs-jack:<what>]`` or
     ``[decision]`` reads as no questions, so it never renders as answerable (nor as an ``other`` with
     Approve). A ``[needs-jack:sign-in...]`` park with text never gets here: ``user_task`` reads it
-    first (see the module docstring).
+    first (see the module docstring). A ``[needs-jack...]`` park with no question text (empty after
+    the tag, or only a "Rec:" line) yields no questions and returns None, so it reads as ``other``.
     """
     if not reason:
         return None

@@ -137,6 +137,15 @@ def test_a_real_needs_jack_park_still_reads_as_its_question():
     assert legacy_questions("[decision] Pick a vendor") is None
 
 
+@pytest.mark.parametrize("reason", ["[needs-jack]", "[needs-jack:decision]", "[needs-jack:sign-in]",
+                                    "[needs-jack:decision] Rec: ship it"])
+def test_a_needs_jack_park_with_no_question_text_reads_as_other(reason):
+    """No question can be derived, so the park is not a design_decision (the docstrings say so)."""
+    assert legacy_questions(reason) is None
+    typed = legacy_payload(reason)
+    assert typed is not None and typed[0] == "other"
+
+
 @pytest.mark.parametrize("reason", [
     "[decision] What next? Nothing needs Jack.",
     "[needs-jack:decision] What next? Nothing needs Jack. then=ready",
