@@ -32,7 +32,7 @@ def snapshot_path(db_path: Path) -> Path:
 
 def read_snapshot(db_path: Path) -> Optional[dict]:
     try:
-        doc = json.loads(snapshot_path(db_path).read_text(encoding="utf-8"))
+        doc = json.loads(snapshot_path(db_path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) and doc.get("schema") == SCHEMA else None

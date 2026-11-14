@@ -199,16 +199,16 @@ def _fingerprint_changed(rec: dict) -> Optional[dict[str, str]]:
 # --------------------------------------------------------------------------- message + reset_at
 
 _MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_abbr) if m}
-_RETRY_AFTER_RE = re.compile(r"retry[\s_-]?after[\"']?\s*[:=]?\s*[\"']?(\d{1,7})(?:\s*(?:s|sec|secs|seconds))?\b", re.I)
-_RESET_EPOCH_RE = re.compile(r"reset(?:s|_at|s_at)?[\"']?\s*[:=]\s*[\"']?(\d{10})(?:\.\d+)?\b", re.I)
-_RESET_ISO_RE = re.compile(r"reset\w*[^0-9]{0,12}(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(Z|[+-]\d{2}:?\d{2})?", re.I)
+_RETRY_AFTER_RE = re.compile(r"retry[\s_-]?after[\"']?\s*[:=]?\s*[\"']?(\d{1,7})(?:\s*(?:s|sec|secs|seconds))?\b", re.IGNORECASE)
+_RESET_EPOCH_RE = re.compile(r"reset(?:s|_at|s_at)?[\"']?\s*[:=]\s*[\"']?(\d{10})(?:\.\d+)?\b", re.IGNORECASE)
+_RESET_ISO_RE = re.compile(r"reset\w*[^0-9]{0,12}(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(Z|[+-]\d{2}:?\d{2})?", re.IGNORECASE)
 _RESET_DATE_RE = re.compile(
     r"reset(?:s|ting)?\s+(?:on\s+|at\s+)?([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?"
-    r"(?:,?\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?", re.I)
+    r"(?:,?\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?", re.IGNORECASE)
 
 
 def _iso_epoch(day: str, hh: str, mm: str, ss: Optional[str], tz: Optional[str]) -> Optional[int]:
-    from datetime import datetime, timedelta, timezone
+    from datetime import UTC, datetime, timedelta, timezone
     try:
         dt = datetime.strptime(f"{day} {hh}:{mm}:{ss or '00'}", "%Y-%m-%d %H:%M:%S")
     except ValueError:
@@ -216,7 +216,7 @@ def _iso_epoch(day: str, hh: str, mm: str, ss: Optional[str], tz: Optional[str])
     if not tz:
         return int(time.mktime(dt.timetuple()))
     if tz.upper() == "Z":
-        return int(dt.replace(tzinfo=timezone.utc).timestamp())
+        return int(dt.replace(tzinfo=UTC).timestamp())
     sign = 1 if tz[0] == "+" else -1
     digits = tz[1:].replace(":", "")
     offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0)) * sign
@@ -512,10 +512,12 @@ def paused(conn: sqlite3.Connection, profile: str, now: Optional[int] = None, *,
     return held
 
 
-def take_probe(conn: sqlite3.Connection, profile: str, task_id: str, now: Optional[int] = None) -> bool:
-    """Claim the half-open probe slot for ``task_id``; True when it may spawn (closed: always)."""
+def take_probe(conn: sqlite3.Connection, profile: str, task_id: str, now: Optional[int] = None, *,
+               dry_run: bool = False) -> bool:
+    """Claim the half-open probe slot for ``task_id``; True when it may spawn (closed: always). A dry
+    run claims nothing (:func:`paused` already answered for it)."""
     now = int(time.time()) if now is None else int(now)
-    if _active(conn, profile) is None:
+    if dry_run or _active(conn, profile) is None:
         return True  # closed: no write transaction on the hot path
     with _write(conn):
         rec = _active(conn, profile)

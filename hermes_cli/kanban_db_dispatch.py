@@ -2047,6 +2047,20 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
 
 
+def _held_for_profile(conn, task_id: str, assignee: str, result: DispatchResult, *, dry_run: bool,
+                      per_profile_cap: Optional[int], per_profile_running: dict[str, int]) -> bool:
+    """Per-profile cap (one profile's local model / API quota / browser pool must not be overwhelmed
+    by a fan-out even with global headroom), then the provider breaker; records the hold."""
+    current = per_profile_running.get(assignee, 0)
+    if per_profile_cap is not None and current >= per_profile_cap:
+        result.skipped_per_profile_capped.append((task_id, assignee, current))
+        return True
+    if _kbpb.paused(conn, assignee, note=not dry_run):  # no per-tick event: the breaker row says why
+        result.respawn_guarded.append((task_id, "provider_paused"))
+        return True
+    return False
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -2088,15 +2102,8 @@ def _dispatch_lane_task(
                         or last["payload"] != _kb._json_or_null({"assignee": assignee})):
                     _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
         return False
-    # Per-profile cap: one profile's local model / API quota / browser pool
-    # must not be overwhelmed by a fan-out even with global headroom.
-    if per_profile_cap is not None:
-        current = per_profile_running.get(assignee, 0)
-        if current >= per_profile_cap:
-            result.skipped_per_profile_capped.append((task_id, assignee, current))
-            return False
-    if _kbpb.paused(conn, assignee, note=not dry_run):  # no per-tick event: the breaker row says why
-        result.respawn_guarded.append((task_id, "provider_paused"))
+    if _held_for_profile(conn, task_id, assignee, result, dry_run=dry_run,
+                         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running):
         return False
     guard_reason = check_respawn_guard(conn, task_id, lane=lane)
     if guard_reason is not None:
@@ -2112,7 +2119,7 @@ def _dispatch_lane_task(
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
         return False
-    if not dry_run and not _kbpb.take_probe(conn, assignee, task_id):
+    if not _kbpb.take_probe(conn, assignee, task_id, dry_run=dry_run):
         result.respawn_guarded.append((task_id, "provider_paused"))
         return False
 
