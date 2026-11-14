@@ -5,8 +5,8 @@ refuses to install or load against a registry version it was not built for.
 
 Version 2: every new envelope carries a human ``title`` and ``summary`` (envelope schema v2, which
 still reads a v1 envelope without them), ``design_decision`` v2 asks 1-5 questions that Jack
-answers (never approves), and a free-text park reads as the kind in the ``design_decision``
-module docstring's table (by tag and text).
+answers (never approves), and a free-text ``[needs-jack...]`` or ``[decision]`` park reads as the
+kind in the ``design_decision`` module docstring's table (by tag and text).
 """
 
 from __future__ import annotations
@@ -31,8 +31,9 @@ KINDS: Mapping[str, KindSpec] = MappingProxyType({spec.kind: spec for spec in (
 )})
 ENVELOPE_VERSION = 2
 ENVELOPE_SCHEMA = load_schema(KINDS_DIR / f"envelope.v{ENVELOPE_VERSION}.schema.json")
-# Legacy free-text parks, most specific first. The kind each park reads as, by tag and by the text after it, is
-# the table in the ``design_decision`` module docstring (a test asserts every cell against this order).
+# Legacy free-text parks, most specific first. The kind a ``[needs-jack...]`` or ``[decision]`` park reads as, by
+# tag and by the text after it, is the table in the ``design_decision`` module docstring (a test asserts every
+# cell against this order).
 _LEGACY_ORDER = ("pr_merge", "send_email", "send_message", "user_task", "design_decision", "other")
 _FIELD_RE = re.compile(r"^((?:envelope|payload)[\w.\[\]]*)\s*:")
 

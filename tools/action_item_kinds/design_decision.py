@@ -9,10 +9,10 @@ re-worded question or option is a new item.
 ``legacy_questions`` projects a free-text park's text as questions. Kinds earlier in the
 registry's ``_LEGACY_ORDER`` read a park first, so the no-op rule (``readability.is_no_op_text``:
 says nothing needs Jack and asks no real question) only decides what reaches this kind. The table
-below is the only statement of the kind each legacy park reads as (``registry.legacy_payload``),
-by tag and by the text after the tag; ``dd(0q)`` is a design_decision with no questions (never
-answerable). A test reads this table from the module's ``__doc__`` and asserts every cell
-against the code, so the two cannot drift:
+below is the only statement of the kind a ``[needs-jack...]`` or ``[decision]`` park reads as
+(``registry.legacy_payload``), by tag and by the text after the tag; ``dd(0q)`` is a
+design_decision with no questions (never answerable). A test reads this table from the module's
+``__doc__`` and asserts every cell against the code, so the two cannot drift:
 
 ==========================  =========  ==========  ===============  ===============
 tag                         no text    Rec: only   question text    no-op text
@@ -230,7 +230,8 @@ def _options(rec: Optional[str], alternatives: list[str]) -> list[dict]:
 
 
 def legacy_questions(reason: str) -> Optional[dict]:
-    """A free-text ``[needs-jack:...]`` park read as v2 questions, else None.
+    """A free-text ``[needs-jack...]`` park read as v2 questions; a no-op ``[needs-jack...]`` or
+    ``[decision]`` park gives ``questions: []``; anything else None.
 
     ``{questions: [{key, question, options, allow_other: True}], source_text}``: numbered
     questions ("(1) ... (2) ..." / "1. ... 2. ...") become one question each; a "Rec:" line split
@@ -239,9 +240,11 @@ def legacy_questions(reason: str) -> Optional[dict]:
     Never an approve-style option. ``source_text`` is the raw park for the Details view. This is a
     read-only projection, not an agent payload: it is never stored or hashed.
 
-    Return value only: a no-op text (``readability.is_no_op_text``) gives ``questions: []``, and a
-    park with no question text (empty after the tag, or only a "Rec:" line) gives None. The kind a
-    park finally reads as is not decided here: see the table in the module docstring.
+    Return value only: a ``[needs-jack...]`` or ``[decision]`` park whose text is a no-op
+    (``readability.is_no_op_text``) gives ``questions: []``; an untagged text (no-op or not), any
+    other ``[decision]`` park, and a ``[needs-jack...]`` park with no question text (empty after the
+    tag, or only a "Rec:" line) give None. The kind a park finally reads as is not decided here:
+    see the table in the module docstring.
     """
     if not reason:
         return None

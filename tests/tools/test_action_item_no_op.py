@@ -145,6 +145,10 @@ def test_a_park_with_no_question_text_projects_no_questions(reason):
     assert legacy_questions(reason) is None
 
 
+def test_an_untagged_no_op_text_projects_nothing():
+    assert legacy_questions("Nothing needs Jack.") is None
+
+
 # One sample per tag and per text column of the design_decision module docstring's table.
 _TABLE_TAGS = {"``[needs-jack]``": "[needs-jack]", "``[needs-jack:sign-in]``": "[needs-jack:sign-in]",
                "``[needs-jack:<other>]``": "[needs-jack:deploy]", "``[decision]``": "[decision]"}
