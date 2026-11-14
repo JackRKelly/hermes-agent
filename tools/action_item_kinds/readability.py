@@ -267,20 +267,27 @@ def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
 
 
 # A decision that says there is nothing to decide (a stuck-work check that found nothing, Nov 13). The
-# same pattern as JackRKelly/assistant's; change both in the same pair of PRs.
+# rule is the shared fixture ``tests/fixtures/no_op_rule.v1.json``, committed byte-identical in
+# JackRKelly/assistant (``scripts/kanban_gates.py``); its test pins these four patterns and every case.
 NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.IGNORECASE)
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+# A bare "what next?" asks nothing (the fallback the Nov 13 item showed).
+GENERIC_ASK_RE = re.compile(r"\bwhat(?: should (?:happen|we do)| do we do| now)?(?: next)?\s*\?", re.IGNORECASE)
+# A question or option list: a real ask, wherever it sits.
+ASK_LEFT_RE = re.compile(r"\?|\boptions?\s*[:(]|\brec(?:ommend(?:ation|ed)?)?\s*:", re.IGNORECASE)
+URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 def is_no_op_text(text: Any, *, has_real_question: bool = False) -> bool:
     """True when ``text`` says nothing needs Jack and asks nothing real. The phrase alone never makes a
-    text a no-op: drop every sentence that matches ``NO_OP_RE``; a question (``?``) left over is a real
-    ask ("Should we default to UPS or FedEx? Nothing else needs Jack."). ``has_real_question`` (another
-    field of the item asks a real question) also clears a text whose only no-op phrase is "nothing else
-    needs Jack": "else" means something did. Same rule as JackRKelly/assistant's ``kanban_gates``."""
+    text a no-op: remove every URL, ``NO_OP_RE`` phrase and bare "what next?"; a question or option list
+    left over (``ASK_LEFT_RE``) is a real ask, even in the same sentence as the phrase ("No action needed
+    on staging, but should prod go now or Monday?"). ``has_real_question`` (another question of the item
+    is real) also clears a text whose only no-op phrases are "nothing else ...": "else" means something
+    did. Shared fixture: ``tests/fixtures/no_op_rule.v1.json``."""
     if not isinstance(text, str) or not NO_OP_RE.search(text):
         return False
-    if any("?" in s for s in _SENTENCE_RE.split(text) if not NO_OP_RE.search(s)):
+    left = GENERIC_ASK_RE.sub(" ", NO_OP_RE.sub(" ", URL_RE.sub(" ", text)))
+    if ASK_LEFT_RE.search(left):
         return False
     return not (has_real_question
                 and all(m.group(0).lower().startswith("nothing else") for m in NO_OP_RE.finditer(text)))

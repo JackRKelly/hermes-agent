@@ -6,6 +6,10 @@ nothing needs Jack / What should happen next?".
 """
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 import pytest
 
 from tools.action_item_kinds import LiveSources, SchemaError, build_envelope, legacy_payload, legacy_questions
@@ -34,7 +38,7 @@ def build(p: dict, **overrides) -> dict:
     ("summary", {"summary": "Nothing to fix and nothing needs Jack."}),
     ("payload.questions[0].question", {"p": payload("Nothing here needs Jack; what next?")}),
     ("title", {"title": "No decision needed for the deploy"}),
-    ("ask", {"ask": "Not a decision for Jack, just close it?"}),
+    ("ask", {"ask": "Not a decision for Jack, just a heads-up."}),
     ("why", {"why": "Nothing to do here."}),
     ("payload.rec_reason", {"p": payload(rec_reason="No action is required.")}),
 ])
@@ -55,26 +59,39 @@ def test_a_normal_decision_is_accepted():
     {"summary": "Should Temu default to UPS or FedEx? Nothing else needs Jack."},
     {"summary": "Checked the deploy settings. Nothing else needs Jack."},
     {"why": "No action needed on staging. Prod: now or Monday?"},
+    {"why": "No action needed on staging, but should prod go now or Monday?"},
 ])
 def test_a_real_question_with_a_no_op_phrase_is_accepted(overrides):
     env = build(payload(), **overrides)
     assert env["payload"]["questions"][0]["question"] == "When should staging and prod get it?"
 
 
+def test_an_ask_in_the_same_sentence_as_the_phrase_is_a_real_question():
+    env = build(payload("No action needed on staging, but should prod go now or Monday?"))
+    assert env["payload"]["questions"][0]["question"].endswith("now or Monday?")
+    projected = legacy_questions("[needs-jack:decision] No action needed on staging, but should prod go now or Monday?")
+    assert projected is not None and projected["questions"], projected
+
+
 def test_nothing_else_still_refuses_when_no_question_is_real():
     with pytest.raises(SchemaError, match=r"^payload\.questions\[0\]\.question: "):
-        build(payload("Nothing else needs Jack; close it?"), summary="Checked it. Nothing else needs Jack.")
+        build(payload("Nothing else needs Jack; what next?"), summary="Checked it. Nothing else needs Jack.")
 
 
-@pytest.mark.parametrize("text, no_op", [
-    ("Nothing to fix and nothing needs Jack.", True),
-    ("Nothing here needs Jack; what next?", True),
-    ("Should we default to UPS or FedEx? Rec: UPS. Nothing else needs Jack.", False),
-    ("Pick UPS or FedEx for Temu? Nothing else needs Jack.", False),
-    ("Should Jack fix the deploy now?", False),
-])
-def test_the_phrase_alone_never_makes_a_text_a_no_op(text, no_op):
-    assert rd.is_no_op_text(text) is no_op
+RULE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "no_op_rule.v1.json").read_text(encoding="utf-8-sig"))
+
+
+def test_the_patterns_are_the_shared_fixture():
+    """``tests/fixtures/no_op_rule.v1.json`` is committed byte-identical in JackRKelly/assistant."""
+    assert RULE["flags"] == "IGNORECASE"
+    for name, pattern in (("no_op_re", rd.NO_OP_RE), ("generic_ask_re", rd.GENERIC_ASK_RE),
+                          ("ask_left_re", rd.ASK_LEFT_RE), ("url_re", rd.URL_RE)):
+        assert pattern.pattern == RULE[name] and pattern.flags & re.IGNORECASE, name
+
+
+@pytest.mark.parametrize("case", RULE["cases"], ids=lambda c: f"{c['text'][:40]}|{c.get('has_real_question', False)}")
+def test_the_shared_fixture_cases(case):
+    assert rd.is_no_op_text(case["text"], has_real_question=case.get("has_real_question", False)) is case["no_op"]
 
 
 def test_a_park_with_a_real_question_and_nothing_else_still_reads_as_its_question():
