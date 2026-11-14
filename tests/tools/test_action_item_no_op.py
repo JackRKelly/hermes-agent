@@ -1,5 +1,6 @@
 """A ``design_decision`` that says nothing needs Jack is refused at add time, and a free-text park
-that says so reads as no questions (tools/action_item_kinds/).
+that says so reads as the kind in the ``design_decision`` module docstring's table
+(tools/action_item_kinds/).
 
 Regression for Nov 13: a stuck-work check that found nothing reached Jack as "Nothing to fix and
 nothing needs Jack / What should happen next?".
@@ -138,12 +139,10 @@ def test_a_real_needs_jack_park_still_reads_as_its_question():
 
 
 @pytest.mark.parametrize("reason", ["[needs-jack]", "[needs-jack:decision]", "[needs-jack:sign-in]",
-                                    "[needs-jack:decision] Rec: ship it"])
-def test_a_needs_jack_park_with_no_question_text_reads_as_other(reason):
-    """No question can be derived, so the park is not a design_decision (the docstrings say so)."""
+                                    "[needs-jack:decision] Rec: ship it", "[needs-jack:sign-in] Rec: ship it"])
+def test_a_park_with_no_question_text_projects_no_questions(reason):
+    """``legacy_questions`` return value only; the kind each park reads as is the docstring table's."""
     assert legacy_questions(reason) is None
-    typed = legacy_payload(reason)
-    assert typed is not None and typed[0] == "other"
 
 
 # One sample per tag and per text column of the design_decision module docstring's table.

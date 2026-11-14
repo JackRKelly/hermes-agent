@@ -6,13 +6,13 @@ approve or reject. v1 (one ``question`` with 2-6 ``options``) still reads, and `
 shows both in the v2 shape. The tool computes ``option_set_hash`` over every question, so a
 re-worded question or option is a new item.
 
-``legacy_questions`` reads a free-text ``[needs-jack:...]`` park as questions, so an old park also
-shows as answerable questions instead of an Approve button. Kinds earlier in the registry's
-``_LEGACY_ORDER`` read a park first, so the no-op rule (``readability.is_no_op_text``: says nothing
-needs Jack and asks no real question) only decides what reaches this kind. The kind each legacy
-park reads as (``registry.legacy_payload``), by tag and by the text after the tag; ``dd(0q)`` is
-a design_decision with no questions (never answerable). A test reads this table from the module's
-``__doc__`` and asserts every cell against the code, so the two cannot drift:
+``legacy_questions`` projects a free-text park's text as questions. Kinds earlier in the
+registry's ``_LEGACY_ORDER`` read a park first, so the no-op rule (``readability.is_no_op_text``:
+says nothing needs Jack and asks no real question) only decides what reaches this kind. The table
+below is the only statement of the kind each legacy park reads as (``registry.legacy_payload``),
+by tag and by the text after the tag; ``dd(0q)`` is a design_decision with no questions (never
+answerable). A test reads this table from the module's ``__doc__`` and asserts every cell
+against the code, so the two cannot drift:
 
 ==========================  =========  ==========  ===============  ===============
 tag                         no text    Rec: only   question text    no-op text
@@ -239,11 +239,9 @@ def legacy_questions(reason: str) -> Optional[dict]:
     Never an approve-style option. ``source_text`` is the raw park for the Details view. This is a
     read-only projection, not an agent payload: it is never stored or hashed.
 
-    A no-op park (``readability.is_no_op_text``) tagged ``[needs-jack]``, ``[needs-jack:<what>]`` or
-    ``[decision]`` reads as no questions, so it never renders as answerable (nor as an ``other`` with
-    Approve). A park with no question text (empty after the tag, or only a "Rec:" line) yields no
-    questions and returns None. Which kind each park finally reads as, by tag and text, is the
-    table in the module docstring (``[needs-jack:sign-in]`` with any text is a ``user_task``).
+    Return value only: a no-op text (``readability.is_no_op_text``) gives ``questions: []``, and a
+    park with no question text (empty after the tag, or only a "Rec:" line) gives None. The kind a
+    park finally reads as is not decided here: see the table in the module docstring.
     """
     if not reason:
         return None

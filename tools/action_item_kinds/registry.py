@@ -5,7 +5,8 @@ refuses to install or load against a registry version it was not built for.
 
 Version 2: every new envelope carries a human ``title`` and ``summary`` (envelope schema v2, which
 still reads a v1 envelope without them), ``design_decision`` v2 asks 1-5 questions that Jack
-answers (never approves), and a free-text ``[needs-jack:`` park reads as a ``design_decision``.
+answers (never approves), and a free-text park reads as the kind in the ``design_decision``
+module docstring's table (by tag and text).
 """
 
 from __future__ import annotations
