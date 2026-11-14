@@ -6,8 +6,26 @@ approve or reject. v1 (one ``question`` with 2-6 ``options``) still reads, and `
 shows both in the v2 shape. The tool computes ``option_set_hash`` over every question, so a
 re-worded question or option is a new item.
 
-``legacy_questions`` reads a free-text ``[needs-jack:...]`` park as questions, so an old park also
-shows as answerable questions instead of an Approve button.
+``legacy_questions`` projects a free-text park's text as questions. Kinds earlier in the
+registry's ``_LEGACY_ORDER`` read a park first, so the no-op rule (``readability.is_no_op_text``:
+says nothing needs Jack and asks no real question) only decides what reaches this kind. The table
+below is the only statement of the kind a ``[needs-jack...]`` or ``[decision]`` park reads as
+(``registry.legacy_payload``), by tag and by the text after the tag; ``dd(0q)`` is a
+design_decision with no questions (never answerable). A test reads this table from the module's
+``__doc__`` and asserts every cell against the code, so the two cannot drift:
+
+==========================  =========  ==========  ===============  ===============
+tag                         no text    Rec: only   question text    no-op text
+==========================  =========  ==========  ===============  ===============
+``[needs-jack]``            other      other       design_decision  dd(0q)
+``[needs-jack:sign-in]``    other      user_task   user_task        user_task
+``[needs-jack:<other>]``    other      other       design_decision  dd(0q)
+``[decision]``              other      other       other            dd(0q)
+==========================  =========  ==========  ===============  ===============
+
+"No text" is nothing after the tag; "Rec: only" is a lone "Rec: <x>" line; "question text" is a
+real ask ("Ship now or Monday?"); "no-op text" says nothing needs Jack ("Nothing needs Jack.").
+``user_task`` reads any ``[needs-jack:sign-in]`` park with text first, so this kind never sees it.
 """
 
 from __future__ import annotations
@@ -133,6 +151,7 @@ _TAG_RE = re.compile(r"\[[a-z-]+(?::[^\]\s]*)?\]", re.IGNORECASE)
 _REC_RE = re.compile(r"(?:^|(?<=\s))Rec(?:ommendation|ommended)?\s*:\s*(?P<rec>.*)$", re.IGNORECASE)
 # "keep or discard?", "UPS or FedEx for label buys?": the two words around an "or" of the question.
 _ALTERNATIVES_RE = re.compile(r"(?:^|(?<=[\s:,(]))([\w-]+),?\s+or\s+([\w-]+)(?=[\s?.,;:)]|$)", re.IGNORECASE)
+_DECISION_PARK_RE = re.compile(r"\[decision(?::[^\]\s]*)?\]", re.IGNORECASE)
 _APPROVE_WORDS = frozenset({"approve", "approved", "approval", "reject", "rejected"})
 
 
@@ -211,7 +230,8 @@ def _options(rec: Optional[str], alternatives: list[str]) -> list[dict]:
 
 
 def legacy_questions(reason: str) -> Optional[dict]:
-    """A free-text ``[needs-jack:...]`` park read as v2 questions, else None.
+    """A free-text ``[needs-jack...]`` park read as v2 questions; a no-op ``[needs-jack...]`` or
+    ``[decision]`` park gives ``questions: []``; anything else None.
 
     ``{questions: [{key, question, options, allow_other: True}], source_text}``: numbered
     questions ("(1) ... (2) ..." / "1. ... 2. ...") become one question each; a "Rec:" line split
@@ -219,10 +239,20 @@ def legacy_questions(reason: str) -> Optional[dict]:
     alternatives. A question with no derivable option has ``options: []`` (a free-text answer).
     Never an approve-style option. ``source_text`` is the raw park for the Details view. This is a
     read-only projection, not an agent payload: it is never stored or hashed.
+
+    Return value only: a ``[needs-jack...]`` or ``[decision]`` park whose text is a no-op
+    (``readability.is_no_op_text``) gives ``questions: []``; an untagged text (no-op or not), any
+    other ``[decision]`` park, and a ``[needs-jack...]`` park with no question text (empty after the
+    tag, or only a "Rec:" line) give None. The kind a park finally reads as is not decided here:
+    see the table in the module docstring.
     """
-    if not reason or not legacy.NEEDS_JACK_RE.search(reason):
+    if not reason:
         return None
     text = _clean(reason)
+    if (legacy.NEEDS_JACK_RE.search(reason) or _DECISION_PARK_RE.search(reason)) and rd.is_no_op_text(text):
+        return {"questions": [], "source_text": reason}
+    if not legacy.NEEDS_JACK_RE.search(reason):
+        return None
     rec_match = _REC_RE.search(text)
     body = text[:rec_match.start()].strip() if rec_match else text
     rec_parts = [p.strip(" .") for p in rec_match["rec"].split(";")] if rec_match else []
