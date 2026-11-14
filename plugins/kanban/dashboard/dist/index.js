@@ -371,6 +371,41 @@
       "Switch to the board that holds it, or add ?board=<slug> to the link.";
   }
 
+  // A worker heartbeat changes nothing a board card shows, so a batch made
+  // only of heartbeats does not refetch the board.
+  function eventsNeedBoardReload(events) {
+    return events.some(function (e) { return !e || e.kind !== "heartbeat"; });
+  }
+
+  // Live-event reloads: the first one after a quiet spell fires after
+  // ``quietMs``; while events keep arriving, at most one load per
+  // ``intervalMs`` (trailing, so the last change is never dropped).
+  // ``schedule(load)`` remembers the newest load function.
+  function createReloadThrottle(timers, quietMs, intervalMs) {
+    let timer = null;
+    let lastRunAt = -Infinity;
+    let pending = null;
+    return {
+      schedule: function (load) {
+        pending = load;
+        if (timer) return;
+        const delay = Math.max(quietMs, lastRunAt + intervalMs - timers.now());
+        timer = timers.setTimeout(function () {
+          timer = null;
+          lastRunAt = timers.now();
+          const fn = pending;
+          pending = null;
+          fn();
+        }, delay);
+      },
+      cancel: function () {
+        if (timer) timers.clearTimeout(timer);
+        timer = null;
+        pending = null;
+      },
+    };
+  }
+
   // The SDK's Select component fires ``onValueChange(value)`` directly
   // (it's a shadcn-style popup, not a native <select>). Older plugin
   // code calls ``onChange({target: {value}})`` which silently never
@@ -724,7 +759,14 @@
     const [taskEventTick, setTaskEventTick] = useState({});
 
     const cursorRef = useRef(0);
-    const reloadTimerRef = useRef(null);
+    const reloadThrottleRef = useRef(null);
+    if (!reloadThrottleRef.current) {
+      reloadThrottleRef.current = createReloadThrottle({
+        setTimeout: function (fn, ms) { return setTimeout(fn, ms); },
+        clearTimeout: function (id) { clearTimeout(id); },
+        now: function () { return Date.now(); },
+      }, 250, 3000);
+    }
     const wsRef = useRef(null);
     const wsBackoffRef = useRef(1000);
     const wsClosedRef = useRef(false);
@@ -786,22 +828,14 @@
 
     useEffect(function () { loadBoardList(); }, [loadBoardList]);
 
+    // Live events reload through a throttle; user actions call loadBoard() directly.
     const scheduleReload = useCallback(function () {
-      if (reloadTimerRef.current) return;
-      reloadTimerRef.current = setTimeout(function () {
-        reloadTimerRef.current = null;
-        loadBoard();
-      }, 250);
+      reloadThrottleRef.current.schedule(loadBoard);
     }, [loadBoard]);
 
     useEffect(function () {
       loadBoard();
-      return function () {
-        if (reloadTimerRef.current) {
-          clearTimeout(reloadTimerRef.current);
-          reloadTimerRef.current = null;
-        }
-      };
+      return function () { reloadThrottleRef.current.cancel(); };
     }, [loadBoard]);
 
     // --- WebSocket ---------------------------------------------------------
@@ -843,7 +877,7 @@
                   }
                   return next;
                 });
-                scheduleReload();
+                if (eventsNeedBoardReload(msg.events)) scheduleReload();
               }
             } catch (_e) { /* ignore */ }
           };
