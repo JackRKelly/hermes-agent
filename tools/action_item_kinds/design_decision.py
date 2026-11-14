@@ -7,7 +7,9 @@ shows both in the v2 shape. The tool computes ``option_set_hash`` over every que
 re-worded question or option is a new item.
 
 ``legacy_questions`` reads a free-text ``[needs-jack:...]`` park as questions, so an old park also
-shows as answerable questions instead of an Approve button.
+shows as answerable questions instead of an Approve button. A ``[needs-jack:...]`` or ``[decision]``
+park that says nothing needs Jack (``readability.NO_OP_RE``) reads as a design_decision with no
+questions, so it is never answerable and never an ``other`` with Approve.
 """
 
 from __future__ import annotations
