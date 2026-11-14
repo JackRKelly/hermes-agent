@@ -880,6 +880,30 @@ def cmd_mcp_test(args):
     return 0
 
 
+def _authorize_public_listing_server(name: str, probe_config: dict, tools: list) -> list:
+    """Browser-authorize a server whose probe listed tools without a 401, when it publishes RFC 9728
+    protected-resource metadata (Deel: only ``tools/call`` is protected). Returns the tool list to
+    report: re-probed with the new token, else the unauthenticated one. Without that metadata
+    nothing runs and the caller's "no token" warning stands. Must run under
+    ``force_interactive_oauth`` (the caller's block)."""
+    from tools.mcp_oauth import login_connect_timeout
+    from tools.mcp_oauth_proactive import proactive_browser_login
+    from tools.mcp_tool_loop import _ensure_mcp_loop, _run_on_mcp_loop
+
+    resolved = _resolve_mcp_server_config(probe_config)
+    timeout = login_connect_timeout(probe_config)
+    _ensure_mcp_loop()
+    if not _run_on_mcp_loop(lambda: proactive_browser_login(name, resolved), timeout=timeout):
+        return tools
+    if not _oauth_tokens_present(name):
+        return tools
+    try:
+        return _probe_single_server(name, probe_config, connect_timeout=timeout)
+    except Exception as exc:
+        _warning(f"Authorized, but re-listing tools failed: {_probe_failure_reason(exc)}")
+        return tools
+
+
 def _reauth_oauth_server(name: str, server_config: dict, *, flow: str | None = None) -> bool:
     """Force a fresh OAuth flow for one server. Returns True on success.
 
@@ -933,6 +957,8 @@ def _reauth_oauth_server(name: str, server_config: dict, *, flow: str | None = N
             tools = _probe_single_server(
                 name, probe_config, connect_timeout=login_connect_timeout(probe_config)
             )
+            if selected_flow == "browser" and not _oauth_tokens_present(name):
+                tools = _authorize_public_listing_server(name, probe_config, tools)
         # A clean probe is NOT proof of authentication: some servers (e.g. Google Drive) serve
         # initialize + tools/list without auth, so the flow may have failed (e.g. DCR 400 for
         # providers without RFC 7591) while the probe still lists tools. Verify a token landed.
