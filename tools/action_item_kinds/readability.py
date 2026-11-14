@@ -266,6 +266,66 @@ def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
                              "\"OK for me to ...?\"", EXAMPLE_USER_TASK)
 
 
+# A decision that says there is nothing to decide (a stuck-work check that found nothing, Nov 13). The
+# rule is conservative: a text is a no-op only when EVERY sentence is a no-op phrase or a closed generic
+# ask, with no other words; a label, a colon, a scope or any extra word makes it a real ask. It is the
+# shared fixture ``tests/fixtures/no_op_rule.v3.json``, committed byte-identical in JackRKelly/assistant
+# (``scripts/kanban_gates.py``); its test pins these five patterns and every case.
+NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.IGNORECASE)
+# A whole sentence of no-op phrases ("Nothing to fix and nothing needs Jack").
+NO_OP_SENTENCE_RE = re.compile(rf"(?:{NO_OP_RE.pattern})(?:\s*(?:,\s*and|,|and)\s*(?:{NO_OP_RE.pattern}))*",
+                               re.IGNORECASE)
+# A whole sentence that is a generic ask from this closed list ("What next?", "Anything else?").
+GENERIC_ASK_RE = re.compile(r"what(?: should (?:happen|we do)| do we do)? next|what now|anything else", re.IGNORECASE)
+# Words that are not part of the message: the autopilot's "Consult Jack:" lead and "(from t_x)" provenance.
+NO_OP_NOISE_RE = re.compile(r"^\s*consult jack\s*:|\(from (?:t_\w+|the card)\)", re.IGNORECASE)
+SENTENCE_SPLIT_RE = re.compile(r"[.;!?]+(?=\s|$)|\s/\s", re.IGNORECASE)
+
+
+def _no_op_sentences(text: str) -> list[str]:
+    parts = SENTENCE_SPLIT_RE.split(NO_OP_NOISE_RE.sub(" ", text))
+    return [s for s in (" ".join(p.split()).strip(" ,") for p in parts) if s]
+
+
+def is_no_op_text(text: Any, *, has_real_question: bool = False) -> bool:
+    """True when every sentence of ``text`` is a no-op phrase (``NO_OP_SENTENCE_RE``) or a closed generic
+    ask (``GENERIC_ASK_RE``), with no other words, and at least one is a no-op phrase. Anything else, a
+    label ("Prod: what now?"), a scope ("on staging") or one extra word, is a real ask: a wrong "real"
+    only lets an item through, a wrong "no-op" hides a question from Jack. ``has_real_question`` (another
+    question of the item is real) also clears a text whose no-op phrases all say "nothing else ...":
+    "else" means something did. Shared fixture: ``tests/fixtures/no_op_rule.v3.json``."""
+    if not isinstance(text, str):
+        return False
+    sentences = _no_op_sentences(text)
+    no_op = [s for s in sentences if NO_OP_SENTENCE_RE.fullmatch(s)]
+    if not no_op or any(s not in no_op and not GENERIC_ASK_RE.fullmatch(s) for s in sentences):
+        return False
+    return not (has_real_question
+                and all(m.group(0).lower().startswith("nothing else") for s in no_op for m in NO_OP_RE.finditer(s)))
+
+
+NO_OP_PROBLEM = ("This says nothing needs Jack: complete the card with a one-line summary instead, or tag it "
+                 "[captain:<topic>] for Captain triage")
+
+
+def check_no_op(kind: str, payload: dict, *, title: Any, summary: Any, ask: Any, why: Any) -> None:
+    """Refuse a ``design_decision`` whose own text says nothing needs Jack and asks nothing real
+    (``is_no_op_text``): there is nothing to answer."""
+    if kind != "design_decision":
+        return
+    questions = payload.get("questions")
+    asked = [q.get("question") for q in (questions if isinstance(questions, list) else []) if isinstance(q, dict)]
+    real = any(isinstance(q, str) and q.strip() and not is_no_op_text(q) for q in asked)
+    for i, question in enumerate(asked):
+        if is_no_op_text(question):
+            raise fix(f"payload.questions[{i}].question", NO_OP_PROBLEM, EXAMPLE_QUESTION)
+    texts = [("title", title, EXAMPLE_TITLE), ("summary", summary, EXAMPLE_SUMMARY), ("ask", ask, EXAMPLE_QUESTION),
+             ("why", why, EXAMPLE_SUMMARY), ("payload.rec_reason", payload.get("rec_reason"), EXAMPLE_REC_REASON)]
+    for where, text, example in texts:
+        if is_no_op_text(text, has_real_question=real):
+            raise fix(where, NO_OP_PROBLEM, example)
+
+
 def check_chars(text: str, limit: int, where: str, example: str) -> None:
     if len(text) > limit:
         raise fix(where, f"{len(text)} chars, max {limit}", example)

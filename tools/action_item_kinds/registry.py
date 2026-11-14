@@ -30,8 +30,8 @@ KINDS: Mapping[str, KindSpec] = MappingProxyType({spec.kind: spec for spec in (
 )})
 ENVELOPE_VERSION = 2
 ENVELOPE_SCHEMA = load_schema(KINDS_DIR / f"envelope.v{ENVELOPE_VERSION}.schema.json")
-# Legacy free-text parks, most specific first; ``design_decision`` takes every remaining
-# ``[needs-jack:`` park and ``other`` takes anything left.
+# Legacy free-text parks, most specific first. The kind each park reads as, by tag and by the text after it, is
+# the table in the ``design_decision`` module docstring (a test asserts every cell against this order).
 _LEGACY_ORDER = ("pr_merge", "send_email", "send_message", "user_task", "design_decision", "other")
 _FIELD_RE = re.compile(r"^((?:envelope|payload)[\w.\[\]]*)\s*:")
 
@@ -66,6 +66,7 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
     readability.check_new_envelope(title=title, summary=summary, risk=risk)
     readability.check_item_paths(spec.kind, payload, ask=ask, why=why, risk=risk, card=card)
     readability.check_self_task(spec.kind, payload, ask=ask, title=title)
+    readability.check_no_op(spec.kind, payload, title=title, summary=summary, ask=ask, why=why)
     if sources is None:
         sources = host_sources()
     full = spec.enrich(dict(payload), sources)
