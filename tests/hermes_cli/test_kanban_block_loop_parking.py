@@ -20,6 +20,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_decompose as decomp
+from hermes_cli import kanban_jack_park as kb_jp
 from hermes_cli import kanban_specify as spec
 
 
@@ -148,22 +149,40 @@ def test_jack_park_reblock_stays_blocked(kanban_home: Path, reason: str, times: 
         assert last.payload["recurrences"] == times
 
 
-# A clean ``[captain:continue]`` handoff (Nov 14: a prod rollout card hit its step budget at a safe
-# point, re-parked for Captain to re-run, and was bounced to triage, where promote/block/unblock all
-# refuse it) re-parks by design, like a Jack park: it stays blocked and the recurrences still count.
-@pytest.mark.parametrize("reason", [
-    "[captain:continue] Phase 1 done, nothing half-changed; re-run to continue from the handoff.",
-    "[Captain:Continue] Re-run; Jack's answer [needs-jack:decision] item=2877c0d1e2f3a4b5 covers it.",
-])
-@pytest.mark.parametrize("times", [2, 3])
-def test_captain_continue_reblock_stays_blocked(kanban_home: Path, reason: str, times: int) -> None:
+# A clean continue handoff (Nov 14: a prod rollout card hit its step budget at a safe point,
+# re-parked for Captain to re-run, and was bounced to triage, where promote/block/unblock all refuse
+# it) re-parks by design: it stays blocked, with the recurrences still counted, up to the higher
+# continue limit. Captain's runbook puts continue, continuation and turn-budget in one class.
+_CONTINUE_LIMIT = kb_jp.CONTINUE_RECURRENCE_LIMIT
+_CONTINUE_REASONS = [
+    ("[captain:continue] Phase 1 done, nothing half-changed; re-run to continue from the handoff.", "needs_input"),
+    ("[Captain:Continue] Re-run; Jack's answer [needs-jack:decision] item=2877c0d1e2f3a4b5 covers it.", "needs_input"),
+    ("[captain:continuation] Doc shared; re-run the card to finish the 5 small edits.", "needs_input"),
+    ("[captain:turn-budget] Out of turns again; build pushed, the next run picks up the tests.", "transient"),
+]
+
+
+@pytest.mark.parametrize("reason,kind", _CONTINUE_REASONS)
+@pytest.mark.parametrize("times", [2, _CONTINUE_LIMIT - 1])
+def test_captain_continue_reblock_stays_blocked(kanban_home: Path, reason: str, kind: str, times: int) -> None:
     with kbc.connect_closing() as conn:
-        tid = _reblock_n(conn, reason, times)
+        tid = _reblock_n(conn, reason, times, kind=kind)
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert task.block_recurrences == times
         kinds = [e.kind for e in kb.list_events(conn, tid)]
         assert "block_loop_detected" not in kinds
+
+
+# Captain unblocks a continue handoff with no human step, so one that keeps recurring is a loop.
+@pytest.mark.parametrize("reason,kind", _CONTINUE_REASONS)
+def test_captain_continue_loop_goes_to_triage_at_the_continue_limit(kanban_home: Path, reason: str, kind: str) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, _CONTINUE_LIMIT, kind=kind)
+        assert kb.get_task(conn, tid).status == "triage"
+        last = [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+        assert last.kind == "block_loop_detected"
+        assert (last.payload["recurrences"], last.payload["limit"]) == (_CONTINUE_LIMIT, _CONTINUE_LIMIT)
 
 
 def test_captain_continue_after_a_jack_park_stays_blocked(kanban_home: Path) -> None:

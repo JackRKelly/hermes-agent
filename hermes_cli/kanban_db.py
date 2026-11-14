@@ -3222,12 +3222,11 @@ def _route_block(
     ``todo`` for ``recompute_ready`` (callers re-kind it to ``needs_input``
     when no parent is open, see :func:`block_task`). Every other kind counts
     unblock-loop recurrences: a stored ``block_kind`` equal to the incoming
-    one means blocked -> unblocked -> re-block for the same cause. At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human,
-    except a Jack park (approval gate, needs-jack/decision tag, item binding) or a
-    ``[captain:continue]`` handoff: both re-park by design and stay ``blocked``.
+    one means blocked -> unblocked -> re-block for the same cause. At ``BLOCK_RECURRENCE_LIMIT``
+    (``CONTINUE_RECURRENCE_LIMIT`` for a Captain continue handoff) the task routes to ``triage``
+    for a human, except a Jack park (approval gate, needs-jack/decision tag, item binding).
     """
-    from hermes_cli.kanban_jack_park import is_captain_continue_reason, is_jack_park_reason
+    from hermes_cli import kanban_jack_park as jp
 
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
@@ -3235,8 +3234,9 @@ def _route_block(
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT and not (is_jack_park_reason(reason) or is_captain_continue_reason(reason)):
-        payload["limit"] = BLOCK_RECURRENCE_LIMIT
+    limit = jp.CONTINUE_RECURRENCE_LIMIT if jp.is_captain_continue_reason(reason) else BLOCK_RECURRENCE_LIMIT
+    if recurrences >= limit and not jp.is_jack_park_reason(reason):
+        payload["limit"] = limit
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
 

@@ -39,15 +39,20 @@ def is_jack_park_reason(reason: Optional[str]) -> bool:
     return reason_item_hash(reason) is not None
 
 
-_CONTINUE_RE = re.compile(r"\[captain:continue\]", re.IGNORECASE)
+# The three markers Captain's runbook treats as one class: the run stopped at a safe point (turn
+# budget, phase boundary) and Captain unblocks it at once to re-run from the checkpoint.
+_CONTINUE_RE = re.compile(r"\[captain:(?:continue|continuation|turn-budget)\]", re.IGNORECASE)
+
+# A continue handoff re-parks by design, but Captain (an agent) unblocks it with no human step, so
+# a card that keeps handing off for the same cause is looping. Past this many recurrences it takes
+# the normal triage route.
+CONTINUE_RECURRENCE_LIMIT = 5
 
 
 def is_captain_continue_reason(reason: Optional[str]) -> bool:
-    """True when the FIRST marker is ``[captain:continue]``: a clean handoff Captain re-runs.
-
-    The worker stopped at a safe point (step budget, phase boundary) and Captain resumes the same
-    card, so a re-block for that cause is the workflow, not a loop. Other ``[captain:<topic>]``
-    reasons are problems Captain must look at and keep the triage escalation.
+    """True when the FIRST marker is a continue handoff (``[captain:continue]``, ``continuation``,
+    ``turn-budget``): a clean handoff Captain re-runs. Other ``[captain:<topic>]`` reasons are
+    problems Captain must look at and keep the normal triage escalation.
     """
     reason = reason or ""
     first = min(
