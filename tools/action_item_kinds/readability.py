@@ -268,7 +268,7 @@ def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
 
 # A decision that says there is nothing to decide (a stuck-work check that found nothing, Nov 13). The
 # same pattern as JackRKelly/assistant's; change both in the same pair of PRs.
-NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.I)  # noqa: E501
+NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.IGNORECASE)
 NO_OP_PROBLEM = ("This says nothing needs Jack: complete the card with a one-line summary instead, or tag it "
                  "[captain:<topic>] for Captain triage")
 
