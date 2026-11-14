@@ -722,6 +722,10 @@ class GatewayStartupMixin:
         if getattr(self, "_loop_floor_timer_handle", None) is None:
             with _log_suppressed(logging.DEBUG, "Failed to arm gateway loop floor timer", exc_info=True):
                 self._loop_floor_timer_handle = _arm_loop_floor_timer(loop)
+        if getattr(self, "_loop_lag_monitor", None) is None:
+            with _log_suppressed(logging.DEBUG, "Failed to start gateway loop lag monitor", exc_info=True):
+                from gateway.loop_lag_monitor import start_loop_lag_monitor
+                self._loop_lag_monitor = start_loop_lag_monitor(loop)
         watchdog = getattr(self, "_loop_liveness_watchdog", None)
         if watchdog is None or not watchdog.is_alive():
             try:
@@ -747,6 +751,7 @@ class GatewayStartupMixin:
         for attr, method, what in (
             ("_loop_liveness_watchdog", "stop", "stop gateway loop liveness watchdog"),
             ("_loop_floor_timer_handle", "cancel", "cancel gateway loop floor timer"),
+            ("_loop_lag_monitor", "stop", "stop gateway loop lag monitor"),
             ("_loop_heartbeat_task", "cancel", "cancel gateway loop heartbeat task"),
         ):
             guard = getattr(self, attr, None)

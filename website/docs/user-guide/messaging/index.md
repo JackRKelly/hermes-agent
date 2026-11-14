@@ -201,6 +201,13 @@ gateway process overwrites it, and the dashboard's gateway badge shows
 **Degraded** with the same reason. Set `gateway.loop_watchdog: false` in
 `config.yaml` to disable the watchdog.
 
+Shorter stalls are logged, not acted on. While the loop is more than 2 s late,
+`gateway.error.log` gets one `gateway event loop blocked for …s so far` warning
+with the loop thread's current stack, then `gateway event loop stalled …s` once
+it runs again. A default thread pool with queued work and no idle thread for
+2 s logs `gateway default executor saturated …` with what its busy threads are
+running. `gateway.loop_watchdog: false` turns these off too.
+
 Housekeeping also re-stamps `gateway_state.json`'s `updated_at` every tick
 (60 s), so it doubles as a heartbeat: when the process is still alive but that
 stamp is more than 120 s old, `hermes gateway status` prints

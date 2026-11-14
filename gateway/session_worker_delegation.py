@@ -203,8 +203,7 @@ def persist_worker_delegation(db, *, epoch, execution_id, session_id, generation
 
 async def worker_delegation_request(connection, ref, params):
     """worker.persist delegation-family hook; all authentication stays mandatory."""
-    import asyncio
-    from gateway.session_worker import _SCOPE, _claim, _verify
+    from gateway.session_worker import _SCOPE, _claim, _verify, run_worker_rpc
     if set(params) != _SCOPE | {'epoch', 'sequence', 'operation', 'payload'}:
         raise RuntimeStoreError('invalid_params')
     claim = _claim(connection, ref, params)
@@ -228,4 +227,4 @@ async def worker_delegation_request(connection, ref, params):
                 # token-guarded claims arbitrate delivery; never ACK at publication.
                 process_registry.completion_queue.put(event | {'restored': True})
         return result
-    return await asyncio.to_thread(persist_and_publish)
+    return await run_worker_rpc(persist_and_publish)
