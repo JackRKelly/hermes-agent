@@ -8,8 +8,8 @@ re-worded question or option is a new item.
 
 ``legacy_questions`` reads a free-text ``[needs-jack:...]`` park as questions, so an old park also
 shows as answerable questions instead of an Approve button. A ``[needs-jack:...]`` or ``[decision]``
-park that says nothing needs Jack (``readability.NO_OP_RE``) reads as a design_decision with no
-questions, so it is never answerable and never an ``other`` with Approve.
+park that says nothing needs Jack and asks no real question (``readability.is_no_op_text``) reads
+as a design_decision with no questions, so it is never answerable and never an ``other`` with Approve.
 """
 
 from __future__ import annotations
@@ -223,14 +223,14 @@ def legacy_questions(reason: str) -> Optional[dict]:
     Never an approve-style option. ``source_text`` is the raw park for the Details view. This is a
     read-only projection, not an agent payload: it is never stored or hashed.
 
-    A ``[needs-jack:...]`` or ``[decision]`` park whose text says nothing needs Jack
-    (``readability.NO_OP_RE``) reads as no questions, so it never renders as answerable (nor as an
+    A ``[needs-jack:...]`` or ``[decision]`` park whose text says nothing needs Jack and asks no real
+    question (``readability.is_no_op_text``) reads as no questions, so it never renders as answerable (nor as an
     ``other`` with Approve).
     """
     if not reason:
         return None
     text = _clean(reason)
-    if (legacy.NEEDS_JACK_RE.search(reason) or _DECISION_PARK_RE.search(reason)) and rd.NO_OP_RE.search(text):
+    if (legacy.NEEDS_JACK_RE.search(reason) or _DECISION_PARK_RE.search(reason)) and rd.is_no_op_text(text):
         return {"questions": [], "source_text": reason}
     if not legacy.NEEDS_JACK_RE.search(reason):
         return None

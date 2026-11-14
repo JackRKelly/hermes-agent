@@ -269,22 +269,42 @@ def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
 # A decision that says there is nothing to decide (a stuck-work check that found nothing, Nov 13). The
 # same pattern as JackRKelly/assistant's; change both in the same pair of PRs.
 NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.IGNORECASE)
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def is_no_op_text(text: Any, *, has_real_question: bool = False) -> bool:
+    """True when ``text`` says nothing needs Jack and asks nothing real. The phrase alone never makes a
+    text a no-op: drop every sentence that matches ``NO_OP_RE``; a question (``?``) left over is a real
+    ask ("Should we default to UPS or FedEx? Nothing else needs Jack."). ``has_real_question`` (another
+    field of the item asks a real question) also clears a text whose only no-op phrase is "nothing else
+    needs Jack": "else" means something did. Same rule as JackRKelly/assistant's ``kanban_gates``."""
+    if not isinstance(text, str) or not NO_OP_RE.search(text):
+        return False
+    if any("?" in s for s in _SENTENCE_RE.split(text) if not NO_OP_RE.search(s)):
+        return False
+    return not (has_real_question
+                and all(m.group(0).lower().startswith("nothing else") for m in NO_OP_RE.finditer(text)))
+
+
 NO_OP_PROBLEM = ("This says nothing needs Jack: complete the card with a one-line summary instead, or tag it "
                  "[captain:<topic>] for Captain triage")
 
 
 def check_no_op(kind: str, payload: dict, *, title: Any, summary: Any, ask: Any, why: Any) -> None:
-    """Refuse a ``design_decision`` whose own text says nothing needs Jack: there is nothing to answer."""
+    """Refuse a ``design_decision`` whose own text says nothing needs Jack and asks nothing real
+    (``is_no_op_text``): there is nothing to answer."""
     if kind != "design_decision":
         return
+    questions = payload.get("questions")
+    asked = [q.get("question") for q in (questions if isinstance(questions, list) else []) if isinstance(q, dict)]
+    real = any(isinstance(q, str) and q.strip() and not is_no_op_text(q) for q in asked)
+    for i, question in enumerate(asked):
+        if is_no_op_text(question):
+            raise fix(f"payload.questions[{i}].question", NO_OP_PROBLEM, EXAMPLE_QUESTION)
     texts = [("title", title, EXAMPLE_TITLE), ("summary", summary, EXAMPLE_SUMMARY), ("ask", ask, EXAMPLE_QUESTION),
              ("why", why, EXAMPLE_SUMMARY), ("payload.rec_reason", payload.get("rec_reason"), EXAMPLE_REC_REASON)]
-    questions = payload.get("questions")
-    for i, q in enumerate(questions if isinstance(questions, list) else []):
-        if isinstance(q, dict):
-            texts.append((f"payload.questions[{i}].question", q.get("question"), EXAMPLE_QUESTION))
     for where, text, example in texts:
-        if isinstance(text, str) and NO_OP_RE.search(text):
+        if is_no_op_text(text, has_real_question=real):
             raise fix(where, NO_OP_PROBLEM, example)
 
 

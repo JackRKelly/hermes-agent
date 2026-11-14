@@ -51,6 +51,39 @@ def test_a_normal_decision_is_accepted():
     assert env["kind"] == "design_decision" and env["payload"]["questions"][0]["key"] == "q1"
 
 
+@pytest.mark.parametrize("overrides", [
+    {"summary": "Should Temu default to UPS or FedEx? Nothing else needs Jack."},
+    {"summary": "Checked the deploy settings. Nothing else needs Jack."},
+    {"why": "No action needed on staging. Prod: now or Monday?"},
+])
+def test_a_real_question_with_a_no_op_phrase_is_accepted(overrides):
+    env = build(payload(), **overrides)
+    assert env["payload"]["questions"][0]["question"] == "When should staging and prod get it?"
+
+
+def test_nothing_else_still_refuses_when_no_question_is_real():
+    with pytest.raises(SchemaError, match=r"^payload\.questions\[0\]\.question: "):
+        build(payload("Nothing else needs Jack; close it?"), summary="Checked it. Nothing else needs Jack.")
+
+
+@pytest.mark.parametrize("text, no_op", [
+    ("Nothing to fix and nothing needs Jack.", True),
+    ("Nothing here needs Jack; what next?", True),
+    ("Should we default to UPS or FedEx? Rec: UPS. Nothing else needs Jack.", False),
+    ("Pick UPS or FedEx for Temu? Nothing else needs Jack.", False),
+    ("Should Jack fix the deploy now?", False),
+])
+def test_the_phrase_alone_never_makes_a_text_a_no_op(text, no_op):
+    assert rd.is_no_op_text(text) is no_op
+
+
+def test_a_park_with_a_real_question_and_nothing_else_still_reads_as_its_question():
+    reason = "[needs-jack:decision] Pick UPS or FedEx for Temu? Nothing else needs Jack. then=ready"
+    projected = legacy_questions(reason)
+    assert projected is not None and projected["questions"], projected
+    assert legacy_questions("[decision] Pick UPS or FedEx for Temu? Nothing else needs Jack.") is None
+
+
 def test_a_question_with_no_options_is_refused():
     with pytest.raises(SchemaError, match=r"payload\.questions\[0\]\.options: 0 options, needs 2-4"):
         build(payload(options=[]))
