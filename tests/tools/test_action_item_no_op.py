@@ -73,16 +73,23 @@ def test_an_ask_in_the_same_sentence_as_the_phrase_is_a_real_question():
     assert projected is not None and projected["questions"], projected
 
 
+def test_a_real_question_ending_in_or_what_is_never_stripped():
+    env = build(payload("No action needed on staging. Prod: ship now or what?"))
+    assert env["payload"]["questions"][0]["question"].endswith("ship now or what?")
+    projected = legacy_questions("[needs-jack:decision] No action needed on staging. Prod: ship now or what?")
+    assert projected is not None and projected["questions"], projected
+
+
 def test_nothing_else_still_refuses_when_no_question_is_real():
     with pytest.raises(SchemaError, match=r"^payload\.questions\[0\]\.question: "):
         build(payload("Nothing else needs Jack; what next?"), summary="Checked it. Nothing else needs Jack.")
 
 
-RULE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "no_op_rule.v1.json").read_text(encoding="utf-8-sig"))
+RULE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "no_op_rule.v2.json").read_text(encoding="utf-8-sig"))
 
 
 def test_the_patterns_are_the_shared_fixture():
-    """``tests/fixtures/no_op_rule.v1.json`` is committed byte-identical in JackRKelly/assistant."""
+    """``tests/fixtures/no_op_rule.v2.json`` is committed byte-identical in JackRKelly/assistant."""
     assert RULE["flags"] == "IGNORECASE"
     for name, pattern in (("no_op_re", rd.NO_OP_RE), ("generic_ask_re", rd.GENERIC_ASK_RE),
                           ("ask_left_re", rd.ASK_LEFT_RE), ("url_re", rd.URL_RE)):

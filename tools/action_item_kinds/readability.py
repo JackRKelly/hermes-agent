@@ -267,11 +267,13 @@ def check_self_task(kind: str, payload: dict, *, ask: Any, title: Any) -> None:
 
 
 # A decision that says there is nothing to decide (a stuck-work check that found nothing, Nov 13). The
-# rule is the shared fixture ``tests/fixtures/no_op_rule.v1.json``, committed byte-identical in
+# rule is the shared fixture ``tests/fixtures/no_op_rule.v2.json``, committed byte-identical in
 # JackRKelly/assistant (``scripts/kanban_gates.py``); its test pins these four patterns and every case.
 NO_OP_RE = re.compile(r"\bnothing (?:here |else )?(?:needs?|for) (?:jack|you)\b|\bnothing (?:to (?:fix|do|decide)|needs? (?:fixing|doing))\b|\bno (?:decision|action|input) (?:is )?(?:needed|required|for jack)\b|\bnot (?:a decision|an action item) for jack\b", re.IGNORECASE)
-# A bare "what next?" asks nothing (the fallback the Nov 13 item showed).
-GENERIC_ASK_RE = re.compile(r"\bwhat(?: should (?:happen|we do)| do we do| now)?(?: next)?\s*\?", re.IGNORECASE)
+# A sentence or clause that is entirely a generic ask ("What next?", "Anything else?") asks nothing (the
+# fallback the Nov 13 item showed). Anchored to the text start or a . ; : ! ?, so the "or what?" of a real
+# question ("ship now or what?") is never removed.
+GENERIC_ASK_RE = re.compile(r"(?:^|(?<=[.;:!?]))\s*\b(?:what(?: should (?:happen|we do)| do we do| now)?(?: next)?|anything else)\s*\?", re.IGNORECASE)
 # A question or option list: a real ask, wherever it sits.
 ASK_LEFT_RE = re.compile(r"\?|\boptions?\s*[:(]|\brec(?:ommend(?:ation|ed)?)?\s*:", re.IGNORECASE)
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -279,11 +281,12 @@ URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 def is_no_op_text(text: Any, *, has_real_question: bool = False) -> bool:
     """True when ``text`` says nothing needs Jack and asks nothing real. The phrase alone never makes a
-    text a no-op: remove every URL, ``NO_OP_RE`` phrase and bare "what next?"; a question or option list
-    left over (``ASK_LEFT_RE``) is a real ask, even in the same sentence as the phrase ("No action needed
-    on staging, but should prod go now or Monday?"). ``has_real_question`` (another question of the item
-    is real) also clears a text whose only no-op phrases are "nothing else ...": "else" means something
-    did. Shared fixture: ``tests/fixtures/no_op_rule.v1.json``."""
+    text a no-op: remove every URL and ``NO_OP_RE`` phrase, then every sentence or clause that is only a
+    generic ask ("What next?", ``GENERIC_ASK_RE``); a question or option list left over (``ASK_LEFT_RE``)
+    is a real ask, even in the same sentence as the phrase ("No action needed on staging, but should prod
+    go now or Monday?") or ending in a generic word ("Prod: ship now or what?"). ``has_real_question``
+    (another question of the item is real) also clears a text whose only no-op phrases are "nothing
+    else ...": "else" means something did. Shared fixture: ``tests/fixtures/no_op_rule.v2.json``."""
     if not isinstance(text, str) or not NO_OP_RE.search(text):
         return False
     left = GENERIC_ASK_RE.sub(" ", NO_OP_RE.sub(" ", URL_RE.sub(" ", text)))
