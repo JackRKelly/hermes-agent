@@ -26,6 +26,7 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli.kanban_db_dispatch_argv import _hermes_path_argv, _looks_like_path, _path_search_names
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
@@ -140,6 +141,8 @@ class DispatchResult:
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
+    idle_reclaimed: list[str] = field(default_factory=list)  # kanban_db_idle: no progress past the grace
+    held_cap: int = 0  # ready rows left unspawned by the host/board cap this tick (health snapshot)
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -1185,6 +1188,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             exit_code = managed_run_exit_code(conn, row["id"], pid, row["claim_lock"])
             dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board,
                                          run_id=_kb._row_get(row, "current_run_id"))
+            dead = _kbpb.observe_dead_worker(conn, row, dead, board=board)  # provider-wide 78 -> requeue
             apply_attempt_note(conn, row["id"], pid, dead)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
@@ -1322,7 +1326,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     wall, released WITHOUT counting a failure and surfaced via the
     ``_last_rate_limited`` attribute (the return stays crashed-only).
     """
-    sweep = _reclaim_dead_workers(conn, board=board)
+    sweep = _kbpb.rebook_tripped(conn, _reclaim_dead_workers(conn, board=board))
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
     # Side-channel attributes keep the public ``list[str]`` return stable;
@@ -2020,6 +2024,8 @@ def dispatch_once(
             result = DispatchResult(skipped_locked=True)
         else:
             result = _locked_tick()
+            if not dry_run:  # the lock holder alone writes the health snapshot
+                _kbh.write_snapshot(conn, result, db_path)
             # Still under the dispatch lock: periodic PASSIVE WAL checkpoint.
             _kbc._maybe_checkpoint_wal(conn, db_path)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
@@ -2039,6 +2045,20 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
     except (TypeError, ValueError):
         return spawn_fn(task, workspace)
+
+
+def _held_for_profile(conn, task_id: str, assignee: str, result: DispatchResult, *, dry_run: bool,
+                      per_profile_cap: Optional[int], per_profile_running: dict[str, int]) -> bool:
+    """Per-profile cap (one profile's local model / API quota / browser pool must not be overwhelmed
+    by a fan-out even with global headroom), then the provider breaker; records the hold."""
+    current = per_profile_running.get(assignee, 0)
+    if per_profile_cap is not None and current >= per_profile_cap:
+        result.skipped_per_profile_capped.append((task_id, assignee, current))
+        return True
+    if _kbpb.paused(conn, assignee, note=not dry_run):  # no per-tick event: the breaker row says why
+        result.respawn_guarded.append((task_id, "provider_paused"))
+        return True
+    return False
 
 
 def _dispatch_lane_task(
@@ -2082,13 +2102,9 @@ def _dispatch_lane_task(
                         or last["payload"] != _kb._json_or_null({"assignee": assignee})):
                     _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
         return False
-    # Per-profile cap: one profile's local model / API quota / browser pool
-    # must not be overwhelmed by a fan-out even with global headroom.
-    if per_profile_cap is not None:
-        current = per_profile_running.get(assignee, 0)
-        if current >= per_profile_cap:
-            result.skipped_per_profile_capped.append((task_id, assignee, current))
-            return False
+    if _held_for_profile(conn, task_id, assignee, result, dry_run=dry_run,
+                         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running):
+        return False
     guard_reason = check_respawn_guard(conn, task_id, lane=lane)
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
@@ -2102,6 +2118,9 @@ def _dispatch_lane_task(
         if not dry_run:
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+        return False
+    if not _kbpb.take_probe(conn, assignee, task_id, dry_run=dry_run):
+        result.respawn_guarded.append((task_id, "provider_paused"))
         return False
 
     def _count_spawn(name: str) -> None:
@@ -2221,6 +2240,8 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    _kbpb.refresh(conn)
+    result.idle_reclaimed = _kbi.sweep_idle_runs(conn)[1]
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
@@ -2321,6 +2342,8 @@ def _any_spawnable_review(
             continue
         if per_profile_cap is not None and running.get(assignee, 0) >= per_profile_cap:
             continue
+        if _kbpb.paused(conn, assignee):
+            continue
         if check_respawn_guard(conn, row["id"], lane="review") is None:
             return True
     return False
@@ -2373,6 +2396,7 @@ def _dispatch_once_locked(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
     if not may_spawn:
+        result.held_cap = 0 if result.memory_pressure else len(_lane_rows(conn, "ready"))
         return result
 
     ready_rows = _lane_rows(conn, "ready")
@@ -2416,8 +2440,9 @@ def _dispatch_once_locked(
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
-    for row in ready_rows:
+    for index, row in enumerate(ready_rows):
         if ready_budget is not None and spawned >= ready_budget:
+            result.held_cap = len(ready_rows) - index
             break
         row_assignee = row["assignee"]
         if not row_assignee:
@@ -2462,37 +2487,6 @@ def _module_hermes_argv() -> list[str]:
     return [sys.executable, "-P", "-m", "hermes_cli.main"]
 
 
-def _absolute_hermes_path(path: str) -> str:
-    """Return an absolute filesystem path for a resolved Hermes shim."""
-    expanded = os.path.expanduser(path)
-    return expanded if os.path.isabs(expanded) else os.path.abspath(expanded)
-
-
-def _looks_like_path(value: str) -> bool:
-    """Return true when a command override is an explicit path, not a name."""
-    expanded = os.path.expanduser(value)
-    return (
-        expanded.startswith("~")
-        or os.path.isabs(expanded)
-        or bool(os.path.dirname(expanded))
-        or "\\" in expanded
-        or bool(re.match(r"^[A-Za-z]:", expanded))
-    )
-
-
-def _is_windows_batch_shim(path: str) -> bool:
-    """Return true for Windows shell/batch shims that should not be argv[0]."""
-    return path.lower().endswith((".cmd", ".bat"))
-
-
-def _path_search_names(command: str) -> list[str]:
-    """Return executable names to try for an unqualified command."""
-    if not _kb._IS_WINDOWS or os.path.splitext(command)[1]:
-        return [command]
-    raw = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
-    return [command + ext for ext in raw.split(";") if ext]
-
-
 def _safe_which_no_cwd(command: str) -> Optional[str]:
     """Resolve a bare command from PATH without implicit current-dir search.
 
@@ -2509,15 +2503,6 @@ def _safe_which_no_cwd(command: str) -> Optional[str]:
             if os.path.isfile(candidate) and (_kb._IS_WINDOWS or os.access(candidate, os.X_OK)):
                 return candidate
     return None
-
-
-def _hermes_path_argv(path: str) -> list[str]:
-    """argv for a resolved Hermes executable path. Windows batch shims
-    (``.cmd``/``.bat``) are unsafe as argv[0] because the argument vector
-    includes task-derived values; prefer the module form."""
-    if _kb._IS_WINDOWS and _is_windows_batch_shim(path):
-        return _module_hermes_argv()
-    return [_absolute_hermes_path(path)]
 
 
 def _resolve_hermes_argv() -> list[str]:
@@ -2954,5 +2939,8 @@ def run_daemon(
 # module is fully populated before ``kanban_db`` imports from it.
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
+from hermes_cli import kanban_db_health as _kbh
+from hermes_cli import kanban_db_idle as _kbi
+from hermes_cli import kanban_db_provider_breaker as _kbpb
 from hermes_cli import kanban_db_respawn_pr as _kbpr
 from hermes_cli import kanban_db_workspace as _kbw

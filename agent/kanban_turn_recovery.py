@@ -92,6 +92,22 @@ def kanban_task_id() -> Optional[str]:
     return task_id or None
 
 
+def quota_wait_ends_turn(api_error: Any, error_context: Any = None) -> bool:
+    """True when a kanban worker meets a rate limit whose ``Retry-After`` / ``reset_at`` is more
+    than ``LIVE_RETRY_WAIT_CAP_S`` (60 s) away. Waiting it out would hold a ``max_in_progress``
+    slot for nothing: the caller ends the attempt cycle, the turn fails as ``rate_limit`` and the
+    worker exits 75, so the dispatcher requeues the card and the provider breaker sees the wall.
+    A short wait (<= 60 s) still retries in place."""
+    if kanban_task_id() is None:
+        return False
+    from agent.retry_utils import LIVE_RETRY_WAIT_CAP_S, provider_retry_after_seconds
+    wait = provider_retry_after_seconds(api_error)
+    reset_at = error_context.get("reset_at") if isinstance(error_context, dict) else None
+    if isinstance(reset_at, (int, float)):
+        wait = max(wait or 0.0, float(reset_at) - time.time())
+    return wait is not None and wait > LIVE_RETRY_WAIT_CAP_S
+
+
 def _resolve_task_id(task_id: Optional[str]) -> Optional[str]:
     """An explicit carrier id (managed worker frame) wins; ``None`` reads the env pin."""
     if task_id is None:

@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- kanban provider_breaker/idle_reclaim defaults: 3 data lines in the pure-data DEFAULT_CONFIG (no function to move); the duplicated cap comments stay
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
@@ -1913,6 +1914,9 @@ DEFAULT_CONFIG = {
         # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
         # pool while leaving other profiles idle. See #21582.
         "max_in_progress_per_profile": None,
+        # Provider breaker and opt-in idle reclaim (0 = off): see the kanban docs, "Provider breaker".
+        "provider_breaker": {"failures": 3, "window_seconds": 300, "probe_seconds": 90, "max_probe_wait_seconds": 1800},
+        "idle_reclaim_minutes": 0, "idle_reclaim_grace_minutes": 5,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
         # profile is claimable. Set = fail-closed (an empty list claims nothing). Every home has a
