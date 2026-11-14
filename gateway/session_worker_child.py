@@ -71,8 +71,7 @@ def reserve_child_execution(db, conn, session_id, payload, *, epoch, execution_i
 
 async def worker_child_request(connection, ref, params):
     """worker.persist ``child.reserve``: the parent's full claim and assignment are verified first."""
-    import asyncio
-    from gateway.session_worker import _SCOPE, _claim, _verify
+    from gateway.session_worker import _SCOPE, _claim, _verify, run_worker_rpc
     if set(params) != _SCOPE | {'epoch', 'sequence', 'operation', 'payload'}:
         raise RuntimeStoreError('invalid_params')
     claim = _claim(connection, ref, params)
@@ -94,4 +93,4 @@ async def worker_child_request(connection, ref, params):
         return apply_worker_receipt(authority.db, **{key: params[key] for key in (
             'epoch', 'execution_id', 'session_id', 'generation', 'sequence', 'operation', 'payload')},
             handlers={'child.reserve': handler})
-    return await asyncio.to_thread(reserve)
+    return await run_worker_rpc(reserve)
