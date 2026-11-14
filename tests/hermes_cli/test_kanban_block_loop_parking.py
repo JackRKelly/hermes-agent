@@ -226,6 +226,22 @@ def test_a_jack_park_ends_a_run_of_continue_handoffs(kanban_home: Path) -> None:
         assert last.payload["continues"] == 1
 
 
+@pytest.mark.parametrize("bad_payload", ["{not json", "[1]", "null", ""])
+def test_an_unreadable_block_payload_ends_a_run_of_continue_handoffs(kanban_home: Path, bad_payload: str) -> None:
+    cont = "[captain:continue] Re-run to continue"
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, cont, _CONTINUE_LIMIT - 1)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET payload = ? WHERE id = "
+                "(SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'blocked')",
+                (bad_payload, tid),
+            )
+        last = _next_block(conn, tid, cont)
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert (last.kind, last.payload["continues"]) == ("blocked", 1)
+
+
 def test_continue_handoffs_count_across_block_kinds(kanban_home: Path) -> None:
     # A turn-budget stop files ``transient``, a phase handoff ``needs_input``: one run of handoffs.
     with kbc.connect_closing() as conn:

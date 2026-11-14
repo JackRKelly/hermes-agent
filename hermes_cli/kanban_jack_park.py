@@ -9,7 +9,6 @@ reason with no owner tag that binds a typed action item (``item=<hash16>``) is J
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Optional
 
@@ -59,16 +58,20 @@ def continue_streak(conn, task_id: str) -> int:
     Counted from the event log, not the per-kind ``block_recurrences`` counter, which every
     same-kind block raises (Jack parks included) and only completion clears. The run ends at the
     last completion or the last block of any other cause: a Jack park or a triage bounce is a human
-    step, and another cause is the normal breaker's to count. Call inside the block write txn.
+    step, and another cause is the normal breaker's to count. A payload that is not a JSON object
+    ends the run. Only the limit matters, so at most ``CONTINUE_RECURRENCE_LIMIT`` rows are read.
+    Call inside the block write txn.
     """
+    from hermes_cli.kanban_db import _json_dict
+
     rows = conn.execute(
         f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN "
-        f"({','.join('?' * len(_STREAK_EVENT_KINDS))}) ORDER BY id DESC",
-        (task_id, *_STREAK_EVENT_KINDS),
+        f"({','.join('?' * len(_STREAK_EVENT_KINDS))}) ORDER BY id DESC LIMIT ?",
+        (task_id, *_STREAK_EVENT_KINDS, CONTINUE_RECURRENCE_LIMIT),
     )
     streak = 0
     for kind, payload in rows:
-        reason = (json.loads(payload or "{}") or {}).get("reason")
+        reason = _json_dict(payload).get("reason")
         if kind != "blocked" or not is_captain_continue_reason(reason):
             break
         streak += 1
