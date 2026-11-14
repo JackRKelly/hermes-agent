@@ -1055,7 +1055,7 @@ To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` 
 
 **Idle reclaim (opt-in).** With `kanban.idle_reclaim_minutes` set above 0, a running worker with no new session message (its own or a delegated child session's), no heartbeat and no tool call in flight for that long gets an `idle_flagged` event, and `idle_reclaim_grace_minutes` later is terminated and requeued with run outcome `reclaimed` (reason `idle`), never counted as a failure. The third idle reclaim in a row sends the card to `triage` with `block_loop_detected`.
 
-**Health.** Every dispatcher tick writes `<board db>.health.json` atomically (schema 1: `providers`, `dispatch.held_back`, `bad_ticks`, `idle`, `failure_rate`); `hermes kanban health --json` prints the live document. `--probe <provider>` half-opens a breaker for one probe on the next tick; `--reset <provider>` closes it.
+**Health.** Every dispatcher tick writes `<db stem>.health.json` beside the board database (`kanban.health.json` next to `kanban.db`) atomically (schema 1: `providers`, `dispatch.held_back`, `dispatch.bad_ticks`, `idle`, `failure_rate`); `hermes kanban health --json` prints the live document. `--probe <provider>` half-opens a breaker for one probe on the next tick; `--reset <provider>` closes it.
 
 | Key | Default | Meaning |
 |---|---|---|

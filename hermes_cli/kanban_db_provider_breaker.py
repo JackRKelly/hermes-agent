@@ -462,20 +462,23 @@ def refresh(conn: sqlite3.Connection, now: Optional[int] = None) -> None:
     75/78 (a 75/78 re-opened it in :func:`record_exit` first)."""
     now = int(time.time()) if now is None else int(now)
     cfg = None
-    for rec in all_breakers(conn):
-        if rec["state"] == "closed":
-            continue
+    for name in [rec["provider"] for rec in all_breakers(conn) if rec["state"] != "closed"]:
         cfg = cfg or settings()
-        before = dict(rec)
-        if _fingerprint_changed(rec) is not None:
-            rec.update(state="half_open", next_probe_at=now)
-            log.warning("kanban provider breaker %s HALF_OPEN: credentials changed", rec["provider"])
-        elif rec["state"] == "open" and now >= int(rec.get("next_probe_at") or 0):
-            rec["state"] = "half_open"
-        if rec["state"] == "half_open" and rec.get("probe_task_id"):
-            _settle_probe(conn, rec, now, cfg)
-        if rec != before:
-            with _write(conn):
+        with _write(conn):
+            # Re-read inside the write txn: an operator --reset/--probe from another process
+            # since the scan above must not be overwritten by a stale row.
+            rec = _load(conn, name)
+            if rec is None or rec["state"] == "closed":
+                continue
+            before = dict(rec)
+            if _fingerprint_changed(rec) is not None:
+                rec.update(state="half_open", next_probe_at=now)
+                log.warning("kanban provider breaker %s HALF_OPEN: credentials changed", name)
+            elif rec["state"] == "open" and now >= int(rec.get("next_probe_at") or 0):
+                rec["state"] = "half_open"
+            if rec["state"] == "half_open" and rec.get("probe_task_id"):
+                _settle_probe(conn, rec, now, cfg)
+            if rec != before:
                 _save(conn, rec, now)
 
 
@@ -504,12 +507,20 @@ def paused(conn: sqlite3.Connection, profile: str, now: Optional[int] = None, *,
     if rec is None:
         return False
     now = int(time.time()) if now is None else int(now)
-    held = rec["state"] == "open" or bool(rec.get("probe_task_id")) or now < int(rec.get("next_probe_at") or 0)
+    held = _holds(rec, now)
     if held and note and profile not in rec["profiles"]:
         with _write(conn):
-            rec["profiles"] = sorted({*rec["profiles"], profile})
-            _save(conn, rec, now)
+            rec = _active(conn, profile)  # fresh row: a concurrent --reset/--probe wins
+            if rec is None or not _holds(rec, now):
+                return False
+            if profile not in rec["profiles"]:
+                rec["profiles"] = sorted({*rec["profiles"], profile})
+                _save(conn, rec, now)
     return held
+
+
+def _holds(rec: dict, now: int) -> bool:
+    return rec["state"] == "open" or bool(rec.get("probe_task_id")) or now < int(rec.get("next_probe_at") or 0)
 
 
 def take_probe(conn: sqlite3.Connection, profile: str, task_id: str, now: Optional[int] = None, *,

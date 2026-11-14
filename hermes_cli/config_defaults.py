@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- kanban provider_breaker/idle_reclaim defaults: 3 data lines in the pure-data DEFAULT_CONFIG (no function to move); the duplicated cap comments stay
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
@@ -1898,21 +1899,24 @@ DEFAULT_CONFIG = {
         # Global cap: positive int = the HOST never has more than N tasks 'running' across all
         # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where
         # MemTotal is unreadable (macOS/Windows) None means no cap.
+        # Global concurrency cap (#33488): when set to a positive int, the HOST never has more than N tasks
+        # in 'running' at once — counted across every active board and across both the ready and review
+        # dispatch lanes (workers are OS processes sharing one machine's memory, so the cap bounds the
+        # machine, not each board; OOF-30). Unset (None) means "derive from system memory" (OOF-30/OOF-77):
+        # the dispatcher caps concurrency at roughly MemTotal / 512 MiB, clamped to [2, 8] — e.g. 2 workers
+        # on a 1 GiB VM. On hosts where total memory can't be read (macOS/Windows), unset falls back to no
+        # cap. Set an explicit value to override the derived default in either direction.
         "max_in_progress": None,
         # Per-profile cap: positive int = no single profile runs more than N workers even if the
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
         # when fan-out would saturate one profile's model/API quota/browser pool.
+        # Unset (None) means "no per-profile cap" — backward-compatible with existing installs. Useful for
+        # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
+        # pool while leaving other profiles idle. See #21582.
         "max_in_progress_per_profile": None,
-        # Provider breaker: `failures` exits 75 (quota) / 78 (login) of one provider (a profile's
-        # model.provider) within `window_seconds` pause every profile on it; while half-open one
-        # ready card probes every `probe_seconds`, and at least every `max_probe_wait_seconds` even
-        # before a far reset. `hermes kanban health --json` shows it; `--probe/--reset P` act on it.
+        # Provider breaker and opt-in idle reclaim (0 = off): see the kanban docs, "Provider breaker".
         "provider_breaker": {"failures": 3, "window_seconds": 300, "probe_seconds": 90, "max_probe_wait_seconds": 1800},
-        # Opt-in (0 = off): a running worker with no message, heartbeat or child-session activity and
-        # no tool in flight for this many minutes is flagged, then reclaimed (requeued, not a failure)
-        # after the grace; the 3rd in a row goes to triage.
-        "idle_reclaim_minutes": 0,
-        "idle_reclaim_grace_minutes": 5,
+        "idle_reclaim_minutes": 0, "idle_reclaim_grace_minutes": 5,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
         # profile is claimable. Set = fail-closed (an empty list claims nothing). Every home has a

@@ -319,3 +319,50 @@ def test_auth_trip_releases_a_card_a_lone_78_parked_in_the_window(board):
     unblocked = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'unblocked'",
                              (first,)).fetchall()
     assert unblocked and '"provider_breaker"' in unblocked[-1]["payload"]
+
+
+def _trip(conn, now):
+    for _ in range(3):
+        kbpb.record_exit(conn, "p1", "rate_limited", text="429", now=now)
+
+
+def test_operator_reset_between_scan_and_write_survives_refresh(board, monkeypatch):
+    """An operator --reset from another process after refresh() scanned the rows wins."""
+    conn, _ = board
+    t0 = int(time.time()) - 200
+    _trip(conn, t0)
+    scan = kbpb.all_breakers
+
+    def scan_then_operator_reset(c):
+        rows = scan(c)
+        with kbc.connect_closing() as other:
+            assert kbpb.reset_breaker(other, CLAUDE)
+        return rows  # stale: still open
+
+    monkeypatch.setattr(kbpb, "all_breakers", scan_then_operator_reset)
+    kbpb.refresh(conn, now=t0 + 90)  # the stale row alone would go half_open
+    assert _breaker(conn)["state"] == "closed"
+
+
+@pytest.mark.parametrize("operator, expected", [("reset", "closed"), ("probe", "half_open")])
+def test_operator_action_between_read_and_note_survives_paused(board, monkeypatch, operator, expected):
+    """paused(note=True) adding a held-back profile must not save the stale row over an
+    operator --reset/--probe that landed after its first read."""
+    conn, _ = board
+    now = int(time.time())
+    _trip(conn, now)
+    active, raced = kbpb._active, []
+
+    def read_then_operator(c, profile):
+        rec = active(c, profile)
+        if not raced:
+            raced.append(True)
+            with kbc.connect_closing() as other:
+                act = kbpb.reset_breaker if operator == "reset" else kbpb.probe_now
+                assert act(other, CLAUDE, now=now)
+        return rec
+
+    monkeypatch.setattr(kbpb, "_active", read_then_operator)
+    assert not kbpb.paused(conn, "p2", now=now, note=True)  # the fresh row no longer holds
+    rec = _breaker(conn)
+    assert rec["state"] == expected and "p2" not in rec["profiles"]
