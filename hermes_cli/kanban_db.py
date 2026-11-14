@@ -3181,7 +3181,7 @@ def block_task(
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
-        )
+            conn=conn, task_id=task_id)
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
@@ -3214,20 +3214,16 @@ def block_task(
 
 def _route_block(
     kind: Optional[str], reason: Optional[str], source_status: str, *,
-    prev_kind: Optional[str], prev_recurrences: int,
+    prev_kind: Optional[str], prev_recurrences: int, conn: sqlite3.Connection, task_id: str,
 ) -> tuple[str, str, str, tuple, dict]:
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
 
-    ``dependency`` never enters the human ``blocked`` bucket: it waits in
-    ``todo`` for ``recompute_ready`` (callers re-kind it to ``needs_input``
-    when no parent is open, see :func:`block_task`). Every other kind counts
-    unblock-loop recurrences: a stored ``block_kind`` equal to the incoming
-    one means blocked -> unblocked -> re-block for the same cause. At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human,
-    except a Jack park (approval gate, needs-jack/decision tag, item binding):
-    it re-parks by design and stays ``blocked``, the status Action Items lists.
+    ``dependency`` waits in ``todo`` for ``recompute_ready``, never in the human ``blocked`` bucket.
+    Every other kind counts same-kind re-blocks (blocked -> unblocked -> re-block) and routes to
+    ``triage`` at ``BLOCK_RECURRENCE_LIMIT``, except a Jack park. A Captain continue handoff is held
+    to ``CONTINUE_RECURRENCE_LIMIT`` by its own run of handoffs in a row (``continue_streak``).
     """
-    from hermes_cli.kanban_jack_park import is_jack_park_reason
+    from hermes_cli import kanban_jack_park as jp
 
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
@@ -3235,8 +3231,12 @@ def _route_block(
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT and not is_jack_park_reason(reason):
-        payload["limit"] = BLOCK_RECURRENCE_LIMIT
+    count, limit = recurrences, BLOCK_RECURRENCE_LIMIT
+    if jp.is_captain_continue_reason(reason):
+        count = payload["continues"] = jp.continue_streak(conn, task_id) + 1
+        limit = jp.CONTINUE_RECURRENCE_LIMIT
+    if count >= limit and not jp.is_jack_park_reason(reason):
+        payload["limit"] = limit
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
