@@ -53,7 +53,8 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
     (reading the live source), never taken from the agent. The add-time readability rules
     (``readability.py``) apply here only, so a stored item still reads. ``card`` is the card the item
     parks on: its own workspace is the one place a text may name a file by path; with no card, every
-    local path is refused. Raises ``SchemaError``."""
+    local path is refused, except a path inside a ``user_task`` step's only code span (Jack pastes
+    it). Raises ``SchemaError``."""
     spec = spec_for(kind)
     if not isinstance(payload, dict):
         raise SchemaError("payload: must be an object")

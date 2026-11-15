@@ -60,12 +60,14 @@ _KIND_PAYLOADS = (
     f"may answer in his own words)}}], rec_reason? <={rd.REC_REASON_MAX_CHARS} chars}}. Several questions go in "
     "ONE item as questions[], never numbered in one question; Jack answers them, there is no approve. "
     "user_task: {steps: [...], where}: anything Jack does himself (run SQL or a command, sign in, click, pay), "
-    "answered Done. other: {title, body, links?}: only what an agent does after Jack approves. A refusal names "
+    "answered Done; one command or path per step, as that step's only code span, and a path is the full "
+    "`~/` path once, then a step \"In the file picker press Cmd+Shift+G, paste the path and press Enter\". "
+    "other: {title, body, links?}: only what an agent does after Jack approves. A refusal names "
     "the field, the rule "
     "and a conforming example: fix it and call again once."
 )
 # Jack, Nov 12 (JackRKelly/assistant docs/action-items-card-guide.md section 7): how the texts he reads
-# are written, and the one place a local path may appear.
+# are written, and the two places a local path may appear.
 _WRITING = (
     " Writing for Jack (ask, why, risk.note, body, steps, effects, rec_reason): name PRs and Linear "
     "issues inline as #n, owner/repo#n or CYB-n (the app links them in place; never paste their URLs); "
@@ -76,7 +78,7 @@ _WRITING = (
     "Never print a local path: a file the card shows (a post's image, a screenshot) is named by its "
     "path inside this card's own workspace (<kanban root>/kanban/workspaces/<card id>/) or LinkedIn "
     "preview dir (<kanban root>/state/linkedin/previews/<card id>/) and the app embeds it; any other "
-    "local path is refused."
+    "local path is refused, except the full `~/` path a user_task step gives as its only code span."
 )
 
 ACTION_ITEM_ADD_SCHEMA = {

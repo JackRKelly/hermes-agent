@@ -11,13 +11,15 @@ token or length, a conforming example and the guide, so the calling agent can fi
 
 BANNED (mirrored by the app's adapter) refuses every local path in the title, summary, questions and
 option labels. The other texts Jack reads (ask, why, risk.note, an ``other`` body, steps, option
-effects, rec_reason) refuse a local path too, with one exception the app needs: a file inside the
-card's own workspace or LinkedIn preview dir, named by its path, which the app embeds. That
-exception depends on the card, so ``check_item_paths`` takes the card id the tool resolved.
+effects, rec_reason) refuse a local path too, with two exceptions the app needs: a file inside the
+card's own workspace or LinkedIn preview dir, named by its path, which the app embeds (that one
+depends on the card, so ``check_item_paths`` takes the card id the tool resolved); and a path inside a
+``user_task`` step's only inline code span, which the app shows raw for Jack to paste.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -172,7 +174,8 @@ def foreign_local_path(text: str, card: Optional[str]) -> Optional[str]:
 
 def check_local_paths(text: Any, where: str, card: Optional[str]) -> None:
     """Refuse a local path Jack would see printed; a file inside the card's own workspace or LinkedIn
-    preview dir is the one exception, because the app replaces that path with the file itself."""
+    preview dir is the one exception here, because the app replaces that path with the file itself.
+    (``check_item_paths`` blanks a ``user_task`` step's only code span before calling this.)"""
     if not isinstance(text, str):
         return
     raw = foreign_local_path(text, card)
@@ -213,7 +216,50 @@ def check_item_paths(kind: str, payload: dict, *, ask: Any, why: Any, risk: Any,
     """The add-time local-path rule on every human-facing text of a new item (Jack, Nov 12)."""
     note = risk.get("note") if isinstance(risk, dict) else None
     for where, text in [("ask", ask), ("why", why), ("risk.note", note), *_payload_texts(kind, payload)]:
+        if kind == "user_task" and where.startswith("payload.steps["):
+            check_folder_chain(text, where)
+            text = _without_sole_code_span(text)
         check_local_paths(text, where, card)
+
+
+# Jack, Nov 14: a Full Disk Access task named its path folder by folder ("Open `.hermes`, then `tools`,
+# then ... `bin`") and he could not follow it. A user_task step that needs a path gives the full ``~/``
+# path once, as the step's only code span (the app shows it raw with one Copy box and never resolves it
+# as a file), then the Cmd+Shift+G step (JackRKelly/assistant docs/action-items-card-guide.md, Task cards).
+_CODE_SPAN_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_NAME_SPAN_RE = re.compile(r"`([^`/\s]+)`")
+_CHAIN_GAP_RE = re.compile(r"\s*(?:[,>]\s*)?(?:(?:and\s+)?then\s+)?(?:(?:open|go\s+(?:in)?to|double-click|click)\s+)?",
+                           re.IGNORECASE)
+_CHAIN_MIN = 3
+EXAMPLE_PATH_STEPS = ["Copy this path: `~/.hermes/tools/<dir>/bin/python3.14`",
+                      "In the file picker press Cmd+Shift+G, paste the path and press Enter"]
+
+
+def _without_sole_code_span(text: Any) -> Any:
+    """``text`` with its code span blanked when it has exactly one: a path inside it is what Jack
+    pastes, so only a path outside that span is printed. Two or more spans keep today's rule."""
+    if not isinstance(text, str) or "```" in text:
+        return text
+    spans = list(_CODE_SPAN_RE.finditer(text))
+    if len(spans) != 1:
+        return text
+    return text[:spans[0].start()] + "`path`" + text[spans[0].end():]
+
+
+def check_folder_chain(text: Any, where: str) -> None:
+    """Refuse a step that walks a path folder by folder: 3+ backticked names joined by "then", ","
+    or ">"."""
+    if not isinstance(text, str):
+        return
+    run = 1
+    spans = list(_NAME_SPAN_RE.finditer(text))
+    for prev, span in itertools.pairwise(spans):
+        gap = text[prev.end():span.start()]
+        joined = bool(gap.strip()) and _CHAIN_GAP_RE.fullmatch(gap) is not None
+        run = run + 1 if joined else 1
+        if run >= _CHAIN_MIN:
+            raise fix(where, "names a path folder by folder; give the full ~/ path once as its own step "
+                             "(its only code span), then a step to open it with Cmd+Shift+G", EXAMPLE_PATH_STEPS)
 
 
 # Jack, Nov 13: "Run this SQL to pause two webhooks" was parked as ``other``, so the app offered Approve
