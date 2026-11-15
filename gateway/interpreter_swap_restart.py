@@ -16,7 +16,8 @@ or holds a different file, on two consecutive reads while no update owns the ins
 why. Every uncertain read keeps it up.
 
 Restarting on its own is opt-in: ``gateway.restart_on_interpreter_swap`` (default false). Off,
-the gateway logs one WARNING that a restart is needed and keeps running. On, it first waits
+the gateway logs one WARNING that a restart is needed and keeps running, re-reading the flag
+every poll, so turning it on later still restarts the gateway that logged it. On, it first waits
 until no work is active (``_active_work_count() == 0``: turns, card workers, cron, API runs),
 so it never opens a drain that refuses messages or interrupts a card worker, then asks for the
 same restart ``/restart`` uses (exit 75 under launchd or systemd, the detached helper
@@ -33,7 +34,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +44,17 @@ COOLDOWN_S = 3600.0
 CONFIG_KEY = "restart_on_interpreter_swap"  # under ``gateway:``
 _STAMP_NAME = "gateway_interpreter_swap_restart.json"
 
-FileIdentity = tuple[str, int, int]
+
+class FileIdentity(NamedTuple):
+    """The interpreter file a gateway booted on: its real path and inode."""
+
+    path: str
+    dev: int
+    ino: int
 
 
 def interpreter_identity(executable: Optional[str] = None) -> Optional[FileIdentity]:
-    """``(real path, st_dev, st_ino)`` of the interpreter file, or None when it can't be read."""
+    """The interpreter file's real path and ``(st_dev, st_ino)``, or None when it can't be read."""
     path = executable if executable is not None else sys.executable
     if not path:
         return None
@@ -56,7 +63,7 @@ def interpreter_identity(executable: Optional[str] = None) -> Optional[FileIdent
         st = os.stat(real)
     except OSError:
         return None
-    return real, st.st_dev, st.st_ino
+    return FileIdentity(real, st.st_dev, st.st_ino)
 
 
 def swap_reason(boot: FileIdentity, *, update_in_progress: bool) -> Optional[str]:
@@ -157,6 +164,7 @@ def cooldown_remaining(path: Path, *, now: float, cooldown_s: float = COOLDOWN_S
 
 
 def record_restart(path: Path, *, now: float) -> None:
+    """Stamp *now* as the last automatic restart; the next one waits ``COOLDOWN_S`` from it."""
     from utils import atomic_json_write
 
     atomic_json_write(path, {"restarted_at": now})
@@ -173,17 +181,50 @@ def _active_work(runner) -> int:
         return 1
 
 
+class _PollBudget:
+    """Polls the watcher may still take: unlimited for a gateway, bounded by tests."""
+
+    def __init__(self, limit: Optional[int]) -> None:
+        self.left = limit
+
+    def take(self) -> bool:
+        if self.left is None:
+            return True
+        self.left -= 1
+        return self.left >= 0
+
+
+def _may_continue(runner, budget: _PollBudget) -> bool:
+    """Keep waiting only while the gateway runs, nothing else restarts it, and polls remain."""
+    return bool(getattr(runner, "_running", False)) and not _restart_held(runner) and budget.take()
+
+
 async def _confirmed_swap(runner, read: Callable[[], Optional[str]], poll_s: float,
-                          next_poll: Callable[[], bool]) -> Optional[str]:
+                          budget: _PollBudget) -> Optional[str]:
     """The swap reason once ``_CONFIRMATIONS`` consecutive reads agree, else None (stopped)."""
     seen = 0
-    while getattr(runner, "_running", False) and next_poll():
+    while getattr(runner, "_running", False) and budget.take():
         reason = await asyncio.to_thread(read)
         seen = seen + 1 if reason else 0
         if seen >= _CONFIRMATIONS:
             return reason
         await asyncio.sleep(poll_s)
     return None
+
+
+async def _wait_until_enabled(runner, reason: str, enabled: Callable[[], bool], poll_s: float,
+                              budget: _PollBudget) -> bool:
+    """True once the opt-in flag reads true; warns once while it is off. False when stopped."""
+    warned = False
+    while not enabled():
+        if not warned:
+            logger.warning("%s Restart the gateway by hand now, or set gateway.%s: true and it "
+                           "restarts itself the next time no work is active.", reason, CONFIG_KEY)
+            warned = True
+        if not _may_continue(runner, budget):
+            return False
+        await asyncio.sleep(poll_s)
+    return True
 
 
 async def interpreter_swap_watcher(runner, *, poll_s: float = POLL_S, boot: Optional[FileIdentity] = None,
@@ -194,8 +235,8 @@ async def interpreter_swap_watcher(runner, *, poll_s: float = POLL_S, boot: Opti
                                    enabled: Callable[[], bool] = restart_enabled,
                                    stamp: Optional[Path] = None,
                                    clock: Callable[[], float] = time.time) -> None:
-    """Supervised gateway watcher: on a confirmed swap, warn; opted in, wait for idle and request
-    one restart, at most once per ``COOLDOWN_S``."""
+    """Supervised gateway watcher: on a confirmed swap, warn; once opted in, wait for idle and
+    request one restart, at most once per ``COOLDOWN_S``."""
     if not watcher_applies(platform):
         return
     boot = boot if boot is not None else interpreter_identity()
@@ -213,20 +254,11 @@ async def interpreter_swap_watcher(runner, *, poll_s: float = POLL_S, boot: Opti
             busy = True
         return swap_reason(boot, update_in_progress=busy)
 
-    budget = [max_polls]
-
-    def _next_poll() -> bool:
-        if budget[0] is None:
-            return True
-        budget[0] -= 1
-        return budget[0] >= 0
-
-    reason = await _confirmed_swap(runner, _read, poll_s, _next_poll)
+    budget = _PollBudget(max_polls)
+    reason = await _confirmed_swap(runner, _read, poll_s, budget)
     if reason is None or _restart_held(runner):
         return  # stopped, or a restart/stop already under way boots the current interpreter
-    if not enabled():
-        logger.warning("%s Restart needed; set gateway.%s: true to let the gateway restart itself "
-                       "when idle.", reason, CONFIG_KEY)
+    if not await _wait_until_enabled(runner, reason, enabled, poll_s, budget):
         return
     stamp = stamp if stamp is not None else _stamp_path()
     left = cooldown_remaining(stamp, now=clock())
@@ -236,7 +268,7 @@ async def interpreter_swap_watcher(runner, *, poll_s: float = POLL_S, boot: Opti
         return
     logger.warning("%s Restarting once no work is active.", reason)
     while _active_work(runner) > 0:
-        if not getattr(runner, "_running", False) or _restart_held(runner) or not _next_poll():
+        if not _may_continue(runner, budget):
             return
         await asyncio.sleep(poll_s)
     if not getattr(runner, "_running", False) or _restart_held(runner):

@@ -131,11 +131,31 @@ def test_off_by_default_it_only_warns(tmp_path, caplog):
     _republish(tmp_path)
     runner = _Runner()
     with caplog.at_level(logging.WARNING, logger=isr.__name__):
-        assert _watch(boot, tmp_path / "stamp.json", runner=runner, enabled=False) == []
+        assert _watch(boot, tmp_path / "stamp.json", runner=runner, enabled=False, polls=8) == []
     assert runner.restart_kwargs is None and not runner._draining
     assert not (tmp_path / "stamp.json").exists()
-    assert any("Restart needed" in r.getMessage() and isr.CONFIG_KEY in r.getMessage()
-               for r in caplog.records)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1  # warned once, even though it kept polling the flag
+    assert "by hand now" in warnings[0] and isr.CONFIG_KEY in warnings[0]
+
+
+def test_turning_the_flag_on_later_restarts_the_gateway_that_warned(tmp_path, caplog):
+    """The warning's advice holds: setting the flag after the swap still restarts this gateway."""
+    executable = _store_entry(tmp_path)
+    boot = isr.interpreter_identity(str(executable))
+    assert boot is not None
+    _republish(tmp_path)
+    runner = _Runner(work=[1])  # still busy when the flag flips: the idle gate still applies
+    flag = iter([False, False, True])
+    restarts = []
+    with caplog.at_level(logging.WARNING, logger=isr.__name__):
+        asyncio.run(isr.interpreter_swap_watcher(
+            runner, poll_s=0, boot=boot, update_probe=lambda: False, restart=restarts.append,
+            platform="darwin", max_polls=10, enabled=lambda: next(flag, True),
+            stamp=tmp_path / "stamp.json", clock=lambda: 10_000.0))
+    assert restarts == [runner] and runner._work == []
+    assert sum("by hand now" in r.getMessage() for r in caplog.records) == 1
+    assert isr.cooldown_remaining(tmp_path / "stamp.json", now=10_000.0) == isr.COOLDOWN_S
 
 
 def test_the_restart_waits_for_idle_and_never_drains_live_work(tmp_path):

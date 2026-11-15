@@ -186,6 +186,24 @@ stack to `~/.hermes/logs/gateway_faulthandler.log` and the gateway keeps
 running — use it to see what a stalled or misbehaving gateway is doing without
 restarting it.
 
+### Restart after a managed-Python swap (macOS)
+
+When a managed-Python install replaces the interpreter a running macOS gateway
+was started from, macOS can no longer attribute that process's AppleEvents, so
+Notes, Reminders and other Automation calls fail with `-1743` until the gateway
+restarts. The gateway checks its own interpreter file every minute and logs one
+WARNING when it was replaced. Automatic recovery is off by default; to let the
+gateway restart itself the next time no turn, card worker or cron job is active
+(at most once an hour), run:
+
+```bash
+hermes config set gateway.restart_on_interpreter_swap true
+```
+
+A running gateway reads the setting on every check, so turning it on after the
+warning still restarts that gateway. Your existing Automation grants stay valid:
+every managed Python is signed with the same identifier.
+
 ### Built-in event-loop liveness watchdog
 
 On every platform the gateway runs an out-of-loop watchdog thread that probes
