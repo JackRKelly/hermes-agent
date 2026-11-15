@@ -60,7 +60,9 @@ _KIND_PAYLOADS = (
     f"may answer in his own words)}}], rec_reason? <={rd.REC_REASON_MAX_CHARS} chars}}. Several questions go in "
     "ONE item as questions[], never numbered in one question; Jack answers them, there is no approve. "
     "user_task: {steps: [...], where}: anything Jack does himself (run SQL or a command, sign in, click, pay), "
-    "answered Done. other: {title, body, links?}: only what an agent does after Jack approves. A refusal names "
+    "answered Done; one command or path per step, as that step's only code span, and a path is the full "
+    "`~/` path once, then a step \"In the file picker press Cmd+Shift+G, paste the path and press Enter\". "
+    "other: {title, body, links?}: only what an agent does after Jack approves. A refusal names "
     "the field, the rule "
     "and a conforming example: fix it and call again once."
 )
