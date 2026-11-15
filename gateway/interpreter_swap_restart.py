@@ -84,6 +84,24 @@ def relaunch_module_argv(executable: Optional[str] = None) -> list[str]:
     return runtime_command(Path(__file__).resolve().parent.parent)
 
 
+def resolve_hermes_bin() -> Optional[list[str]]:
+    """Hermes update/restart argv: this install's ``python -m hermes_cli.main``
+    (:func:`relaunch_module_argv`), else ``hermes`` on PATH, else None. The module argv must
+    win: a PATH-first lookup lets an attacker-planted ``hermes`` shadow the running install
+    when /update or /restart re-execs it (#111569)."""
+    try:
+        import importlib.util
+        if importlib.util.find_spec("hermes_cli") is not None:
+            return relaunch_module_argv()
+    except Exception:  # health: allow BLE001 -- moved from gateway.run; PATH is the fallback
+        logger.debug("module relaunch argv unavailable; falling back to PATH", exc_info=True)
+    import shutil
+    hermes_bin = shutil.which("hermes")
+    if hermes_bin:
+        return [hermes_bin]
+    return None
+
+
 def _request_restart(runner) -> None:
     """The ``/restart`` route: exit 75 under a restarting supervisor, else the detached helper."""
     from gateway.restart import is_container_restart_context, is_gateway_supervisor_process
