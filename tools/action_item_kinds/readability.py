@@ -11,9 +11,10 @@ token or length, a conforming example and the guide, so the calling agent can fi
 
 BANNED (mirrored by the app's adapter) refuses every local path in the title, summary, questions and
 option labels. The other texts Jack reads (ask, why, risk.note, an ``other`` body, steps, option
-effects, rec_reason) refuse a local path too, with one exception the app needs: a file inside the
-card's own workspace or LinkedIn preview dir, named by its path, which the app embeds. That
-exception depends on the card, so ``check_item_paths`` takes the card id the tool resolved.
+effects, rec_reason) refuse a local path too, with two exceptions the app needs: a file inside the
+card's own workspace or LinkedIn preview dir, named by its path, which the app embeds (that one
+depends on the card, so ``check_item_paths`` takes the card id the tool resolved); and a path inside a
+``user_task`` step's only inline code span, which the app shows raw for Jack to paste.
 """
 
 from __future__ import annotations
@@ -173,7 +174,8 @@ def foreign_local_path(text: str, card: Optional[str]) -> Optional[str]:
 
 def check_local_paths(text: Any, where: str, card: Optional[str]) -> None:
     """Refuse a local path Jack would see printed; a file inside the card's own workspace or LinkedIn
-    preview dir is the one exception, because the app replaces that path with the file itself."""
+    preview dir is the one exception here, because the app replaces that path with the file itself.
+    (``check_item_paths`` blanks a ``user_task`` step's only code span before calling this.)"""
     if not isinstance(text, str):
         return
     raw = foreign_local_path(text, card)
