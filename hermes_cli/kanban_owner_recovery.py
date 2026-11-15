@@ -294,6 +294,29 @@ def _owner_exited_mid_attempt(conn, task_id) -> bool:
     return _owner_process_gone(receipt)
 
 
+OWNER_EXITED_MARK = "owner_exited"
+"""Run-metadata key set on every attempt whose admitting owner died mid-attempt (free or charged)."""
+
+
+def _previous_run_owner_exited(conn, task_id) -> bool:
+    """True when the card's last ENDED run before its current one also lost its owner mid-attempt.
+
+    This bounds ``OWNER_EXITED_CAUSE``: one restart costs a card nothing, but a card whose every
+    attempt takes the shared gateway down would otherwise be requeued free forever. Both a free
+    reclaim and a charged repeat carry ``OWNER_EXITED_MARK``, so from the second death in a row
+    each one is charged until an attempt ends some other way.
+    """
+    row = conn.execute(
+        "SELECT r.metadata FROM task_runs r JOIN tasks t ON t.id=r.task_id "
+        "WHERE t.id=? AND r.id < t.current_run_id AND r.ended_at IS NOT NULL "
+        "ORDER BY r.id DESC LIMIT 1", (task_id,)).fetchone()
+    try:
+        metadata = json.loads(row["metadata"]) if row and row["metadata"] else {}
+    except (ValueError, TypeError):
+        return False
+    return isinstance(metadata, dict) and metadata.get(OWNER_EXITED_MARK) is True
+
+
 def _apply_gateway_stop(conn, task_id, pid, dead) -> None:
     """Rebook a dead worker the gateway itself stopped (its own restart or shutdown) as a reclaim.
 
@@ -308,6 +331,16 @@ def _apply_gateway_stop(conn, task_id, pid, dead) -> None:
     if not cause:
         return
     from hermes_cli.kanban_db_dispatch import WORKER_OUTPUT_SEP
+    if cause == OWNER_EXITED_CAUSE:
+        # The run metadata mark ``_previous_run_owner_exited`` reads on the card's next attempt.
+        dead.event_payload[OWNER_EXITED_MARK] = True
+        if _previous_run_owner_exited(conn, task_id):
+            # Unlike a noted Stop, an owner death may be this attempt's own doing (an OOM, a crash
+            # in its turn): a second one in a row is charged, but as an ordinary crash.
+            dead.owner_wide = True
+            head, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
+            dead.error_text = f"{head} [the owner gateway exited mid-attempt again: charged]{sep}{output}"
+            return
     _, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
     dead.gateway_stopped, dead.protocol_violation = True, False
     dead.event_kind = "reclaimed"

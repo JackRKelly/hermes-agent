@@ -7,9 +7,10 @@ wait (``test_kanban_worker_restart_wait``); a turn the gateway still has to cut 
 or a plain shutdown) is noted on the run by the owner, and the dead-worker sweep requeues it
 without charging the breaker. A real non-zero exit still books ``crashed``.
 
-Nov 14 00:08: a gateway killed partway through its own shutdown never wrote that note, so 9 of 11
-cards were blocked as one systemic crash. The successor's ``interrupted`` settlement of an
-admission whose owner is gone now speaks for it.
+Nov 14 00:08: a gateway killed partway through its own shutdown never wrote that note, so 8 of
+the 11 swept cards were blocked as one systemic crash (a 9th, an ordinary crash, used up its own
+budget). The successor's ``interrupted`` settlement of an admission whose owner is gone now speaks
+for it, once per card in a row: an owner that dies again under the card's next attempt is charged.
 """
 
 from __future__ import annotations
@@ -82,11 +83,14 @@ def _running(board, tid, n, *, exit_code, stop=None, stop_lock=None, owner_gone=
     run_id = int(conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, claim_lock, claim_expires, worker_pid, started_at) "
         "VALUES (?, 'fan', 'running', ?, ?, ?, ?)", (tid, lock, NOW + 900, worker_pid, NOW - 600)).lastrowid)
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (tid,)).fetchone() is None:
+        conn.execute("INSERT INTO tasks (id, title, assignee, status, created_at, priority) "
+                     "VALUES (?, ?, 'fan', 'ready', ?, 5)", (tid, tid, NOW - 86400))
+    # The card's next attempt keeps its row (and its failure count), as a real re-claim does.
     conn.execute(
-        "INSERT INTO tasks (id, title, assignee, status, created_at, claim_lock, claim_expires, worker_pid, "
-        "worker_started_at, last_heartbeat_at, current_run_id, started_at, priority) "
-        "VALUES (?, ?, 'fan', 'running', ?, ?, ?, ?, ?, ?, ?, ?, 5)",
-        (tid, tid, NOW - 86400, lock, NOW + 900, worker_pid, FINGERPRINT, NOW - 30, run_id, NOW - 600))
+        "UPDATE tasks SET status = 'running', claim_lock = ?, claim_expires = ?, worker_pid = ?, "
+        "worker_started_at = ?, last_heartbeat_at = ?, current_run_id = ?, started_at = ? WHERE id = ?",
+        (lock, NOW + 900, worker_pid, FINGERPRINT, NOW - 30, run_id, NOW - 600, tid))
     _event(conn, tid, run_id, "claimed", {"lock": lock, "expires": NOW + 900})
     request_id = f'kanban:["default","{tid}",{run_id}]'
     owner = {"pid": _absent_pid(3_950_000), "birth": 1.0} if owner_gone else LIVE_OWNER
@@ -157,7 +161,7 @@ def _assert_requeued_free(board, tid, run_id, cause):
 def test_a_restart_whose_old_gateway_died_before_noting_its_stop_blocks_nothing(board):
     """Nov 14 00:08: the old gateway was killed mid-shutdown before it wrote ``worker_stopped``;
     the successor settled every orphaned card admission ``interrupted`` and the first sweep
-    blocked 9 of 11 cards as one systemic crash. That settlement under a dead owner is the stop."""
+    blocked 8 of them as one systemic crash. That settlement under a dead owner is the stop."""
     runs = {f"t_{i}": _running(board, f"t_{i}", i, exit_code=130, owner_gone=True) for i in range(11)}
     result = _tick(board)
     assert result.crashed == [] and result.auto_blocked == []
@@ -185,6 +189,38 @@ def test_a_mixed_sweep_counts_each_class_on_its_own(board):
         assert (task["status"], task["consecutive_failures"]) == ("ready", 1)
     assert _row(board, "task_runs", lost)["outcome"] == "crashed"
     assert all(kb._has_sticky_block(board.conn, tid) for tid in systemic)
+
+
+def test_an_owner_that_dies_under_a_cards_attempts_in_a_row_is_charged_not_systemic(board):
+    """An owner death may be the attempt's own doing (an OOM, a crash in its turn), so only the
+    first in a row is free. Three cards losing their owner twice in a row is the same-error count
+    the systemic rule watches, yet each is an ordinary crash; a card that keeps doing it trips at
+    its normal limit rather than looping free forever."""
+    cards = [f"t_{i}" for i in range(3)]
+    for i, tid in enumerate(cards):
+        _running(board, tid, i, exit_code=130, owner_gone=True)
+    _tick(board)
+    second = {tid: _running(board, tid, 10 + i, exit_code=130, owner_gone=True) for i, tid in enumerate(cards)}
+    result = _tick(board)
+    assert sorted(result.crashed) == cards and result.auto_blocked == []
+    for tid, run_id in second.items():
+        task, run = _row(board, "tasks", tid), _row(board, "task_runs", run_id)
+        assert (task["status"], task["consecutive_failures"], run["outcome"]) == ("ready", 1, "crashed")
+        assert "exited mid-attempt again" in run["error"] and not kb._has_sticky_block(board.conn, tid)
+    _running(board, "t_0", 20, exit_code=130, owner_gone=True)
+    assert _tick(board).auto_blocked == ["t_0"]
+    assert _row(board, "tasks", "t_0")["consecutive_failures"] == kbd.DEFAULT_FAILURE_LIMIT
+
+
+def test_a_crash_under_the_live_successor_after_a_restart_still_counts(board):
+    """The restart's mark belongs to the run the dead owner admitted. The card's next run, admitted
+    by the live successor, crashing with the very same exit is the attempt's own crash."""
+    _running(board, "t_next", 0, exit_code=130, owner_gone=True)
+    _tick(board)
+    run_id = _running(board, "t_next", 1, exit_code=130)
+    _tick(board)
+    assert _row(board, "task_runs", run_id)["outcome"] == "crashed"
+    assert _row(board, "tasks", "t_next")["consecutive_failures"] == 1
 
 
 def test_a_stop_note_from_another_claim_says_nothing_about_this_attempt(board):
