@@ -2124,6 +2124,10 @@ DEFAULT_CONFIG = {
         "loop_watchdog_probe_interval_s": 30.0,
         "loop_watchdog_probe_timeout_s": 10.0,
         "loop_watchdog_max_strikes": 3,
+        # macOS: when a managed-Python install replaces the interpreter file this gateway runs,
+        # AppleEvents (Notes, Reminders) fail with -1743 until restart. False logs a WARNING only;
+        # true restarts once no work is active, at most once an hour.
+        "restart_on_interpreter_swap": False,
         # Allow all users without allowlists (security opt-in).
         "allow_all_users": False,
         # Bot-to-bot loop guard: max_events per window before a cooldown; max_hops bot messages per exchange.

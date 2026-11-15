@@ -1672,6 +1672,12 @@ class GatewayStartupMixin:
             self._spawn_supervised(getattr(self, method), method[1:])
         from gateway.runtime_downgrade_exit import runtime_downgrade_watcher
         self._spawn_supervised(lambda: runtime_downgrade_watcher(self), "runtime_downgrade_watcher")
+        from gateway.interpreter_swap_restart import interpreter_identity, interpreter_swap_watcher
+        # Identity read once, here: a supervised re-spawn of the watcher must compare against the
+        # file this process booted on, never re-adopt an already-swapped one.
+        boot_interpreter = interpreter_identity()
+        self._spawn_supervised(lambda: interpreter_swap_watcher(self, boot=boot_interpreter),
+                               "interpreter_swap_watcher")
         # Scale-to-zero watcher ONLY when opted in, messaging is relay-only/absent, and a wakeUrl exists.
         try:
             if self._scale_to_zero_should_arm():
