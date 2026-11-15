@@ -248,12 +248,17 @@ def _fold_owner_note(conn, task_id, pid, dead) -> None:
     dead.error_text = f"{head} [{note}]{sep}{output}"
 
 
+OWNER_EXITED_CAUSE = "the owner gateway exited mid-attempt; its successor settled the admission interrupted"
+"""``gateway_stop_cause`` for an attempt whose admitting owner died before it could note its Stop."""
+
+
 def gateway_stop_cause(conn, task_id) -> str:
     """The restart/shutdown cause the owner recorded when IT stopped this run's turn, else ``""``.
 
     Either a ``worker_stopped`` event (the worker acknowledged the gateway's Stop and its turn
     settled interrupted) or a ``worker_lost`` carrying ``stop_cause`` (the worker was terminated
-    after that Stop), recorded under the run's own (still current) claim.
+    after that Stop), recorded under the run's own (still current) claim. Failing both,
+    ``OWNER_EXITED_CAUSE`` when ``_owner_exited_mid_attempt`` holds.
     """
     row = conn.execute("SELECT claim_lock FROM tasks WHERE id=?", (task_id,)).fetchone()
     claim_lock = row["claim_lock"] if row is not None else None
@@ -262,7 +267,31 @@ def gateway_stop_cause(conn, task_id) -> str:
         cause = event.get(key)
         if cause and event.get("claim_lock") == claim_lock:
             return str(cause)[:200]
-    return ""
+    return OWNER_EXITED_CAUSE if _owner_exited_mid_attempt(conn, task_id) else ""
+
+
+def _owner_exited_mid_attempt(conn, task_id) -> bool:
+    """True when the owner that admitted this attempt died and its admission settled ``interrupted``.
+
+    The ``worker_stopped`` note is written by the dying owner itself, so a gateway killed by its
+    supervisor partway through its own shutdown (the Nov 14 00:08 restart: SIGTERM, load 99, no
+    exit path ran) never writes it. What survives is the owner's ledger: the successor's boot
+    recovery settles every orphaned card admission ``terminal/interrupted``
+    (``session_unattended_unknown.settle_recovered_unattended``). That settlement plus the
+    admitting owner being gone (pid + birth, ``_owner_process_gone``) is the restart's structured
+    trace.
+
+    A ``worker_lost`` event without ``stop_cause`` disqualifies the run: a live owner's drain also
+    settles a lost worker's admission ``interrupted`` (``settle_unattended_unknown``), and that
+    loss is the attempt's own crash, whatever happened to the owner afterwards. A live owner, an
+    owner whose identity cannot be compared, or an unreadable ledger is no proof either.
+    """
+    if _latest_run_event(conn, task_id, "worker_lost"):
+        return False
+    receipt = _owner_receipt(conn, task_id)
+    if not receipt or _admission_row(receipt) != ("terminal", "interrupted"):
+        return False
+    return _owner_process_gone(receipt)
 
 
 def _apply_gateway_stop(conn, task_id, pid, dead) -> None:
