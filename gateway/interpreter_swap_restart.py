@@ -13,22 +13,35 @@ identifier in ``hermes_cli.macos_signing``, and the grant's code requirement is 
 identifier. The only missing piece is the restart, so the gateway watches its own
 interpreter. It records the real file's ``(st_dev, st_ino)`` at boot. When that path is gone,
 or holds a different file, on two consecutive reads while no update owns the install, it logs
-why and asks for the same drain-first restart ``/restart`` uses. That is exit 75 under
-launchd or systemd and the detached helper otherwise. Every uncertain read keeps it up.
+why. Every uncertain read keeps it up.
+
+Restarting on its own is opt-in: ``gateway.restart_on_interpreter_swap`` (default false). Off,
+the gateway logs one WARNING that a restart is needed and keeps running. On, it first waits
+until no work is active (``_active_work_count() == 0``: turns, card workers, cron, API runs),
+so it never opens a drain that refuses messages or interrupts a card worker, then asks for the
+same restart ``/restart`` uses (exit 75 under launchd or systemd, the detached helper
+otherwise). A persisted stamp allows at most one such restart per ``COOLDOWN_S``, so a
+reinstall that keeps republishing the interpreter cannot loop the gateway.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import time
+from pathlib import Path
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 POLL_S = 60.0
 _CONFIRMATIONS = 2
+COOLDOWN_S = 3600.0
+CONFIG_KEY = "restart_on_interpreter_swap"  # under ``gateway:``
+_STAMP_NAME = "gateway_interpreter_swap_restart.json"
 
 FileIdentity = tuple[str, int, int]
 
@@ -63,8 +76,7 @@ def swap_reason(boot: FileIdentity, *, update_in_progress: bool) -> Optional[str
         state = "now holds a different file"
     return (f"This gateway's Python interpreter {path} {state} (a managed-Python install replaced "
             "it). macOS cannot attribute AppleEvents to a process running a replaced binary, so "
-            "Notes and other Automation calls fail until restart; restarting on the current "
-            "interpreter.")
+            "Notes and other Automation calls fail until the gateway restarts.")
 
 
 def relaunch_module_argv(executable: Optional[str] = None) -> list[str]:
@@ -77,8 +89,6 @@ def relaunch_module_argv(executable: Optional[str] = None) -> list[str]:
     path = executable if executable is not None else sys.executable
     if path and os.path.exists(path):
         return [path, "-m", "hermes_cli.main"]
-    from pathlib import Path
-
     from hermes_cli._launchers import runtime_command
 
     return runtime_command(Path(__file__).resolve().parent.parent)
@@ -119,12 +129,73 @@ def watcher_applies(platform: Optional[str] = None) -> bool:
     return platform == "darwin"
 
 
+def restart_enabled() -> bool:
+    """``gateway.restart_on_interpreter_swap`` from the gateway's effective config (default off)."""
+    from gateway.run import _load_gateway_config
+    from utils import is_truthy_value
+
+    gateway_cfg = _load_gateway_config().get("gateway")
+    raw = gateway_cfg.get(CONFIG_KEY) if isinstance(gateway_cfg, dict) else None
+    return is_truthy_value(raw, default=False)
+
+
+def _stamp_path() -> Path:
+    from hermes_constants import get_process_hermes_home
+
+    return get_process_hermes_home() / _STAMP_NAME  # one gateway process, one stamp
+
+
+def cooldown_remaining(path: Path, *, now: float, cooldown_s: float = COOLDOWN_S) -> float:
+    """Seconds before another automatic restart is allowed; 0 when none is recorded."""
+    try:
+        last = float(json.loads(path.read_text(encoding="utf-8-sig"))["restarted_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+    if last > now:
+        return cooldown_s  # a stamp from the future (clock moved back) holds the full window
+    return max(0.0, last + cooldown_s - now)
+
+
+def record_restart(path: Path, *, now: float) -> None:
+    from utils import atomic_json_write
+
+    atomic_json_write(path, {"restarted_at": now})
+
+
+def _restart_held(runner) -> bool:
+    return bool(getattr(runner, "_restart_requested", False) or getattr(runner, "_draining", False))
+
+
+def _active_work(runner) -> int:
+    try:
+        return int(runner._active_work_count())
+    except Exception:  # health: allow BLE001 -- an unreadable count must hold the restart, not fire it
+        return 1
+
+
+async def _confirmed_swap(runner, read: Callable[[], Optional[str]], poll_s: float,
+                          next_poll: Callable[[], bool]) -> Optional[str]:
+    """The swap reason once ``_CONFIRMATIONS`` consecutive reads agree, else None (stopped)."""
+    seen = 0
+    while getattr(runner, "_running", False) and next_poll():
+        reason = await asyncio.to_thread(read)
+        seen = seen + 1 if reason else 0
+        if seen >= _CONFIRMATIONS:
+            return reason
+        await asyncio.sleep(poll_s)
+    return None
+
+
 async def interpreter_swap_watcher(runner, *, poll_s: float = POLL_S, boot: Optional[FileIdentity] = None,
                                    update_probe: Optional[Callable[[], bool]] = None,
                                    restart: Callable[[object], None] = _request_restart,
                                    platform: Optional[str] = None,
-                                   max_polls: Optional[int] = None) -> None:
-    """Supervised gateway watcher: one drain-first restart after ``_CONFIRMATIONS`` swapped reads."""
+                                   max_polls: Optional[int] = None,
+                                   enabled: Callable[[], bool] = restart_enabled,
+                                   stamp: Optional[Path] = None,
+                                   clock: Callable[[], float] = time.time) -> None:
+    """Supervised gateway watcher: on a confirmed swap, warn; opted in, wait for idle and request
+    one restart, at most once per ``COOLDOWN_S``."""
     if not watcher_applies(platform):
         return
     boot = boot if boot is not None else interpreter_identity()
@@ -142,15 +213,33 @@ async def interpreter_swap_watcher(runner, *, poll_s: float = POLL_S, boot: Opti
             busy = True
         return swap_reason(boot, update_in_progress=busy)
 
-    seen = polls = 0
-    while getattr(runner, "_running", False) and (max_polls is None or polls < max_polls):
-        polls += 1
-        reason = await asyncio.to_thread(_read)
-        seen = seen + 1 if reason else 0
-        if seen >= _CONFIRMATIONS:
-            if getattr(runner, "_restart_requested", False) or getattr(runner, "_draining", False):
-                return  # a restart or stop is already under way; it boots the current interpreter
-            logger.warning("%s", reason)
-            restart(runner)
+    budget = [max_polls]
+
+    def _next_poll() -> bool:
+        if budget[0] is None:
+            return True
+        budget[0] -= 1
+        return budget[0] >= 0
+
+    reason = await _confirmed_swap(runner, _read, poll_s, _next_poll)
+    if reason is None or _restart_held(runner):
+        return  # stopped, or a restart/stop already under way boots the current interpreter
+    if not enabled():
+        logger.warning("%s Restart needed; set gateway.%s: true to let the gateway restart itself "
+                       "when idle.", reason, CONFIG_KEY)
+        return
+    stamp = stamp if stamp is not None else _stamp_path()
+    left = cooldown_remaining(stamp, now=clock())
+    if left > 0:
+        logger.warning("%s Not restarting: an automatic restart for this ran within the last %.0fs "
+                       "(%.0fs left); restart the gateway by hand.", reason, COOLDOWN_S, left)
+        return
+    logger.warning("%s Restarting once no work is active.", reason)
+    while _active_work(runner) > 0:
+        if not getattr(runner, "_running", False) or _restart_held(runner) or not _next_poll():
             return
         await asyncio.sleep(poll_s)
+    if not getattr(runner, "_running", False) or _restart_held(runner):
+        return
+    record_restart(stamp, now=clock())
+    restart(runner)
