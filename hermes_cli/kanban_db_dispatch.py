@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -1043,6 +1044,8 @@ class _DeadWorker:
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
     gateway_stopped: bool = False  # the owner stopped it for its own restart: a reclaim (apply_attempt_note)
+    # Its owner gateway died mid-attempt again: an ordinary crash, never a same-error systemic one.
+    owner_wide: bool = False
 
     @property
     def run_outcome(self) -> str:
@@ -1246,10 +1249,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
     heal them) trip immediately.
     """
     auto_blocked: list[str] = []
-    fp_counts: dict[str, int] = {}
-    for _, _, _, dead in crash_details:
-        fp = _error_fingerprint(dead.error_text)
-        fp_counts[fp] = fp_counts.get(fp, 0) + 1
+    fp_counts = Counter(_error_fingerprint(d.error_text) for *_, d in crash_details if not d.owner_wide)
     for tid, pid, claimer, dead in crash_details:
         error_text = dead.error_text
         if dead.protocol_violation:
@@ -1297,7 +1297,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
             )
         else:
-            is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
+            is_systemic = not dead.owner_wide and fp_counts[_error_fingerprint(error_text)] >= 3
             extra = {"pid": pid, "claimer": claimer}
             if is_systemic:
                 # Trips at 1, below any ``failure_limit``: hold it for an operator.

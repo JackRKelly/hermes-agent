@@ -248,12 +248,17 @@ def _fold_owner_note(conn, task_id, pid, dead) -> None:
     dead.error_text = f"{head} [{note}]{sep}{output}"
 
 
+OWNER_EXITED_CAUSE = "the owner gateway exited mid-attempt; its successor settled the admission interrupted"
+"""``gateway_stop_cause`` for an attempt whose admitting owner died before it could note its Stop."""
+
+
 def gateway_stop_cause(conn, task_id) -> str:
     """The restart/shutdown cause the owner recorded when IT stopped this run's turn, else ``""``.
 
     Either a ``worker_stopped`` event (the worker acknowledged the gateway's Stop and its turn
     settled interrupted) or a ``worker_lost`` carrying ``stop_cause`` (the worker was terminated
-    after that Stop), recorded under the run's own (still current) claim.
+    after that Stop), recorded under the run's own (still current) claim. Failing both,
+    ``OWNER_EXITED_CAUSE`` when ``_owner_exited_mid_attempt`` holds.
     """
     row = conn.execute("SELECT claim_lock FROM tasks WHERE id=?", (task_id,)).fetchone()
     claim_lock = row["claim_lock"] if row is not None else None
@@ -262,7 +267,54 @@ def gateway_stop_cause(conn, task_id) -> str:
         cause = event.get(key)
         if cause and event.get("claim_lock") == claim_lock:
             return str(cause)[:200]
-    return ""
+    return OWNER_EXITED_CAUSE if _owner_exited_mid_attempt(conn, task_id) else ""
+
+
+def _owner_exited_mid_attempt(conn, task_id) -> bool:
+    """True when the owner that admitted this attempt died and its admission settled ``interrupted``.
+
+    The ``worker_stopped`` note is written by the dying owner itself, so a gateway killed by its
+    supervisor partway through its own shutdown (the Nov 14 00:08 restart: SIGTERM, load 99, no
+    exit path ran) never writes it. What survives is the owner's ledger: the successor's boot
+    recovery settles every orphaned card admission ``terminal/interrupted``
+    (``session_unattended_unknown.settle_recovered_unattended``). That settlement plus the
+    admitting owner being gone (pid + birth, ``_owner_process_gone``) is the restart's structured
+    trace.
+
+    A ``worker_lost`` event without ``stop_cause`` disqualifies the run: a live owner's drain also
+    settles a lost worker's admission ``interrupted`` (``settle_unattended_unknown``), and that
+    loss is the attempt's own crash, whatever happened to the owner afterwards. A live owner, an
+    owner whose identity cannot be compared, or an unreadable ledger is no proof either.
+    """
+    if _latest_run_event(conn, task_id, "worker_lost"):
+        return False
+    receipt = _owner_receipt(conn, task_id)
+    if not receipt or _admission_row(receipt) != ("terminal", "interrupted"):
+        return False
+    return _owner_process_gone(receipt)
+
+
+OWNER_EXITED_MARK = "owner_exited"
+"""Run-metadata key set on every attempt whose admitting owner died mid-attempt (free or charged)."""
+
+
+def _previous_run_owner_exited(conn, task_id) -> bool:
+    """True when the card's last ENDED run before its current one also lost its owner mid-attempt.
+
+    This bounds ``OWNER_EXITED_CAUSE``: one restart costs a card nothing, but a card whose every
+    attempt takes the shared gateway down would otherwise be requeued free forever. Both a free
+    reclaim and a charged repeat carry ``OWNER_EXITED_MARK``, so from the second death in a row
+    each one is charged until an attempt ends some other way.
+    """
+    row = conn.execute(
+        "SELECT r.metadata FROM task_runs r JOIN tasks t ON t.id=r.task_id "
+        "WHERE t.id=? AND r.id < t.current_run_id AND r.ended_at IS NOT NULL "
+        "ORDER BY r.id DESC LIMIT 1", (task_id,)).fetchone()
+    try:
+        metadata = json.loads(row["metadata"]) if row and row["metadata"] else {}
+    except (ValueError, TypeError):
+        return False
+    return isinstance(metadata, dict) and metadata.get(OWNER_EXITED_MARK) is True
 
 
 def _apply_gateway_stop(conn, task_id, pid, dead) -> None:
@@ -279,6 +331,16 @@ def _apply_gateway_stop(conn, task_id, pid, dead) -> None:
     if not cause:
         return
     from hermes_cli.kanban_db_dispatch import WORKER_OUTPUT_SEP
+    if cause == OWNER_EXITED_CAUSE:
+        # The run metadata mark ``_previous_run_owner_exited`` reads on the card's next attempt.
+        dead.event_payload[OWNER_EXITED_MARK] = True
+        if _previous_run_owner_exited(conn, task_id):
+            # Unlike a noted Stop, an owner death may be this attempt's own doing (an OOM, a crash
+            # in its turn): a second one in a row is charged, but as an ordinary crash.
+            dead.owner_wide = True
+            head, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
+            dead.error_text = f"{head} [the owner gateway exited mid-attempt again: charged]{sep}{output}"
+            return
     _, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
     dead.gateway_stopped, dead.protocol_violation = True, False
     dead.event_kind = "reclaimed"
