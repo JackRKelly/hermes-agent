@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_workflow
+from hermes_cli.kanban_db_due import format_due, format_due_at
 
 _STATUS_ICONS = {c.key: c.icon for c in kanban_workflow.DEFAULT_WORKFLOW} | {kanban_workflow.ARCHIVED: "—"}
 
@@ -19,6 +20,7 @@ _TASK_DICT_FIELDS = (
     "created_by", "created_at", "started_at", "completed_at", "result",
     "skills", "max_runtime_seconds", "max_retries", "model_override", "provider_override",
     "session_id", "workflow_template_id", "current_step_key", "completion_contract", "last_failure_error",
+    "due_at",
 )
 _SHOW_RUN_FIELDS = (
     "id", "profile", "step_key", "status", "outcome", "summary", "error",
@@ -33,6 +35,11 @@ _ATTACHMENT_FIELDS = ("id", "filename", "content_type", "size", "uploaded_by", "
 
 def _fmt_ts(ts: Optional[int]) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else ""
+
+
+def _fmt_due(due_at: Optional[int]) -> str:
+    """``2026-11-30 17:00 CST (due in 13d)``; ``""`` for the usual undated card."""
+    return f"{format_due_at(due_at)} ({format_due(due_at)})" if due_at is not None else ""
 
 
 def _print_json(obj: Any, *, ascii: bool = False) -> None:
@@ -73,7 +80,9 @@ def _fmt_task_line(t: kb.Task) -> str:
     icon = _STATUS_ICONS.get(t.status, "?")
     assignee = t.assignee or "(unassigned)"
     tenant = f" [{t.tenant}]" if t.tenant else ""
-    return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{tenant}  {t.title}"
+    # Only dated cards carry a marker; an undated card is the normal case and shows nothing.
+    due = f" ({format_due(t.due_at)})" if t.due_at is not None else ""
+    return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{tenant}  {t.title}{due}"
 
 
 def _obj_dict(obj: Any, fields: tuple[str, ...]) -> dict[str, Any]:

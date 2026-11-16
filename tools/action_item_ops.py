@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -150,13 +151,27 @@ def _envelope_args(args: dict) -> dict:
     return {key: args.get(key) for key in ENVELOPE_ARGS}
 
 
+def _card_deadline(board: Any, card: str) -> Optional[str]:
+    """The parking card's own due date (``tasks.due_at``) as the item's ISO ``deadline``, so a dated
+    card's ask carries its real deadline into Action Items without the agent copying it. None for the
+    usual undated card (or an unknown one: ``add_item`` refuses that below)."""
+    from tools.kanban_tools import _board
+
+    with _board(board) as (kb, conn):
+        task = kb.get_task(conn, card)
+    due_at = getattr(task, "due_at", None)
+    return datetime.fromtimestamp(due_at, UTC).isoformat() if due_at is not None else None
+
+
 def add_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
     from tools.kanban_tools import _board
 
     caller = current_caller()
     card = _resolve_card(caller, args.get("card"))
-    env = build_envelope(args.get("kind"), payload=args.get("payload"), sources=sources, card=card,
-                         **_envelope_args(args))
+    fields = _envelope_args(args)
+    if fields.get("deadline") is None:  # an explicit deadline from the agent always wins
+        fields["deadline"] = _card_deadline(args.get("board"), card)
+    env = build_envelope(args.get("kind"), payload=args.get("payload"), sources=sources, card=card, **fields)
     with _board(args.get("board")) as (kb, conn):
         task = kb.get_task(conn, card)
         if task is None:
