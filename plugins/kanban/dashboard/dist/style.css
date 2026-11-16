@@ -288,6 +288,16 @@
   border: 1px solid color-mix(in srgb, var(--color-ring) 40%, transparent);
 }
 
+.hermes-kanban-due {
+  font-size: 0.6rem !important;
+  padding: 0.05rem 0.3rem !important;
+}
+
+.hermes-kanban-due--overdue {
+  color: var(--color-destructive, #dc2626);
+  border-color: color-mix(in srgb, var(--color-destructive, #dc2626) 50%, transparent);
+}
+
 .hermes-kanban-tag {
   font-size: 0.6rem !important;
   padding: 0.05rem 0.3rem !important;

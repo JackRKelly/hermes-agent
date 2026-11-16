@@ -3322,6 +3322,12 @@
               ? h(Badge, { className: "hermes-kanban-priority",
                            title: `Priority ${t.priority}. Higher-priority tasks are claimed first by the dispatcher.` }, `P${t.priority}`)
               : null,
+            // Only cards with a real deadline get a badge; undated cards are the norm.
+            t.due_at != null
+              ? h(Badge, { variant: "outline",
+                           className: cn("hermes-kanban-due", t.due_at * 1000 < Date.now() ? "hermes-kanban-due--overdue" : ""),
+                           title: `Due ${new Date(t.due_at * 1000).toLocaleString()}` }, formatDue(t.due_at))
+              : null,
             t.tenant
               ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",
                            title: `Tenant: ${t.tenant}. Free-form tag for grouping tasks (customer, project, team).` }, t.tenant)
@@ -4118,6 +4124,10 @@
         h(PriorityEditor, { task: t, onPatch: props.onPatch }),
         h(ModelEditor, { task: t, onPatch: props.onPatch }),
         t.tenant ? h(MetaRow, { label: tx(i18n, "tenant", "Tenant"), value: t.tenant }) : null,
+        t.due_at != null ? h(MetaRow, {
+          label: tx(i18n, "due", "Due"),
+          value: `${new Date(t.due_at * 1000).toLocaleString()} (${formatDue(t.due_at)})`,
+        }) : null,
         h(MetaRow, {
           label: tx(i18n, "workspace", "Workspace"),
           value: `${t.workspace_kind}${t.workspace_path ? ": " + t.workspace_path : ""}`,
@@ -4419,6 +4429,16 @@
             tx(t, "logAt", ")"))
         : null,
     );
+  }
+
+  // Same labels as the CLI (hermes_cli/kanban_db_due.py::format_due): "due in 13d" / "overdue 2h".
+  function formatDue(dueAt) {
+    const delta = Math.trunc(dueAt - Date.now() / 1000);
+    const abs = Math.abs(delta);
+    const span = abs >= 86400 ? `${Math.floor(abs / 86400)}d`
+      : abs >= 3600 ? `${Math.floor(abs / 3600)}h`
+      : abs >= 60 ? `${Math.floor(abs / 60)}m` : "<1m";
+    return delta >= 0 ? `due in ${span}` : `overdue ${span}`;
   }
 
   function MetaRow(props) {
