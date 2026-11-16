@@ -503,7 +503,8 @@ KANBAN_CREATE_SCHEMA = _schema(
             "On publication pass metadata.published_pr."
         )),
         "due": _prop("string", (
-            "Optional due date, ISO 8601 with a UTC offset (e.g. 2026-11-30T17:00:00-06:00). "
+            "Optional due date, ISO 8601 with a UTC offset. Chicago time is -06:00 in winter "
+            "(2026-11-30T17:00:00-06:00) and -05:00 in summer (2027-06-30T17:00:00-05:00). "
             "Set it only when the owner or a customer gave a real deadline; most tasks have none."
         )),
         "goal_max_turns": _prop("integer", (

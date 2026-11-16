@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -27,7 +28,6 @@ from tools.action_item_kinds.spec import LiveSources
 from tools.action_item_view import (
     ItemRefused, ItemView, binding_problems, item_id, load_item, parse_item_id,
 )
-from datetime import UTC
 
 ADDABLE_STATUSES = ("running", "ready")
 # E.164 handles are payload data the redactor would mask; mask them first so the secret check
@@ -155,8 +155,6 @@ def _card_deadline(board: Any, card: str) -> Optional[str]:
     """The parking card's own due date (``tasks.due_at``) as the item's ISO ``deadline``, so a dated
     card's ask carries its real deadline into Action Items without the agent copying it. None for the
     usual undated card (or an unknown one: ``add_item`` refuses that below)."""
-    from datetime import datetime, timezone
-
     from tools.kanban_tools import _board
 
     with _board(board) as (kb, conn):

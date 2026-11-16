@@ -955,6 +955,10 @@ def _cmd_edit(args: argparse.Namespace) -> int:
         return _err("kanban edit: --summary and --metadata require --result", 2)
     if all(value is None for value in (title, body, priority, result, due)):
         return _err("kanban edit: provide --title, --body, --priority, --due, or --result", 2)
+    # The due date and the other fields are two writes; refuse the one pairing whose second write
+    # can fail on a known task (--result needs a done task), so a refused edit never half-applies.
+    if due is not None and result is not None:
+        return _err("kanban edit: --due cannot be combined with --result (a done task needs no due date)", 2)
     metadata, rc = _parse_metadata_flag(raw_metadata)
     if rc:
         return rc

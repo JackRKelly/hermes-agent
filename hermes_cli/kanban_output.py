@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_workflow
-from hermes_cli.kanban_db_due import format_due
+from hermes_cli.kanban_db_due import format_due, format_due_at
 
 _STATUS_ICONS = {c.key: c.icon for c in kanban_workflow.DEFAULT_WORKFLOW} | {kanban_workflow.ARCHIVED: "—"}
 
@@ -38,8 +38,8 @@ def _fmt_ts(ts: Optional[int]) -> str:
 
 
 def _fmt_due(due_at: Optional[int]) -> str:
-    """``2026-11-30 17:00 (due in 13d)``; ``""`` for the usual undated card."""
-    return f"{_fmt_ts(due_at)} ({format_due(due_at)})" if due_at is not None else ""
+    """``2026-11-30 17:00 CST (due in 13d)``; ``""`` for the usual undated card."""
+    return f"{format_due_at(due_at)} ({format_due(due_at)})" if due_at is not None else ""
 
 
 def _print_json(obj: Any, *, ascii: bool = False) -> None:

@@ -3326,7 +3326,7 @@
             t.due_at != null
               ? h(Badge, { variant: "outline",
                            className: cn("hermes-kanban-due", t.due_at * 1000 < Date.now() ? "hermes-kanban-due--overdue" : ""),
-                           title: `Due ${new Date(t.due_at * 1000).toLocaleString()}` }, formatDue(t.due_at))
+                           title: `Due ${formatDueAt(t.due_at)}` }, formatDue(t.due_at))
               : null,
             t.tenant
               ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",
@@ -4126,7 +4126,7 @@
         t.tenant ? h(MetaRow, { label: tx(i18n, "tenant", "Tenant"), value: t.tenant }) : null,
         t.due_at != null ? h(MetaRow, {
           label: tx(i18n, "due", "Due"),
-          value: `${new Date(t.due_at * 1000).toLocaleString()} (${formatDue(t.due_at)})`,
+          value: `${formatDueAt(t.due_at)} (${formatDue(t.due_at)})`,
         }) : null,
         h(MetaRow, {
           label: tx(i18n, "workspace", "Workspace"),
@@ -4439,6 +4439,13 @@
       : abs >= 3600 ? `${Math.floor(abs / 3600)}h`
       : abs >= 60 ? `${Math.floor(abs / 60)}m` : "<1m";
     return delta >= 0 ? `due in ${span}` : `overdue ${span}`;
+  }
+
+  // Deadlines are written in the board owner's zone; the CLI falls back to the same zone
+  // (kanban_db_due.py::OWNER_TZ_FALLBACK), so a viewer elsewhere sees the same labelled wall time.
+  const DUE_TIME_ZONE = "America/Chicago";
+  function formatDueAt(dueAt) {
+    return new Date(dueAt * 1000).toLocaleString(undefined, { timeZone: DUE_TIME_ZONE, timeZoneName: "short" });
   }
 
   function MetaRow(props) {

@@ -2,12 +2,15 @@
 
 Most cards have no due date and that is normal: nothing here requires one, and an
 absent date renders as nothing at all. A date is only ever set from an explicit
-value (``--due``, the ``kanban_create`` tool, the dashboard API), never inferred.
+value (``hermes kanban create/edit --due`` or the ``kanban_create`` tool), never
+inferred.
 
 Input is ISO 8601 WITH a UTC offset (``2026-11-30T17:00:00-06:00`` or ``...Z``). A
 naive timestamp is refused instead of being read in the host's zone: the board is
 shared by profiles and the owner's zone is not the host's, so a guessed zone would
-silently move a customer deadline by hours.
+silently move a customer deadline by hours. The stored value is UTC epoch seconds;
+display is in the owner's zone (:func:`owner_zone`), labelled CST/CDT, so the
+offset an author typed and the wall time a reader sees always agree.
 """
 from __future__ import annotations
 
@@ -15,9 +18,27 @@ import sqlite3
 import time
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 # Words that clear a due date on ``hermes kanban edit --due``.
 CLEAR_WORDS = frozenset({"none", "clear", "null", ""})
+
+# The board owner's zone when the profile configures no ``timezone``. Deadlines on
+# this board are written in Chicago time, and the host's zone (UTC under the test
+# runner and in containers) would show a different wall time with no label.
+OWNER_TZ_FALLBACK = "America/Chicago"
+
+
+def owner_zone() -> ZoneInfo:
+    """The zone due dates are shown in: the profile's ``timezone``, else Chicago."""
+    import hermes_time
+
+    return hermes_time.get_timezone() or ZoneInfo(OWNER_TZ_FALLBACK)
+
+
+def format_due_at(due_at: int) -> str:
+    """Absolute owner-zone time with its zone name: ``2026-11-30 17:00 CST``."""
+    return datetime.fromtimestamp(int(due_at), owner_zone()).strftime("%Y-%m-%d %H:%M %Z")
 
 
 def parse_due(text: Optional[str]) -> Optional[int]:
@@ -31,8 +52,7 @@ def parse_due(text: Optional[str]) -> Optional[int]:
         return None
     raw = str(text).strip()
     try:
-        # ``fromisoformat`` on Python < 3.11 rejects a trailing ``Z``.
-        parsed = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw)
+        parsed = datetime.fromisoformat(raw)
     except ValueError as exc:
         raise ValueError(f"not an ISO 8601 date-time: {raw!r} (e.g. 2026-11-30T17:00:00-06:00)") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
