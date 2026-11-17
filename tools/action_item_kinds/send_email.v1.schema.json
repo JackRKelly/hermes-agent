@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action_item_kinds/send_email.v1.schema.json",
+  "title": "send_email v1 payload (FROZEN, design §3.2.1; changes need a v2 file)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["account", "thread_id", "thread_url", "draft_id", "from", "last_inbound_at",
+               "last_inbound_excerpt", "to", "cc", "bcc", "subject", "body", "attachments",
+               "content_hash"],
+  "properties": {
+    "account": {"enum": ["jack@cybership.io", "kcjackkelly@gmail.com"]},
+    "thread_id": {"type": "string", "maxLength": 200, "x-text": "line"},
+    "thread_url": {"type": "string"},
+    "draft_id": {"type": "string", "maxLength": 200, "x-text": "line"},
+    "from": {"$ref": "#/$defs/person"},
+    "last_inbound_at": {"type": "string", "x-iso": true},
+    "last_inbound_excerpt": {"type": "string", "maxLength": 500, "x-text": "plain"},
+    "to": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/person"}},
+    "cc": {"type": "array", "items": {"$ref": "#/$defs/person"}},
+    "bcc": {"type": "array", "items": {"$ref": "#/$defs/person"}},
+    "subject": {"type": "string", "maxLength": 300, "x-text": "line", "x-allow-blank": true},
+    "body": {"type": "string", "maxLength": 20000, "x-text": "plain"},
+    "attachments": {"type": "array", "items": {"$ref": "#/$defs/attachment"}},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["email"],
+      "properties": {
+        "name": {"type": "string", "maxLength": 200, "x-text": "line"},
+        "email": {"type": "string", "pattern": "^[^@\\s<>]+@[^@\\s<>]+\\.[^@\\s<>]+$"}
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256", "size"],
+      "properties": {
+        "filename": {"type": "string", "maxLength": 255, "x-text": "line"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

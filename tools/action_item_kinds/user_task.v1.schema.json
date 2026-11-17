@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action_item_kinds/user_task.v1.schema.json",
+  "title": "user_task v1 payload",
+  "description": "Agent fields: steps, where. steps_hash is computed by the tool.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["steps", "where", "steps_hash"],
+  "properties": {
+    "steps": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string", "maxLength": 300, "x-text": "text"}},
+    "where": {"type": "string", "maxLength": 200, "x-text": "text-line", "x-allow-blank": true},
+    "steps_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

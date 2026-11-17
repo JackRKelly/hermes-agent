@@ -83,6 +83,10 @@ _TASK_IDS = _arg("task_ids", nargs="+")
 _SLUG = _arg("slug")
 _TENANT = _arg("--tenant", help="Tenant namespace")
 _PRIORITY = _arg("--priority", type=int, default=0, help="Priority tiebreaker")
+_DUE = _arg("--due", metavar="ISO8601",
+            help="Optional due date, ISO 8601 with a UTC offset (Chicago: -06:00 in winter, e.g. "
+                 "2026-11-30T17:00:00-06:00; -05:00 in summer, e.g. 2027-06-30T17:00:00-05:00). "
+                 "Omit when the work has no real deadline.")
 _RECLAIM_REASON = _reason("Human-readable reason (recorded on the reclaimed event)")
 _NOTIFY_TARGET = (
     _arg("--platform", required=True),
@@ -185,6 +189,7 @@ _SPECS = [
              help="Per-task runtime cap. Accepts seconds (300) or durations (90s, "
                   "30m, 2h, 1d). When exceeded, the dispatcher SIGTERMs (then "
                   "SIGKILLs) the worker and re-queues the task."),
+        _DUE,
         _arg("--created-by", default="user", help="Author name recorded on the task (default: user)"),
         _arg("--skill", action="append", default=[], dest="skills",
              help="Skill to force-load into the worker (repeatable). The kanban "
@@ -309,6 +314,9 @@ _SPECS = [
         _arg("--title", help="Replace the task title"),
         _arg("--body", help="Replace the task body"),
         _arg("--priority", type=int, help="Replace the task priority"),
+        _arg("--due", metavar="ISO8601", help="Set the optional due date (ISO 8601 with a UTC offset, "
+                                              "Chicago -06:00 in winter / -05:00 in summer, e.g. "
+                                              "2026-11-30T17:00:00-06:00), or 'none' to clear it"),
         _arg("--result", help="Backfilled task result text for a done task"),
         *_STEP_HANDOFF,
     ], help="Edit task fields or recovery fields on an already-completed task"),
@@ -386,6 +394,10 @@ _SPECS = [
         _arg("--interval", type=float, default=0.5, help="Poll interval in seconds (default: 0.5)"),
     ], help="Live-stream task_events to the terminal (Ctrl+C to exit)"),
     _cmd("stats", [_json_flag()], help="Per-status + per-assignee counts + oldest-ready age"),
+    _cmd("health", [_json_flag(),
+                    _arg("--probe", metavar="PROVIDER", help="Half-open PROVIDER's breaker: one probe on the next tick"),
+                    _arg("--reset", metavar="PROVIDER", help="Close PROVIDER's breaker: its cards spawn again")],
+         help="Dispatch health: provider breakers, held-back counts, idle runs"),
     _cmd("notify-subscribe", [
         _TASK_ID,
         *_NOTIFY_TARGET,

@@ -61,9 +61,17 @@ dashboard completion. It reads classic branch protection and active ruleset
 required contexts, paginates exact-head check runs and legacy statuses, then
 re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
 required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
-neutral **required** evidence cannot complete the card. Neither can zero-run
-acceptance, unreadable policy or GitHub API failures. A repository without required
-checks needs a local-only contract. `gh` must be authenticated with read access to
+neutral **required** evidence cannot complete the card. Neither can unreadable
+policy or GitHub API failures (5xx and network errors fail closed).
+
+When the base branch has no required checks (no rulesets, no classic protection),
+every check run and latest legacy status at the exact head must be `success`
+instead. Private repositories on GitHub's free plan answer the REST rules endpoint
+with 403/404; that counts as "no rulesets" only after GraphQL confirms the
+repository has none, otherwise the card stays refused. Zero checks at the head are
+accepted only when no enabled workflow can run there: none whose file is in the head
+commit, and no GitHub-managed `dynamic/` workflow such as CodeQL. Otherwise the card
+waits for CI. `gh` must be authenticated with read access to
 the repository's checks and rules; no remote writes are performed by this gate.
 Acceptance reads run as the **assignee profile's** `gh` login — its `GH_TOKEN` /
 `GH_CONFIG_DIR` from the profile's own `.env`, never the ambient login of the
@@ -516,7 +524,7 @@ The "(Orchestrators)" tools — `kanban_list`, `kanban_create`, `kanban_link`, `
 
 Three reasons:
 
-1. **Backend portability.** Workers whose terminal tool points at a remote backend (Docker / Modal / Singularity / SSH) would run `hermes kanban complete` *inside* the container, where `hermes` isn't installed and `~/.hermes/kanban.db` isn't mounted. The kanban tools run in the agent's own Python process and always reach `~/.hermes/kanban.db` regardless of terminal backend.
+1. **Backend portability.** Workers whose terminal tool points at a remote backend (Docker / Modal / SSH / a plugin sandbox) would run `hermes kanban complete` *inside* the container, where `hermes` isn't installed and `~/.hermes/kanban.db` isn't mounted. The kanban tools run in the agent's own Python process and always reach `~/.hermes/kanban.db` regardless of terminal backend.
 2. **No shell-quoting fragility.** Passing `--metadata '{"files": [...]}'` through shlex + argparse is a latent footgun. Structured tool args skip it entirely.
 3. **Better errors.** Tool results are structured JSON the model can reason about, not stderr strings it has to parse.
 
@@ -926,7 +934,7 @@ Tasks in `~/.hermes/kanban.db` are profile-agnostic on purpose (that's the coord
 
 ### Extending it
 
-The plugin uses the standard Hermes dashboard plugin contract — see [Extending the Dashboard](./extending-the-dashboard) for the full manifest reference, shell slots, page-scoped slots, and the Plugin SDK. Extra columns, custom card chrome, tenant-filtered layouts, or full `tab.override` replacements are all expressible without forking this plugin.
+The plugin uses the standard Hermes dashboard plugin contract — see [Extending the Dashboard](./extending-the-dashboard) for the full manifest reference, shell slots, page-scoped slots, and the Plugin SDK. Extra columns, tenant-filtered layouts, or full `tab.override` replacements are all expressible without forking this plugin. The dashboard has no per-card slot; on the desktop board, plugins add per-card labels through the `KANBAN_CARD_AREAS.badges` contribution area (see [Desktop Plugin SDK](../../developer-guide/desktop-plugin-sdk.md#kanban-card-badges)).
 
 To disable without removing: add `dashboard.plugins.kanban.enabled: false` to `config.yaml` (or delete `plugins/kanban/dashboard/manifest.json`).
 
@@ -988,6 +996,7 @@ hermes kanban dispatch [--dry-run] [--max N]           # one-shot pass
 hermes kanban daemon --force                           # DEPRECATED — standalone dispatcher (use `hermes gateway start` instead)
         [--failure-limit N] [--pidfile PATH] [-v]
 hermes kanban stats [--json]                           # per-status + per-assignee counts
+hermes kanban health [--json] [--probe P] [--reset P]  # provider breakers, held-back counts, idle runs
 hermes kanban log <id> [--tail BYTES]                  # worker log from ~/.hermes/kanban/logs/
 hermes kanban notify-subscribe <id>                    # gateway bridge hook (used by /kanban in the gateway)
         --platform <name> --chat-id <id> [--thread-id <id>] [--user-id <id>]
@@ -1039,6 +1048,25 @@ The dispatcher refuses to re-spawn a ready task when it hit a quota/auth/429 err
 To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`.
 
 `recent_success` and `active_pr` hold the **ready** lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, either move it to the review lane with `hermes kanban request-review <id>` (accepted from `ready` as well as `running`; the review-lane spawn is not subject to either guard) or hand the ready card to that profile with `hermes kanban assign <id> <profile>`: a handoff recorded *after* the PR comment — an operator reassign, a reviewer's changes-requested verdict, or a review reopen — lifts `active_pr` for the profile now named on the card, because that PR is exactly what it must work on. Only a change to a *different* profile counts: re-assigning the same profile, unassigning, or the dispatcher's own `kanban.default_assignee` fill-in does not lift the guard, so the assignee that opened the PR is still not re-spawned against it after a crash, reclaim or no-op reassign, and a newer PR comment posted after the handoff guards again. A deliberate re-queue after a success (drag `done→ready`, `unblock`, re-promotion) also lifts `recent_success`, so a manual re-run is never silently held for the whole window.
+
+### Provider breaker, idle reclaim and dispatch health
+
+**Provider breaker.** A quota wall (exit 75) or a lost login (exit 78) belongs to the provider, not to one card. The dispatcher keeps one breaker per resolved `model.provider` of the assignee profile (the profile name when it has none), stored in `kanban.db`, so every profile on one subscription shares it. `failures` such exits within `window_seconds` open it: nothing of that provider spawns (held back as `provider_paused`; other providers are unaffected). After `probe_seconds`, or at the provider's parsed reset time when later, but never more than `max_probe_wait_seconds` away, it goes half-open and lets exactly one ready card spawn as a probe. A probe that ends without a 75/78 (or survives `probe_seconds`) closes it; one that hits the wall again re-opens it under the same trip id. A credential change half-opens it at once: each profile's `auth.json`/`.env` and, for a Claude/Anthropic provider, Claude Code's shared login file are compared by `stat` only (a macOS Keychain swap is invisible to that; the probe cadence bounds it). While a breaker is not closed an exit 78 is requeued like a quota exit instead of parking the card, and an auth trip releases cards a lone 78 parked inside the window. A lone 78 with no breaker still parks.
+
+**Idle reclaim (opt-in).** With `kanban.idle_reclaim_minutes` set above 0, a running worker with no new session message (its own or a delegated child session's), no heartbeat and no tool call in flight for that long gets an `idle_flagged` event, and `idle_reclaim_grace_minutes` later is terminated and requeued with run outcome `reclaimed` (reason `idle`), never counted as a failure. The third idle reclaim in a row sends the card to `triage` with `block_loop_detected`.
+
+**Health.** Every dispatcher tick writes `<db stem>.health.json` beside the board database (`kanban.health.json` next to `kanban.db`) atomically (schema 1: `providers`, `dispatch.held_back`, `dispatch.bad_ticks`, `idle`, `failure_rate`); `hermes kanban health --json` prints the live document. `--probe <provider>` half-opens a breaker for one probe on the next tick; `--reset <provider>` closes it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `kanban.provider_breaker.failures` | 3 | exits 75/78 of one provider that open its breaker |
+| `kanban.provider_breaker.window_seconds` | 300 | window those exits are counted in |
+| `kanban.provider_breaker.probe_seconds` | 90 | half-open probe interval |
+| `kanban.provider_breaker.max_probe_wait_seconds` | 1800 | longest wait for a probe, even before a far reset |
+| `kanban.idle_reclaim_minutes` | 0 (off) | minutes without progress before a run is flagged |
+| `kanban.idle_reclaim_grace_minutes` | 5 | minutes after the flag before the reclaim |
+
+A kanban worker whose quota error carries a Retry-After or reset more than 60 s away ends its retries and exits 75 at once, freeing its slot; 60 s or less still retries in place.
 
 ### Drag-to-delete and bulk delete (dashboard)
 
@@ -1354,11 +1382,16 @@ ledger also pauses reclaim. Once that bound interpreter is itself dead, nothing 
 still be running the attempt, so the crash sweep reclaims it like any dead worker:
 the run closes as crashed and the card returns to `ready` (or `review`) under the
 normal crash budget, which can re-execute effects the lost attempt already had.
-Resolve an unknown admission explicitly using `prompt.resolve_unknown` with its
-admission ID and execution generation. This acknowledges uncertainty; it does
-**not** authorize another Kanban attempt. Inspect the effects, then explicitly
-complete or block the card; unblock a blocked card only when a new attempt is
-intended. Confirmed timeouts and provider rate-limit results retain their ordinary
+A run that never bound an interpreter is released the same way once its owner has
+settled the admission (a lost card attempt's admission settles `interrupted`):
+when every worker pid recorded for the run is dead, or, with none recorded, once
+its claim has expired, the run closes as crashed (reclaimed if its claim had already
+lapsed) and the card returns to `ready`
+under the same crash budget. Resolving an unknown admission explicitly
+(`prompt.resolve_unknown` with its admission ID and execution generation) settles
+it the same way, so it can lead to another attempt. To avoid that, inspect the
+effects and complete or block the card first; unblock a blocked card only when a
+new attempt is intended. Confirmed timeouts and provider rate-limit results retain their ordinary
 retry/failure-accounting behavior.
 
 A task is a logical unit of work; a **run** is one attempt to execute it. When the dispatcher claims a ready task it creates a row in `task_runs` and points `tasks.current_run_id` at it. When that attempt ends — completed, blocked, crashed, timed out, spawn-failed, reclaimed — the run row closes with an `outcome` and the task's pointer clears. A task that's been attempted three times has three `task_runs` rows.

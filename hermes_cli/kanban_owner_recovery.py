@@ -7,29 +7,57 @@ import time
 import psutil
 
 
-def owner_reclaim_paused(conn, task_id):
-    """Missing/ambiguous owner receipts never authorize another attempt."""
+def _owner_receipt(conn, task_id):
+    """The parsed ``owner_admitted`` receipt of the task's CURRENT run, or None.
+
+    The receipt is the owner's pointer to its own admission ledger. No receipt means the run
+    never reached an owner (a plain dispatcher worker): nothing about it is ambiguous.
+    """
     marker = conn.execute(
         "SELECT e.payload FROM task_events e JOIN tasks t ON t.current_run_id=e.run_id "
         "WHERE t.id=? AND e.task_id=t.id AND e.kind='owner_admitted' ORDER BY e.id DESC LIMIT 1",
         (task_id,)).fetchone()
     if marker is None:
+        return None
+    try:
+        receipt = json.loads(marker['payload'])
+    except (ValueError, TypeError):
+        return {}
+    return receipt if isinstance(receipt, dict) else {}
+
+
+def _admission_row(receipt):
+    """``(status, outcome)`` from the owner ledger ``receipt`` names, or None when unreadable.
+
+    None is "the owner said nothing we can read" — never "the owner said the attempt ended".
+    """
+    if not receipt:
+        return None
+    try:
+        with closing(sqlite3.connect(Path(receipt['db']).as_uri() + '?mode=ro', uri=True)) as owner:
+            row = owner.execute('SELECT status,outcome FROM session_admissions WHERE target_session_id=? AND request_id=?',
+                                (receipt['session_id'], receipt['request_id'])).fetchone()
+    except (OSError, KeyError, TypeError, ValueError, sqlite3.Error):
+        return None
+    return (row[0], row[1]) if row is not None else None
+
+
+def owner_reclaim_paused(conn, task_id):
+    """Missing/ambiguous owner receipts never authorize another attempt."""
+    receipt = _owner_receipt(conn, task_id)
+    if receipt is None:
         return False
     try:
-        binding = json.loads(marker['payload'])
-        with closing(sqlite3.connect(Path(binding['db']).as_uri() + '?mode=ro', uri=True)) as owner:
-            row = owner.execute('SELECT status,outcome FROM session_admissions WHERE target_session_id=? AND request_id=?',
-                                (binding['session_id'], binding['request_id'])).fetchone()
+        row = _admission_row(receipt)
         if row is not None and row[0] == 'terminal':
-            # Discard acknowledges uncertainty, not permission to repeat effects.
+            # Interrupted still pauses the generic reclaim paths; owner_attempt_provably_over decides
+            # when nothing can still be running it.
             return row[1] == 'interrupted'
         if row is None or row[0] in {'queued', 'unknown'}:
             return True
-        from hermes_cli.process_identity import process_birth
-        return process_birth(psutil.Process(binding['pid'])) != binding['birth']
-    except (OSError, ValueError, KeyError, sqlite3.Error):
-        return True
-    except psutil.Error:
+        from hermes_cli.process_identity import worker_birth
+        return worker_birth(psutil.Process(receipt['pid'])) != receipt['birth']
+    except (OSError, ValueError, KeyError, TypeError, psutil.Error):
         return True
 
 
@@ -81,8 +109,8 @@ def _owner_process_gone(receipt) -> bool:
     if not kb._pid_alive(pid):
         return True  # absent, or an exited zombie still waiting to be reaped
     try:
-        from hermes_cli.process_identity import process_birth
-        current = process_birth(psutil.Process(pid))
+        from hermes_cli.process_identity import worker_birth
+        current = worker_birth(psutil.Process(pid))
     except psutil.NoSuchProcess:
         return True
     except psutil.Error:
@@ -104,31 +132,47 @@ def owner_attempt_provably_over(conn, task_id) -> bool:
     """True when an unresolved owner receipt cannot still be executing this attempt.
 
     ``owner_reclaim_paused`` is about effects: an admission that may still be in flight is
-    never repeated. It must not also mean the run keeps its claim forever. The attempts it
-    pauses in practice are ones whose owner was killed (restart, OOM), and such a run may
-    never have written a ``worker_bound`` event at all, so ``bound_interpreter_gone`` cannot
-    speak for it — 76 ``owner_admitted`` against 74 ``worker_bound`` rows on one board means
-    runs in exactly that shape. This asks the question that matters — can anything still be
-    executing this attempt? — from evidence the board already keeps:
+    never repeated. It must not also mean the run keeps its claim forever. A paused run whose
+    owner died, or whose owner settled the admission after losing its worker, may never have
+    written a ``worker_bound`` event, so ``bound_interpreter_gone`` cannot speak for it. This
+    asks the question that matters — can anything still be executing this attempt? — from
+    evidence the board already keeps:
 
-      * the claim is host-local and EXPIRED (a live claim is the owner still working);
-      * no heartbeat inside ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS``;
-      * the receipt's own process is gone or recycled;
+      * the run never bound an interpreter (a bound run is the crash sweep's to book);
       * every worker pid recorded for the run (``tasks.worker_pid``, its ``spawned`` and
-        ``worker_bound`` events) is dead or recycled.
+        ``worker_bound`` events) is dead or recycled;
+      * and the owner's own admission is SETTLED (``status='terminal'``) with at least one
+        recorded pid, or the host-local claim has EXPIRED with no heartbeat inside
+        ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` and the admission is settled or (pids
+        recorded) the owner's process is gone.
 
-    Missing evidence is never proof: no recorded worker pid, a live pid whose identity
-    cannot be compared, or an unreadable clock all return False and the pause holds.
+    A settled admission outranks the owner's liveness: the owner is usually the long-lived
+    gateway, alive by design, and it settles a lost managed worker's admission without
+    extending the claim.
+
+    Missing evidence is never proof: no receipt, a live pid whose identity cannot be
+    compared, no recorded pid inside the claim's TTL, or an unreadable clock all return False
+    and the pause holds.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_dispatch import _worker_alive
     if _latest_run_event(conn, task_id, 'worker_bound'):
         return False  # a bound run is the crash sweep's to book (bound_interpreter_gone)
+    receipt = _owner_receipt(conn, task_id)
+    if receipt is None:
+        return False  # no receipt: this pause did not come from an owner attempt
     row = conn.execute(
         "SELECT claim_lock, claim_expires, worker_pid, worker_started_at, last_heartbeat_at "
         "FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None or not _host_local_lock(row['claim_lock']):
         return False
+    pids = _run_worker_pids(conn, row, task_id)
+    if any(_worker_alive(pid, fingerprint) for pid, fingerprint in pids):
+        return False
+    admission = _admission_row(receipt)
+    settled = admission is not None and admission[0] == 'terminal'
+    if settled and pids:
+        return True
     now = int(time.time())
     expires = kb._to_epoch(row['claim_expires'])
     if expires is None or expires >= now:
@@ -136,12 +180,174 @@ def owner_attempt_provably_over(conn, task_id) -> bool:
     heartbeat = kb._to_epoch(row['last_heartbeat_at'])
     if heartbeat is not None and now - heartbeat <= kb.DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS:
         return False
-    if not _owner_process_gone(_latest_run_event(conn, task_id, 'owner_admitted')):
+    # A lapsed claim: a settled admission is proof; an unsettled one needs recorded pids and a dead owner.
+    return settled or (bool(pids) and _owner_process_gone(receipt))
+
+
+def owner_attempt_note(conn, task_id, lost=None) -> str:
+    """One clause naming why the owner says the attempt ended, or ``""``.
+
+    The reclaim paths put this in the run error so the board says what happened instead of
+    a bare ``stale_lock=``: a managed worker that died (its owner recorded ``worker_lost``,
+    passed as ``lost`` when the caller already read it) is a different fault from a worker
+    that never started.
+    """
+    if lost is None:
+        lost = _latest_run_event(conn, task_id, 'worker_lost')
+    reason = str(lost.get('reason') or '')
+    if reason:
+        return f"managed worker lost: {reason[:80]}"
+    receipt = _owner_receipt(conn, task_id)
+    if receipt is None:
+        return ""
+    admission = _admission_row(receipt)
+    if admission is not None and admission[0] == 'terminal':
+        return f"owner admission settled {admission[1] or 'terminal'}"
+    return ""
+
+
+def reclaim_error(conn, task_id, claim_lock) -> str:
+    """A stale-lock reclaim's run error, naming how the attempt ended when the owner recorded it."""
+    note = owner_attempt_note(conn, task_id)
+    return f"stale_lock={claim_lock}" + (f" [{note}]" if note else "")
+
+
+def apply_attempt_note(conn, task_id, pid, dead) -> None:
+    """Fold the owner's own record of how the attempt ended into ONE dead worker's booking:
+    its note (``_fold_owner_note``), then whether the owner gateway itself stopped the attempt
+    (``_apply_gateway_stop``)."""
+    _fold_owner_note(conn, task_id, pid, dead)
+    _apply_gateway_stop(conn, task_id, pid, dead)
+
+
+def _fold_owner_note(conn, task_id, pid, dead) -> None:
+    """A bound interpreter whose ``worker_result`` says exit 0 after its managed execution was
+    lost reads as a protocol violation. The owner's ``worker_lost`` evidence outranks it: the
+    turn never finished, so it books as a crash and charges the breaker, and the
+    protocol-violation streak (which reads the persisted payload) does not count it.
+    """
+    lost = _latest_run_event(conn, task_id, "worker_lost")
+    note = owner_attempt_note(conn, task_id, lost)
+    if not note:
+        return
+    dead.event_payload["attempt_note"] = note
+    if lost:
+        dead.event_payload["worker_lost"] = lost
+        if dead.protocol_violation:
+            from hermes_cli.kanban_db_dispatch import _PROTOCOL_VIOLATION_ERROR
+            dead.protocol_violation = False
+            dead.event_payload.pop("protocol_violation", None)
+            dead.event_payload["exit_kind"] = dead.kind
+            dead.event_kind = "crashed"
+            # Keep the worker's last output that _classify_dead_worker appended.
+            dead.error_text = (f"pid {pid} exited cleanly after its managed worker was lost."
+                               + dead.error_text.removeprefix(_PROTOCOL_VIOLATION_ERROR))
+    # Before the worker's own output: the stored error is capped, and the output may be long.
+    from hermes_cli.kanban_db_dispatch import WORKER_OUTPUT_SEP
+    head, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
+    dead.error_text = f"{head} [{note}]{sep}{output}"
+
+
+OWNER_EXITED_CAUSE = "the owner gateway exited mid-attempt; its successor settled the admission interrupted"
+"""``gateway_stop_cause`` for an attempt whose admitting owner died before it could note its Stop."""
+
+
+def gateway_stop_cause(conn, task_id) -> str:
+    """The restart/shutdown cause the owner recorded when IT stopped this run's turn, else ``""``.
+
+    Either a ``worker_stopped`` event (the worker acknowledged the gateway's Stop and its turn
+    settled interrupted) or a ``worker_lost`` carrying ``stop_cause`` (the worker was terminated
+    after that Stop), recorded under the run's own (still current) claim. Failing both,
+    ``OWNER_EXITED_CAUSE`` when ``_owner_exited_mid_attempt`` holds.
+    """
+    row = conn.execute("SELECT claim_lock FROM tasks WHERE id=?", (task_id,)).fetchone()
+    claim_lock = row["claim_lock"] if row is not None else None
+    for kind, key in (("worker_stopped", "cause"), ("worker_lost", "stop_cause")):
+        event = _latest_run_event(conn, task_id, kind)
+        cause = event.get(key)
+        if cause and event.get("claim_lock") == claim_lock:
+            return str(cause)[:200]
+    return OWNER_EXITED_CAUSE if _owner_exited_mid_attempt(conn, task_id) else ""
+
+
+def _owner_exited_mid_attempt(conn, task_id) -> bool:
+    """True when the owner that admitted this attempt died and its admission settled ``interrupted``.
+
+    The ``worker_stopped`` note is written by the dying owner itself, so a gateway killed by its
+    supervisor partway through its own shutdown (the Nov 14 00:08 restart: SIGTERM, load 99, no
+    exit path ran) never writes it. What survives is the owner's ledger: the successor's boot
+    recovery settles every orphaned card admission ``terminal/interrupted``
+    (``session_unattended_unknown.settle_recovered_unattended``). That settlement plus the
+    admitting owner being gone (pid + birth, ``_owner_process_gone``) is the restart's structured
+    trace.
+
+    A ``worker_lost`` event without ``stop_cause`` disqualifies the run: a live owner's drain also
+    settles a lost worker's admission ``interrupted`` (``settle_unattended_unknown``), and that
+    loss is the attempt's own crash, whatever happened to the owner afterwards. A live owner, an
+    owner whose identity cannot be compared, or an unreadable ledger is no proof either.
+    """
+    if _latest_run_event(conn, task_id, "worker_lost"):
         return False
-    pids = _run_worker_pids(conn, row, task_id)
-    if not pids:
+    receipt = _owner_receipt(conn, task_id)
+    if not receipt or _admission_row(receipt) != ("terminal", "interrupted"):
         return False
-    return not any(_worker_alive(pid, fingerprint) for pid, fingerprint in pids)
+    return _owner_process_gone(receipt)
+
+
+OWNER_EXITED_MARK = "owner_exited"
+"""Run-metadata key set on every attempt whose admitting owner died mid-attempt (free or charged)."""
+
+
+def _previous_run_owner_exited(conn, task_id) -> bool:
+    """True when the card's last ENDED run before its current one also lost its owner mid-attempt.
+
+    This bounds ``OWNER_EXITED_CAUSE``: one restart costs a card nothing, but a card whose every
+    attempt takes the shared gateway down would otherwise be requeued free forever. Both a free
+    reclaim and a charged repeat carry ``OWNER_EXITED_MARK``, so from the second death in a row
+    each one is charged until an attempt ends some other way.
+    """
+    row = conn.execute(
+        "SELECT r.metadata FROM task_runs r JOIN tasks t ON t.id=r.task_id "
+        "WHERE t.id=? AND r.id < t.current_run_id AND r.ended_at IS NOT NULL "
+        "ORDER BY r.id DESC LIMIT 1", (task_id,)).fetchone()
+    try:
+        metadata = json.loads(row["metadata"]) if row and row["metadata"] else {}
+    except (ValueError, TypeError):
+        return False
+    return isinstance(metadata, dict) and metadata.get(OWNER_EXITED_MARK) is True
+
+
+def _apply_gateway_stop(conn, task_id, pid, dead) -> None:
+    """Rebook a dead worker the gateway itself stopped (its own restart or shutdown) as a reclaim.
+
+    The interruption is the host's, not the card's: it never charges the breaker, never joins
+    the same-error systemic trip, and the card goes back to its source phase for a fresh attempt
+    in the same workspace. A rate-limit requeue stays one, and a terminal provider error keeps
+    its immediate block: those say something about the profile the next attempt would repeat.
+    """
+    if dead.rate_limited or dead.terminal_provider:
+        return
+    cause = gateway_stop_cause(conn, task_id)
+    if not cause:
+        return
+    from hermes_cli.kanban_db_dispatch import WORKER_OUTPUT_SEP
+    if cause == OWNER_EXITED_CAUSE:
+        # The run metadata mark ``_previous_run_owner_exited`` reads on the card's next attempt.
+        dead.event_payload[OWNER_EXITED_MARK] = True
+        if _previous_run_owner_exited(conn, task_id):
+            # Unlike a noted Stop, an owner death may be this attempt's own doing (an OOM, a crash
+            # in its turn): a second one in a row is charged, but as an ordinary crash.
+            dead.owner_wide = True
+            head, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
+            dead.error_text = f"{head} [the owner gateway exited mid-attempt again: charged]{sep}{output}"
+            return
+    _, sep, output = dead.error_text.partition(WORKER_OUTPUT_SEP)
+    dead.gateway_stopped, dead.protocol_violation = True, False
+    dead.event_kind = "reclaimed"
+    dead.event_payload.pop("protocol_violation", None)
+    dead.event_payload.update(gateway_stop=cause, exit_kind=dead.kind)
+    dead.error_text = (f"pid {pid}: the gateway stopped this attempt ({cause}); "
+                       f"requeued without counting a failure{sep}{output}")
 
 
 def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False) -> bool:

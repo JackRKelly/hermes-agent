@@ -1129,6 +1129,43 @@ def test_touch_card_tap_opens_instead_of_dragging():
     assert "PASS" in result.stdout
 
 
+def test_task_url_param_selects_card():
+    """``?task=t_xxx`` in the dashboard URL must open that card's drawer on load (the
+    selectedTaskId initializer reads it) and opening/closing a card keeps the param in sync
+    without dropping other params like ``?profile=``. Runs the real bundle functions."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    bundle = Path(__file__).resolve().parents[2] / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    probe = Path(__file__).parent / "fixtures" / "kanban_task_deeplink_probe.js"
+    result = subprocess.run(
+        [node, str(probe), str(bundle)],
+        capture_output=True, text=True, timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "PASS" in result.stdout
+
+
+def test_board_url_param_and_card_not_found_message():
+    """A card link may carry ``?board=<slug>``: it must pick the board on load ahead of the
+    localStorage pin (``?profile=`` is never the board), and a card the API 404s must render
+    "Card <id> not found on board <slug>" with a switch-board hint, not a raw fetch error.
+    Runs the real bundle functions."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    bundle = Path(__file__).resolve().parents[2] / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    probe = Path(__file__).parent / "fixtures" / "kanban_board_deeplink_probe.js"
+    result = subprocess.run(
+        [node, str(probe), str(bundle)],
+        capture_output=True, text=True, timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "PASS" in result.stdout
+
+
 # Run clock: current run start, not first-ever start
 # ---------------------------------------------------------------------------
 

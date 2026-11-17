@@ -1,0 +1,272 @@
+"""A block-loop escalation stays parked until a human acts.
+
+``_route_block`` sends a same-cause re-block to ``triage`` "for a human". The
+triage sweeps (the dispatcher's auto-decompose tick, ``specify --all``) used
+to list every triage task, so they promoted it ``triage -> todo -> ready``
+within one tick; the respawned worker re-blocked for the same cause and the
+task landed straight back in triage, hundreds of times. Approval-gate parks
+(``needs_input`` with an ``[awaiting-approval:...]`` reason) re-block by
+design and must stay in ``blocked``, where the approval sweep looks.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_decompose as decomp
+from hermes_cli import kanban_jack_park as kb_jp
+from hermes_cli import kanban_specify as spec
+
+
+@pytest.fixture
+def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
+
+
+def _claim(conn, tid):
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+    assert kb.claim_task(conn, tid, claimer="worker") is not None
+
+
+def _block_unblock_reblock(conn, reason, kind: str | None = "needs_input"):
+    tid = kb.create_task(conn, title="t", assignee="worker")
+    _claim(conn, tid)
+    assert kb.block_task(conn, tid, reason=reason, kind=kind)
+    assert kb.unblock_task(conn, tid)
+    _claim(conn, tid)
+    assert kb.block_task(conn, tid, reason=reason, kind=kind)
+    return tid
+
+
+def test_triage_sweeps_skip_block_loop_escalations(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        looped = _block_unblock_reblock(conn, "CI keeps failing", kind="capability")
+        assert kb.get_task(conn, looped).status == "triage"
+        fresh = kb.create_task(conn, title="rough idea", assignee="worker", triage=True)
+
+    assert decomp.list_triage_ids() == [fresh]
+    assert spec.list_triage_ids() == [fresh]
+
+
+def test_triage_sweeps_skip_untyped_block_loop_escalations(kanban_home: Path) -> None:
+    # kanban_block without a kind, the goal-loop block and the dashboard
+    # "blocked" status all block with kind=None; those loops reach triage too.
+    with kbc.connect_closing() as conn:
+        looped = _block_unblock_reblock(conn, "still stuck", kind=None)
+        assert kb.get_task(conn, looped).status == "triage"
+
+    assert decomp.list_triage_ids() == []
+    assert spec.list_triage_ids() == []
+
+
+def _dashboard_client():
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    plugin_file = Path(__file__).resolve().parents[2] / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
+    mod_spec = importlib.util.spec_from_file_location("hermes_kanban_plugin_block_loop_test", plugin_file)
+    assert mod_spec is not None and mod_spec.loader is not None
+    mod = importlib.util.module_from_spec(mod_spec)
+    sys.modules[mod_spec.name] = mod
+    mod_spec.loader.exec_module(mod)
+    app = fastapi.FastAPI()
+    app.include_router(mod.router, prefix="/api/plugins/kanban")
+    return TestClient(app)
+
+
+def test_human_move_back_to_triage_is_sweepable_again(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_unblock_reblock(conn, "CI keeps failing", kind="capability")
+        # A human specifies it by id (triage -> todo -> ready) ...
+        assert kb.specify_triage_task(conn, tid)
+    # ... and later drags it back to triage on the dashboard for a new reason.
+    client = _dashboard_client()
+    r = client.patch(f"/api/plugins/kanban/tasks/{tid}", json={"status": "triage"})
+    assert r.status_code == 200, r.text
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
+
+    assert decomp.list_triage_ids() == [tid]
+    assert spec.list_triage_ids() == [tid]
+
+
+@pytest.mark.parametrize("reason", [
+    "[awaiting-approval:merge] PR head=abc then=complete",
+    "  \n[awaiting-approval:merge] PR head=abc then=complete",
+])
+@pytest.mark.parametrize("kind", ["needs_input", None])
+def test_approval_gate_reblock_stays_blocked(kanban_home: Path, reason: str, kind) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_unblock_reblock(conn, reason, kind=kind)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_recurrences == 2
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert "block_loop_detected" not in kinds
+
+
+def _reblock_n(conn, reason, times: int, kind: str = "needs_input"):
+    tid = kb.create_task(conn, title="t", assignee="worker")
+    for i in range(times):
+        if i:
+            assert kb.unblock_task(conn, tid)
+        _claim(conn, tid)
+        assert kb.block_task(conn, tid, reason=reason, kind=kind)
+    return tid
+
+
+# Jack parks re-park on purpose after an answer, rejection or update (Nov 12: ~25 of them went to
+# triage overnight and the Action Items app, which lists only ``blocked`` cards, showed none).
+@pytest.mark.parametrize("reason", [
+    "[needs-jack:decision] Which fix should the crew build? then=ready item=8f37a1c2d4e5b6a7",
+    "[needs-jack:user-task] Sign in to the Railway dashboard and rotate the key then=ready",
+    "[decision] Consult Jack: ship plan A or plan B?",
+    "[needs-jack:other] Read the vendor reply then=ready item=2877c0d1e2f3a4b5",
+    "worker re-parked the typed action item then=ready item=2877c0d1e2f3a4b5",
+    "merge PR #5 when green [awaiting-approval:merge] sha=abc then=complete",
+])
+@pytest.mark.parametrize("times", [2, 3])
+def test_jack_park_reblock_stays_blocked(kanban_home: Path, reason: str, times: int) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, times)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_recurrences == times
+        last = [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+        assert last.kind == "blocked"
+        assert last.payload["recurrences"] == times
+
+
+# A clean continue handoff (Nov 14: a prod rollout card hit its step budget at a safe point,
+# re-parked for Captain to re-run, and was bounced to triage, where promote/block/unblock all refuse
+# it) re-parks by design: it stays blocked, with the recurrences still counted, until it is the
+# continue limit'th handoff in a row. Captain's runbook puts continue, continuation and turn-budget
+# in one class.
+_CONTINUE_LIMIT = kb_jp.CONTINUE_RECURRENCE_LIMIT
+_CONTINUE_REASONS = [
+    ("[captain:continue] Phase 1 done, nothing half-changed; re-run to continue from the handoff.", "needs_input"),
+    ("[Captain:Continue] Re-run; Jack's answer [needs-jack:decision] item=2877c0d1e2f3a4b5 covers it.", "needs_input"),
+    ("[captain:continuation] Doc shared; re-run the card to finish the 5 small edits.", "needs_input"),
+    ("[captain:turn-budget] Out of turns again; build pushed, the next run picks up the tests.", "transient"),
+]
+
+
+@pytest.mark.parametrize("reason,kind", _CONTINUE_REASONS)
+@pytest.mark.parametrize("times", [2, _CONTINUE_LIMIT - 1])
+def test_captain_continue_reblock_stays_blocked(kanban_home: Path, reason: str, kind: str, times: int) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, times, kind=kind)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_recurrences == times
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert "block_loop_detected" not in kinds
+
+
+# Captain unblocks a continue handoff with no human step, so one that keeps recurring is a loop.
+@pytest.mark.parametrize("reason,kind", _CONTINUE_REASONS)
+def test_captain_continue_loop_goes_to_triage_at_the_continue_limit(kanban_home: Path, reason: str, kind: str) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, _CONTINUE_LIMIT, kind=kind)
+        assert kb.get_task(conn, tid).status == "triage"
+        last = [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+        assert last.kind == "block_loop_detected"
+        assert (last.payload["continues"], last.payload["limit"]) == (_CONTINUE_LIMIT, _CONTINUE_LIMIT)
+
+
+def test_captain_continue_after_a_jack_park_stays_blocked(kanban_home: Path) -> None:
+    # The field sequence: a needs_input Jack park, Jack answers, then the worker hands off.
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, "[needs-jack:decision] Go ahead? then=ready item=2877c0d1e2f3a4b5", 1)
+        assert kb.unblock_task(conn, tid)
+        _claim(conn, tid)
+        assert kb.block_task(conn, tid, reason="[captain:continue] Re-run to continue", kind="needs_input")
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_recurrences) == ("blocked", 2)
+
+
+def _next_block(conn, tid, reason, kind="needs_input"):
+    assert kb.unblock_task(conn, tid)
+    _claim(conn, tid)
+    assert kb.block_task(conn, tid, reason=reason, kind=kind)
+    return [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+
+
+def test_captain_continue_after_many_jack_parks_stays_blocked(kanban_home: Path) -> None:
+    # The rollout card's path: Jack parks at every phase raise the shared per-kind counter past the
+    # continue limit, and the next continue handoff must still stay blocked (Nov 14, t_bbaa3111).
+    park = "[needs-jack:decision] Phase gate: go ahead? then=ready item=2877c0d1e2f3a4b5"
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, park, _CONTINUE_LIMIT + 1)
+        last = _next_block(conn, tid, "[captain:continue] Phase done; re-run to continue")
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_recurrences) == ("blocked", _CONTINUE_LIMIT + 2)
+        assert (last.kind, last.payload["continues"]) == ("blocked", 1)
+
+
+def test_a_jack_park_ends_a_run_of_continue_handoffs(kanban_home: Path) -> None:
+    cont = "[captain:continue] Re-run to continue"
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, cont, _CONTINUE_LIMIT - 1)
+        _next_block(conn, tid, "[needs-jack:decision] Which way? then=ready item=2877c0d1e2f3a4b5")
+        last = _next_block(conn, tid, cont)
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert last.payload["continues"] == 1
+
+
+@pytest.mark.parametrize("bad_payload", ["{not json", "[1]", "null", ""])
+def test_an_unreadable_block_payload_ends_a_run_of_continue_handoffs(kanban_home: Path, bad_payload: str) -> None:
+    cont = "[captain:continue] Re-run to continue"
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, cont, _CONTINUE_LIMIT - 1)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET payload = ? WHERE id = "
+                "(SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'blocked')",
+                (bad_payload, tid),
+            )
+        last = _next_block(conn, tid, cont)
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert (last.kind, last.payload["continues"]) == ("blocked", 1)
+
+
+def test_continue_handoffs_count_across_block_kinds(kanban_home: Path) -> None:
+    # A turn-budget stop files ``transient``, a phase handoff ``needs_input``: one run of handoffs.
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, "[captain:turn-budget] Out of turns; re-run", _CONTINUE_LIMIT - 1, kind="transient")
+        last = _next_block(conn, tid, "[captain:continue] Re-run to continue", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+        assert (last.kind, last.payload["continues"], last.payload["limit"]) == (
+            "block_loop_detected", _CONTINUE_LIMIT, _CONTINUE_LIMIT)
+
+
+@pytest.mark.parametrize("reason,kind", [
+    ("[captain:routing] no reviewer profile for this repo", "needs_input"),
+    ("[captain:continue-later] not the continue marker", "needs_input"),
+    ("[needs-attention] CI red [captain:continue] after the fix", "needs_input"),
+    ("[captain:routing] stuck; the last handoff was [captain:continue]", "needs_input"),
+    ("worker needs input: which branch?", "needs_input"),
+    ("[captain:routing] re-parked; Jack already answered the [needs-jack:decision] item", "needs_input"),
+    ("[captain:routing] quoting the old park then=ready item=2877c0d1e2f3a4b5", "needs_input"),
+    ("[hold:jack] waiting on the vendor, see [decision] note", "needs_input"),
+    ("[needs-attention] CI red; old ask was item=2877c0d1e2f3a4b5", "needs_input"),
+    ("CI keeps failing", "capability"),
+])
+def test_non_jack_block_loop_still_goes_to_triage(kanban_home: Path, reason: str, kind: str) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _reblock_n(conn, reason, 2, kind=kind)
+        assert kb.get_task(conn, tid).status == "triage"
+        last = [e for e in kb.list_events(conn, tid) if e.kind in ("blocked", "block_loop_detected")][-1]
+        assert last.kind == "block_loop_detected"

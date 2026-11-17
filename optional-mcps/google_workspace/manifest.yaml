@@ -1,0 +1,114 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: google_workspace
+description: Read Gmail and save draft replies, and read Google Drive (drafts only, never sends).
+source: https://github.com/taylorwilsdon/google_workspace_mcp
+
+# Gmail + Drive only. Calendar is deliberately absent: Google's official
+# Calendar MCP owns it, and loading it here would add a second calendar
+# surface with its own scopes.
+#
+# `uv` is Hermes's PM-managed uv (tools/mcp_tool_config.py resolves a bare
+# `uv` command to it), so this works without uv on the user's PATH. On first
+# start `uv run --frozen` builds an isolated env at ${INSTALL_DIR}/.venv from
+# upstream's hash-pinned uv.lock (Python 3.13 from the repo's
+# .python-version); --frozen never re-resolves or rewrites the lock.
+#
+# --permissions gmail:readonly+drafts drive:readonly is the server's granular
+# permission mode (auth/permissions.py at the pinned commit). The `+` union
+# grants only the scopes each named level adds, skipping the levels in
+# between (gmail "organize" = labels/modify, gmail "send" = gmail.send), so
+# the OAuth request is exactly: gmail.readonly, gmail.compose, drive.readonly,
+# plus openid/userinfo.email/userinfo.profile for identity. Every tool whose
+# required scopes are not all in that set is removed before the server
+# answers tools/list (core/tool_registry.py filter_server_tools), which drops
+# send_gmail_message (needs gmail.send) and every label/filter/Drive write
+# tool. --single-user makes the stdio server use the one stored credential
+# instead of per-session mapping.
+transport:
+  type: stdio
+  command: uv
+  args:
+    - run
+    - --frozen
+    - --no-dev
+    - --directory
+    - "${INSTALL_DIR}"
+    - workspace-mcp
+    - --transport
+    - stdio
+    - --single-user
+    - --permissions
+    - gmail:readonly+drafts
+    - drive:readonly
+  env:
+    GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID}"
+    GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET}"
+    # Binds the server to one Google account: tools default
+    # user_google_email to it, and single-user mode loads only that account's
+    # token (no fallback to another stored account).
+    USER_GOOGLE_EMAIL: "${USER_GOOGLE_EMAIL}"
+    # One token for every profile: a fixed path outside each profile's own
+    # files, so a single consent serves all of them. Never a profile's
+    # google_token.json. The server expands the leading ~ itself.
+    WORKSPACE_MCP_CREDENTIALS_DIR: "~/.hermes/mcp-shared/google-workspace"
+
+install:
+  type: git
+  url: https://github.com/taylorwilsdon/google_workspace_mcp
+  # Tag v2.4.1 ("chore: release v2.4.1", 2026-11-10), pinned by its commit
+  # SHA: tags can be moved upstream, SHAs cannot. Bumping the pin is a PR to
+  # this manifest that re-checks the tool list under the permissions above.
+  ref: d94a6a7e693ce97c633f744b55249616b3806e9c
+
+# The server runs its own Google OAuth with a client you create; Hermes only
+# stores the client credentials (secrets in .env, the email inline in
+# config.yaml). The Google token itself lives in the shared credentials dir.
+auth:
+  type: api_key
+  env:
+    - name: GOOGLE_OAUTH_CLIENT_ID
+      prompt: "Google OAuth client ID (Desktop app client, ends in .apps.googleusercontent.com)"
+      required: true
+      secret: true
+    - name: GOOGLE_OAUTH_CLIENT_SECRET
+      prompt: "Google OAuth client secret"
+      required: true
+      secret: true
+    - name: USER_GOOGLE_EMAIL
+      prompt: "Google account this server acts as (the one you will consent with)"
+      required: true
+      secret: false
+
+# Defence in depth on top of the server-side permission filter: if the
+# --permissions args are ever widened, a send-capable tool still stays off.
+# send_gmail_message sends new mail, replies and forwards (it is the only
+# caller of Gmail messages.send); send_* catches any send tool added later.
+tools:
+  default_excluded:
+    - send_gmail_message
+    - send_*
+
+post_install: |
+  Gmail access is read plus drafts only: no tool can send, and Drive is read-only.
+
+  Before first use (once per machine, not per profile):
+    1. In Google Cloud Console, enable the Gmail API and Google Drive API and
+       create an OAuth client of type "Desktop app". Use its client ID and
+       secret at the prompts above.
+    2. Create the shared token folder, private to you:
+         mkdir -p -m 700 ~/.hermes/mcp-shared/google-workspace
+    3. Start a new Hermes session and ask it to run start_google_auth from
+       google_workspace (service gmail). Open the link it returns and sign in
+       as the account you entered for USER_GOOGLE_EMAIL. Approve read Gmail,
+       manage drafts, read Drive.
+
+  The token is saved as <email>.json (mode 0600) in
+  ~/.hermes/mcp-shared/google-workspace. Every profile that installs this
+  entry reads that same file, so the one consent covers all of them; other
+  profiles only need the client ID, secret and email at install.
+
+  The first start builds the server's Python env (about 20 seconds).
+  Review the tool list any time with: hermes mcp configure google_workspace

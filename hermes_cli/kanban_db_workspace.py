@@ -825,6 +825,22 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     return p
 
 
+def normalize_branch_name(value: Optional[str], label: str = "branch") -> Optional[str]:
+    """Validate a caller-supplied worktree branch; ``None`` passes through.
+    Shared by ``kanban create --branch`` and the ``kanban_create`` tool so both
+    accept exactly the same names. ``label`` names the argument in the error."""
+    if value is None:
+        return None
+    branch = str(value).strip()
+    if not branch:
+        raise ValueError(f"{label} requires a non-empty name")
+    if branch.startswith("-"):
+        raise ValueError(f"{label} must not start with '-'")
+    if any(ch.isspace() for ch in branch):
+        raise ValueError(f"{label} must not contain whitespace")
+    return branch
+
+
 def _set_task_column(conn: sqlite3.Connection, task_id: str, column: str, value: str) -> None:
     with _kb.write_txn(conn):
         conn.execute(f"UPDATE tasks SET {column} = ? WHERE id = ?", (value, task_id))

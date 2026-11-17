@@ -234,8 +234,31 @@ def specify_task(
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
+# Every event that can put a task INTO triage: the block-loop breaker, a
+# dashboard/status move, and an import that parks a worktree/dir card.
+_LATEST_TRIAGE_ENTRY_SQL = (
+    "SELECT kind FROM task_events WHERE task_id = ? AND (kind IN ('block_loop_detected', 'status') "
+    "OR (kind = 'imported' AND json_extract(payload, '$.parked'))) ORDER BY id DESC LIMIT 1"
+)
+
+
+def is_block_loop_escalation(conn, task_id: str) -> bool:
+    """True when a triage task got there through ``_route_block``'s block-loop breaker.
+
+    Sweeps must not auto-promote it: ``triage -> todo -> ready`` respawns a
+    worker that re-blocks for the same cause and lands straight back in triage,
+    looping forever. Keyed on how the task last ENTERED triage, not on
+    ``block_kind`` (an un-typed block loops too) or ``block_recurrences``
+    (only ``complete_task`` clears it, so a human moving the card back to
+    triage later must make it sweepable again). Specifying it by id stays the
+    explicit human override.
+    """
+    row = conn.execute(_LATEST_TRIAGE_ENTRY_SQL, (task_id,)).fetchone()
+    return row is not None and row["kind"] == "block_loop_detected"
+
+
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column; ``tenant`` narrows the sweep."""
+    """Sweepable triage task ids (block-loop escalations excluded); ``tenant`` narrows the sweep."""
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+        return [t.id for t in tasks if not is_block_loop_escalation(conn, t.id)]

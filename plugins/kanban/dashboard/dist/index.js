@@ -313,6 +313,99 @@
     return `${url}${sep}board=${encodeURIComponent(board)}`;
   }
 
+  // Deep link: ``?task=t_xxx`` in the dashboard URL opens that card's
+  // drawer on load (same path as clicking the card), and the param is
+  // kept in sync while the drawer is open so the URL stays shareable.
+  // Other query params (e.g. ``?profile=``) are preserved.
+  const URL_TASK_PARAM = "task";
+
+  function readTaskParam() {
+    const v = new URLSearchParams(window.location.search).get(URL_TASK_PARAM);
+    return (v || "").trim() || null;
+  }
+
+  function writeTaskParam(taskId) {
+    const u = new URL(window.location.href);
+    if ((u.searchParams.get(URL_TASK_PARAM) || null) === (taskId || null)) return;
+    if (taskId) u.searchParams.set(URL_TASK_PARAM, taskId);
+    else u.searchParams.delete(URL_TASK_PARAM);
+    // replaceState, not pushState: opening/closing a card shouldn't add
+    // Back-button history entries.
+    window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
+  }
+
+  // ``?board=<slug>`` picks the board on load, ahead of the localStorage pin,
+  // so a shared card link can name the board it lives on. It is not
+  // persisted: a later visit without the param keeps the user's own pin.
+  // (``?profile=`` is the dashboard's management-profile scope, never the board.)
+  const URL_BOARD_PARAM = "board";
+
+  function readBoardParam() {
+    const v = new URLSearchParams(window.location.search).get(URL_BOARD_PARAM);
+    return (v || "").trim() || null;
+  }
+
+  function initialBoard() {
+    return readBoardParam() || readSelectedBoard() || null;
+  }
+
+  // Keep an explicit ``?board=`` truthful after the switcher (or the
+  // deleted-board fallback) changes boards, so a reload doesn't snap back.
+  // Never adds the param when the URL didn't carry one.
+  function syncBoardParam(board) {
+    const u = new URL(window.location.href);
+    const cur = u.searchParams.get(URL_BOARD_PARAM);
+    if (cur === null || !board || cur === board) return;
+    u.searchParams.set(URL_BOARD_PARAM, board);
+    window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
+  }
+
+  // Drawer load failure text. A 404 for the task itself (e.g. a deep link to
+  // a card on another board, or a deleted card) gets an actionable sentence
+  // instead of the raw API detail; every other error is shown as before.
+  function taskLoadErrorMessage(e, taskId, board) {
+    const raw = String((e && e.message) || e);
+    const is404 = (e && e.status === 404) || /^404:/.test(raw);
+    if (!is404 || /^board\b/i.test(parseApiErrorMessage(e))) return raw;
+    return `Card ${taskId} not found on board ${board || "default"}. ` +
+      "Switch to the board that holds it, or add ?board=<slug> to the link.";
+  }
+
+  // A worker heartbeat changes nothing a board card shows, so a batch made
+  // only of heartbeats does not refetch the board.
+  function eventsNeedBoardReload(events) {
+    return events.some(function (e) { return !e || e.kind !== "heartbeat"; });
+  }
+
+  // Live-event reloads: the first one after a quiet spell fires after
+  // ``quietMs``; while events keep arriving, at most one load per
+  // ``intervalMs`` (trailing, so the last change is never dropped).
+  // ``schedule(load)`` remembers the newest load function.
+  function createReloadThrottle(timers, quietMs, intervalMs) {
+    let timer = null;
+    let lastRunAt = -Infinity;
+    let pending = null;
+    return {
+      schedule: function (load) {
+        pending = load;
+        if (timer) return;
+        const delay = Math.max(quietMs, lastRunAt + intervalMs - timers.now());
+        timer = timers.setTimeout(function () {
+          timer = null;
+          lastRunAt = timers.now();
+          const fn = pending;
+          pending = null;
+          fn();
+        }, delay);
+      },
+      cancel: function () {
+        if (timer) timers.clearTimeout(timer);
+        timer = null;
+        pending = null;
+      },
+    };
+  }
+
   // The SDK's Select component fires ``onValueChange(value)`` directly
   // (it's a shadcn-style popup, not a native <select>). Older plugin
   // code calls ``onChange({target: {value}})`` which silently never
@@ -625,7 +718,8 @@
   function KanbanPage() {
     const { t } = useI18n();
     const kanbanDialogs = useKanbanDialogs(t);
-    const [board, setBoard] = useState(() => readSelectedBoard() || null);
+    const [board, setBoard] = useState(initialBoard);
+    useEffect(function () { syncBoardParam(board); }, [board]);
     const [boardList, setBoardList] = useState([]);      // [{slug, name, counts, ...}]
     const [showNewBoard, setShowNewBoard] = useState(false);
     const [showBoardSettings, setShowBoardSettings] = useState(false);
@@ -650,7 +744,8 @@
     const [laneByProfile, setLaneByProfile] = useState(true);
     const [configApplied, setConfigApplied] = useState(false);
 
-    const [selectedTaskId, setSelectedTaskId] = useState(null);
+    const [selectedTaskId, setSelectedTaskId] = useState(() => readTaskParam());
+    useEffect(function () { writeTaskParam(selectedTaskId); }, [selectedTaskId]);
     const [selectedIds, setSelectedIds] = useState(() => new Set());
     const [lastSelectedId, setLastSelectedId] = useState(null);
     const [failedIds, setFailedIds] = useState(() => new Set());
@@ -664,7 +759,14 @@
     const [taskEventTick, setTaskEventTick] = useState({});
 
     const cursorRef = useRef(0);
-    const reloadTimerRef = useRef(null);
+    const reloadThrottleRef = useRef(null);
+    if (!reloadThrottleRef.current) {
+      reloadThrottleRef.current = createReloadThrottle({
+        setTimeout: function (fn, ms) { return setTimeout(fn, ms); },
+        clearTimeout: function (id) { clearTimeout(id); },
+        now: function () { return Date.now(); },
+      }, 250, 3000);
+    }
     const wsRef = useRef(null);
     const wsBackoffRef = useRef(1000);
     const wsClosedRef = useRef(false);
@@ -726,22 +828,14 @@
 
     useEffect(function () { loadBoardList(); }, [loadBoardList]);
 
+    // Live events reload through a throttle; user actions call loadBoard() directly.
     const scheduleReload = useCallback(function () {
-      if (reloadTimerRef.current) return;
-      reloadTimerRef.current = setTimeout(function () {
-        reloadTimerRef.current = null;
-        loadBoard();
-      }, 250);
+      reloadThrottleRef.current.schedule(loadBoard);
     }, [loadBoard]);
 
     useEffect(function () {
       loadBoard();
-      return function () {
-        if (reloadTimerRef.current) {
-          clearTimeout(reloadTimerRef.current);
-          reloadTimerRef.current = null;
-        }
-      };
+      return function () { reloadThrottleRef.current.cancel(); };
     }, [loadBoard]);
 
     // --- WebSocket ---------------------------------------------------------
@@ -783,7 +877,7 @@
                   }
                   return next;
                 });
-                scheduleReload();
+                if (eventsNeedBoardReload(msg.events)) scheduleReload();
               }
             } catch (_e) { /* ignore */ }
           };
@@ -3228,6 +3322,12 @@
               ? h(Badge, { className: "hermes-kanban-priority",
                            title: `Priority ${t.priority}. Higher-priority tasks are claimed first by the dispatcher.` }, `P${t.priority}`)
               : null,
+            // Only cards with a real deadline get a badge; undated cards are the norm.
+            t.due_at != null
+              ? h(Badge, { variant: "outline",
+                           className: cn("hermes-kanban-due", t.due_at * 1000 < Date.now() ? "hermes-kanban-due--overdue" : ""),
+                           title: `Due ${formatDueAt(t.due_at)}` }, formatDue(t.due_at))
+              : null,
             t.tenant
               ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",
                            title: `Tenant: ${t.tenant}. Free-form tag for grouping tasks (customer, project, team).` }, t.tenant)
@@ -3544,7 +3644,7 @@
     const load = useCallback(function () {
       return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug))
         .then(function (d) { setData(d); setErr(null); setPatchErr(null); })
-        .catch(function (e) { setErr(String(e.message || e)); })
+        .catch(function (e) { setErr(taskLoadErrorMessage(e, props.taskId, boardSlug)); })
         .finally(function () { setLoading(false); });
     }, [props.taskId, boardSlug]);
 
@@ -4024,6 +4124,10 @@
         h(PriorityEditor, { task: t, onPatch: props.onPatch }),
         h(ModelEditor, { task: t, onPatch: props.onPatch }),
         t.tenant ? h(MetaRow, { label: tx(i18n, "tenant", "Tenant"), value: t.tenant }) : null,
+        t.due_at != null ? h(MetaRow, {
+          label: tx(i18n, "due", "Due"),
+          value: `${formatDueAt(t.due_at)} (${formatDue(t.due_at)})`,
+        }) : null,
         h(MetaRow, {
           label: tx(i18n, "workspace", "Workspace"),
           value: `${t.workspace_kind}${t.workspace_path ? ": " + t.workspace_path : ""}`,
@@ -4325,6 +4429,23 @@
             tx(t, "logAt", ")"))
         : null,
     );
+  }
+
+  // Same labels as the CLI (hermes_cli/kanban_db_due.py::format_due): "due in 13d" / "overdue 2h".
+  function formatDue(dueAt) {
+    const delta = Math.trunc(dueAt - Date.now() / 1000);
+    const abs = Math.abs(delta);
+    const span = abs >= 86400 ? `${Math.floor(abs / 86400)}d`
+      : abs >= 3600 ? `${Math.floor(abs / 3600)}h`
+      : abs >= 60 ? `${Math.floor(abs / 60)}m` : "<1m";
+    return delta >= 0 ? `due in ${span}` : `overdue ${span}`;
+  }
+
+  // Deadlines are written in the board owner's zone; the CLI falls back to the same zone
+  // (kanban_db_due.py::OWNER_TZ_FALLBACK), so a viewer elsewhere sees the same labelled wall time.
+  const DUE_TIME_ZONE = "America/Chicago";
+  function formatDueAt(dueAt) {
+    return new Date(dueAt * 1000).toLocaleString(undefined, { timeZone: DUE_TIME_ZONE, timeZoneName: "short" });
   }
 
   function MetaRow(props) {

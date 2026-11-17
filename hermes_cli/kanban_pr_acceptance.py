@@ -45,7 +45,7 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         # code + endpoint, never gh's stderr (credentials/host details).
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
         if denied:
-            raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
+            raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}", status=int(denied[1])) from None
         if exc.returncode == 4:  # gh's authentication-required exit: this profile has no login
             raise _GateAuthError(f"gh has no login for {endpoint.split('?')[0]}") from None
         raise
@@ -59,6 +59,10 @@ class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
     this profile's login cannot see the repo — an identity problem to fix, not
     an infrastructure blip to retry."""
+
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _gh_env(profile_home: str | None) -> dict[str, str] | None:
@@ -133,17 +137,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
-        for page in rules:
-            for rule in page:
-                if rule["type"] == "required_status_checks":
-                    required.update((r["context"], r.get("integration_id"))
-                                    for r in rule["parameters"]["required_status_checks"])
+        required |= _ruleset_required_checks(repo, branch, profile_home)
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
-        if not required:
-            receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
-            return receipt
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
                      paginate=True, profile_home=profile_home)
         runs = [run for page in pages for run in page["check_runs"]]
@@ -151,25 +146,20 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("Incomplete check-run pagination")
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
-        outcomes = []
-        for context, app_id in sorted(required, key=str):
-            matching = [r for r in runs if r["name"] == context and
-                        (app_id in (None, -1) or r["app"]["id"] == app_id)]
-            # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
-            legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
-            selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
-            if not selected:
-                outcomes.append("missing")
-                receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
-            for check in selected:
-                is_run = "conclusion" in check
-                outcome = check.get("conclusion") if is_run else check["state"]
-                classification = _classify(check, sha, outcome, is_run)
-                outcomes.append(classification)
-                receipt["checks"].append({"name": context, "id": check["id"],
-                    "url": check.get("html_url") or check.get("target_url"),
-                    "head_sha": check.get("head_sha", check.get("sha")),
-                    "classification": classification, "conclusion": outcome})
+        if required:
+            outcomes = _required_outcomes(required, runs, statuses, sha, receipt)
+        else:
+            # Nothing is configured as required (no rulesets, no classic protection, or a
+            # private free-plan repo where neither exists): every check GitHub reports at
+            # the exact head must pass instead.
+            receipt["policy"] = "all-head-checks"
+            outcomes = _all_head_outcomes(runs, statuses, sha, receipt)
+            if not outcomes and not _has_active_workflows(repo, sha, profile_home):
+                outcomes = ["success"]
+                receipt["detail"] = "No required checks, no checks at the exact head, and no enabled workflow in the head commit."
+            elif not outcomes:
+                receipt["detail"] = ("No checks reported at the exact head yet, but an enabled workflow exists in the head commit; "
+                                     "wait for CI, then retry completion.")
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
@@ -188,6 +178,97 @@ def collect_acceptance(contract: str, published_pr: str | None,
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
         receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
         return receipt
+
+
+def _ruleset_required_checks(repo: str, branch: str, profile_home: str | None) -> set:
+    """Required contexts from the rulesets active on ``branch``.
+
+    The REST rules endpoint is a paid feature on private repositories: a free-plan
+    private repo answers 403 ("Upgrade to GitHub Pro") or 404 even to its owner. The
+    repository itself was already readable (GraphQL), so that refusal is about the
+    endpoint, not the login. It counts as "no rulesets" only once GraphQL, which still
+    lists rulesets on those plans, confirms the repository has none; a repo with
+    rulesets we cannot evaluate keeps the original refusal (fail closed).
+    """
+    try:
+        pages = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
+                     paginate=True, profile_home=profile_home)
+    except _GateAuthError as exc:
+        if exc.status not in (403, 404):
+            raise
+        owner, name = repo.split("/")
+        query = (f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)})'
+                 '{rulesets(first:1,includeParents:true){totalCount}}}')
+        repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
+        if repository is None or repository["rulesets"]["totalCount"] != 0:
+            raise
+        return set()
+    return {(r["context"], r.get("integration_id"))
+            for page in pages for rule in page if rule["type"] == "required_status_checks"
+            for r in rule["parameters"]["required_status_checks"]}
+
+
+def _record(receipt: dict, name: str, check: dict, sha: str) -> str:
+    is_run = "conclusion" in check
+    outcome = check.get("conclusion") if is_run else check["state"]
+    classification = _classify(check, sha, outcome, is_run)
+    receipt["checks"].append({"name": name, "id": check["id"],
+        "url": check.get("html_url") or check.get("target_url"),
+        "head_sha": check.get("head_sha", check.get("sha")),
+        "classification": classification, "conclusion": outcome})
+    return classification
+
+
+def _required_outcomes(required: set, runs: list, statuses: list, sha: str, receipt: dict) -> list:
+    outcomes = []
+    for context, app_id in sorted(required, key=str):
+        matching = [r for r in runs if r["name"] == context and
+                    (app_id in (None, -1) or r["app"]["id"] == app_id)]
+        # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
+        legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
+        selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
+        if not selected:
+            outcomes.append("missing")
+            receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
+        outcomes += [_record(receipt, context, check, sha) for check in selected]
+    return outcomes
+
+
+def _all_head_outcomes(runs: list, statuses: list, sha: str, receipt: dict) -> list:
+    """Every latest check run plus the newest legacy status per context, all at ``sha``."""
+    latest: dict = {}
+    for status in statuses:
+        if status["context"] not in latest or status["id"] > latest[status["context"]]["id"]:
+            latest[status["context"]] = status
+    return ([_record(receipt, run["name"], run, sha) for run in runs] +
+            [_record(receipt, context, status, sha) for context, status in sorted(latest.items())])
+
+
+def _has_active_workflows(repo: str, sha: str, profile_home: str | None) -> bool:
+    """True when an enabled Actions workflow could report at ``sha``: CI may still be
+    queued, so zero checks means "not yet", never "nothing to run".
+
+    Relevant = enabled AND its file is in the head commit's ``.github/workflows`` (the
+    tree GitHub runs PR/push workflows from), or a GitHub-managed ``dynamic/`` workflow
+    (e.g. CodeQL default setup). A workflow enabled only on an unrelated branch never
+    runs for this PR and must not hold the card forever.
+    """
+    pages = _api(f"repos/{repo}/actions/workflows?per_page=100", paginate=True, profile_home=profile_home)
+    workflows = [w for page in pages for w in page["workflows"]]
+    if len(workflows) != pages[0]["total_count"]:
+        raise ValueError("Incomplete workflow pagination")
+    active = {w["path"] for w in workflows if w["state"] == "active"}
+    if any(path.startswith("dynamic/") for path in active):
+        return True
+    if not active:
+        return False
+    try:
+        listing = _api(f"repos/{repo}/contents/.github/workflows?ref={sha}", profile_home=profile_home)
+    except _GateAuthError as exc:
+        if exc.status != 404:  # the repo is readable (GraphQL), so 404 = no workflow dir at sha
+            raise
+        return False
+    return bool(active & {entry["path"] for entry in listing})
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:

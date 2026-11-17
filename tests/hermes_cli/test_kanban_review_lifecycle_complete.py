@@ -433,9 +433,9 @@ def test_respawn_guards_compare_mixed_int_and_iso_times_by_value(conn) -> None:
         conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
         return task_id
 
-    def comment(task_id, at):
+    def comment(task_id, at, pr):  # one PR per card: a PR another card cited first is not this card's
         conn.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'dev', ?, ?)",
-                     (task_id, "opened https://github.com/o/r/pull/1", at))
+                     (task_id, f"opened https://github.com/o/r/pull/{pr}", at))
 
     old_success = card("old success")
     kb.claim_task(conn, old_success)
@@ -451,8 +451,8 @@ def test_respawn_guards_compare_mixed_int_and_iso_times_by_value(conn) -> None:
 
     with kb.write_txn(conn):
         old_pr, guarded = card("old pr"), card("guarded")
-        comment(old_pr, iso(90 * 86400))
-        comment(guarded, now - 60)
+        comment(old_pr, iso(90 * 86400), 1)
+        comment(guarded, now - 60, 2)
         conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES "
                      "(?, 'assigned', '{\"assignee\": \"ops\", \"from\": \"dev\"}', ?)", (guarded, iso(7200)))
     assert kbd.check_respawn_guard(conn, old_pr) is None

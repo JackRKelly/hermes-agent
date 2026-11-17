@@ -199,8 +199,8 @@ def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
         assert kb.claim_task(conn, t) is None
 
         events = kb.list_events(conn, t)
-        assert any(e.kind == "scheduled" and e.payload == {"reason": "run next week"} for e in events)
-
+        expected = {"reason": "run next week", "source_status": "ready"}
+        assert any(e.kind == "scheduled" and e.payload == expected for e in events)
 
 
 
@@ -534,9 +534,10 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         spawn_failed_id = kb.create_task(conn, title="spawn failed", assignee="a")
         kb.claim_task(conn, spawn_failed_id)
         spawn_run_id = kb.get_task(conn, spawn_failed_id).current_run_id
+        # ``_record_task_failure`` writes the error to the run and the task alike.
         conn.execute(
-            "UPDATE task_runs SET outcome='spawn_failed', status='failed', ended_at=? "
-            "WHERE id=?",
+            "UPDATE task_runs SET outcome='spawn_failed', status='failed', ended_at=?, "
+            "error='provider authentication failed' WHERE id=?",
             (5_000_000, spawn_run_id),
         )
         conn.execute(
@@ -1586,7 +1587,7 @@ def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
     monkeypatch.delenv("HERMES_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/tmp/planted/hermes")
     monkeypatch.setattr(kbd, "_safe_which_no_cwd", lambda name: "/tmp/planted/hermes")
-    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
+    assert kbd._resolve_hermes_argv() == [sys.executable, "-P", "-m", "hermes_cli.main"]
 
     monkeypatch.setenv("HERMES_BIN", "/opt/hermes/bin/hermes")
     assert kbd._resolve_hermes_argv() == ["/opt/hermes/bin/hermes"]
@@ -1622,7 +1623,7 @@ def test_resolve_hermes_argv_module_actually_runs():
 def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monkeypatch):
     """The dispatcher's worker must carry the import context of the install that spawned it.
 
-    The worker is always ``sys.executable -m hermes_cli.kanban_worker_client`` (it only submits
+    The worker is always ``sys.executable -P -m hermes_cli.kanban_worker_client`` (it only submits
     the claim to the profile owner), and the worker env scrub strips Hermes-owned PYTHONPATH
     entries, so a bare module child died on import and the board auto-blocked (#122299,
     #122487, #122500). The spawned env must put the running install's root first on
@@ -1665,7 +1666,7 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     for resolved in ([sys.executable, "-m", "hermes_cli.main"], ["/opt/hermes/bin/hermes"]):
         monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda resolved=resolved: resolved)
         kbd._default_spawn(task, str(tmp_path / "ws"))
-        assert captured["cmd"][-3:] == [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+        assert captured["cmd"][-4:] == [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]
         assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 
 

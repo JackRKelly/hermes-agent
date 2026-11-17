@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from dataclasses import field
+from agent.deadline import poll_until
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from pathlib import Path
 from typing import Any
@@ -131,15 +132,13 @@ def _cross_process_init_lock(path: Path):
     handle = lock_path.open("a+b")
     acquired = False
     try:
-        deadline = time.monotonic() + _INIT_LOCK_TIMEOUT_SECONDS
-        while True:
+        def _try_lock() -> bool:
             try:
-                acquired = _try_lock_nb(handle)
+                return _try_lock_nb(handle)
             except OSError:
-                acquired = False
-            if acquired or time.monotonic() >= deadline:
-                break
-            time.sleep(_INIT_LOCK_POLL_SECONDS)
+                return False
+
+        acquired = poll_until(_try_lock, _INIT_LOCK_TIMEOUT_SECONDS, _INIT_LOCK_POLL_SECONDS)
         if not acquired:
             _kb._log.warning(
                 "kanban init lock for %s not acquired within %.0fs — proceeding "
@@ -777,6 +776,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
                 conn.executescript(_kb.SCHEMA_SQL)
+                from hermes_cli.kanban_db_provider_breaker import BREAKER_SCHEMA_SQL
+                conn.executescript(BREAKER_SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 _INITIALIZED_PATHS.add(resolved)
 
@@ -887,6 +888,9 @@ _LATER_TASK_COLUMNS = (
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),
+    # Optional deadline, epoch seconds (hermes_cli/kanban_db_due.py). NULL = no due
+    # date, which is what every existing row gets and what most new cards keep.
+    ("due_at", "due_at INTEGER"),
 )
 
 _NOTIFY_SUB_COLUMNS = (

@@ -201,6 +201,9 @@ def _errors_to_500(prefix: str) -> Iterator[None]:
 BOARD_COLUMNS: list[str] = list(kanban_workflow.DEFAULT_WORKFLOW.keys())
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
+# Board cards carry a body preview (bodies were over half of a 2 MB /board payload);
+# the drawer reads the full body from /tasks/:id.
+_CARD_BODY_PREVIEW_CHARS = 300
 
 
 def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None,
@@ -337,7 +340,9 @@ def get_board(
             p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
             p["total"] += 1
             p["done"] += row["cstatus"] == "done"
-        diagnostics_per_task = _compute_task_diagnostics(conn, task_ids=None)
+        # Done cards are history: no diagnostics (they were most of the board's CPU).
+        diagnostics_per_task = _compute_task_diagnostics(
+            conn, task_ids=[t.id for t in tasks if t.status not in ("done", "archived")])
         latest_event_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
         columns: dict[str, list[dict]] = {c: [] for c in BOARD_COLUMNS}
         if include_archived:
@@ -352,6 +357,9 @@ def get_board(
             full = summary_map.get(t.id)
             d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None),
                            current_run_started_at=run_start_map.get(t.id))
+            if d["body"] and len(d["body"]) > _CARD_BODY_PREVIEW_CHARS:
+                d["body"] = d["body"][:_CARD_BODY_PREVIEW_CHARS]
+                d["body_truncated"] = True
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children

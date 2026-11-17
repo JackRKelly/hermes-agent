@@ -515,7 +515,8 @@ def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
 
     with kbc.connect() as conn:
         dev_id = kb.create_task(conn, title="dev own pr", assignee="dev")
-        kb.add_comment(conn, dev_id, author="dev", body=pr_comment)
+        # Its own PR: a PR another card cited first is not this card's (t_a12552f5).
+        kb.add_comment(conn, dev_id, author="dev", body=pr_comment.replace("/44", "/43"))
         closer_id = kb.create_task(conn, title="closer recovery", assignee="dev")
         kb.add_comment(conn, closer_id, author="dev", body=pr_comment)
         _backdate_comments(conn, closer_id)
@@ -603,6 +604,94 @@ def test_active_pr_guard_lifts_for_implementer_after_changes_requested(
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (done_id,))
         assert kbd.check_respawn_guard(conn, done_id) == "recent_success"
+
+
+def _comment_at(conn, tid, body, ago):
+    """A comment on ``tid`` timed ``ago`` seconds before now (second granularity)."""
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'dev', ?, ?)",
+            (tid, body, int(__import__("time").time()) - ago),
+        )
+
+
+def test_active_pr_guard_ignores_prs_first_mentioned_on_another_card(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """t_a12552f5: a READY card whose progress comment cites OTHER cards' PRs
+    (it was told to put them on hold) was held as ``active_pr`` for 43 minutes.
+    A PR first mentioned on a different card is not this card's PR."""
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {})
+    with kbc.connect() as conn:
+        builder_a = kb.create_task(conn, title="builder a", assignee="dev")
+        builder_b = kb.create_task(conn, title="builder b", assignee="dev")
+        _comment_at(conn, builder_a, "Opened https://github.com/cybership-io/v2/pull/4235", 3600)
+        _comment_at(conn, builder_b, "Opened https://github.com/Cybership-IO/V2/pull/4240", 3000)
+        tid = kb.create_task(conn, title="hold the builders", assignee="dev")
+        _comment_at(
+            conn, tid,
+            "Put https://github.com/cybership-io/v2/pull/4235#issuecomment-3511 and "
+            "https://github.com/cybership-io/v2/pull/4240#issuecomment-3512 ON HOLD.",
+            60,
+        )
+
+        assert kbd.check_respawn_guard(conn, tid) is None
+        res = kbd.dispatch_once(conn, dry_run=True)
+        assert tid in [s[0] for s in res.spawned]
+        assert tid not in dict(res.respawn_guarded)
+
+
+def test_active_pr_guard_holds_the_card_that_first_mentioned_the_pr(
+    kanban_home: Path,
+) -> None:
+    """The card that first cites a PR owns it, even if its first mention is
+    older than the 24h window and other cards cite the PR later."""
+    with kbc.connect() as conn:
+        builder = kb.create_task(conn, title="builder", assignee="dev")
+        gate = kb.create_task(conn, title="merge gate", assignee="dev")
+        _comment_at(conn, builder, "Opened https://github.com/o/r/pull/50", 3 * 86400)
+        _comment_at(conn, gate, "Gate https://github.com/o/r/pull/50", 2 * 86400)
+        _comment_at(conn, builder, "Pushed fixes to https://github.com/o/r/pull/50", 600)
+        _comment_at(conn, gate, "Re-checking https://github.com/o/r/pull/50", 60)
+
+        assert kbd.check_respawn_guard(conn, builder) == "active_pr"
+        assert kbd.check_respawn_guard(conn, gate) is None
+
+
+def test_active_pr_guard_holds_on_own_pr_beside_a_foreign_one(kanban_home: Path) -> None:
+    with kbc.connect() as conn:
+        other = kb.create_task(conn, title="other", assignee="dev")
+        tid = kb.create_task(conn, title="mixed", assignee="dev")
+        _comment_at(conn, other, "Opened https://github.com/o/r/pull/60", 3600)
+        _comment_at(
+            conn, tid,
+            "Blocked on https://github.com/o/r/pull/60; opened https://github.com/o/r/pull/61",
+            60,
+        )
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
+def test_active_pr_guard_matches_the_exact_pr_number(kanban_home: Path) -> None:
+    """Another card's ``pull/42`` does not make this card's ``pull/423`` foreign."""
+    with kbc.connect() as conn:
+        other = kb.create_task(conn, title="other", assignee="dev")
+        tid = kb.create_task(conn, title="own 423", assignee="dev")
+        _comment_at(conn, other, "Opened https://github.com/o/r/pull/42", 3600)
+        _comment_at(conn, tid, "Opened https://github.com/o/r/pull/423", 60)
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
+def test_active_pr_guard_same_second_mention_fails_closed(kanban_home: Path) -> None:
+    with kbc.connect() as conn:
+        other = kb.create_task(conn, title="other", assignee="dev")
+        tid = kb.create_task(conn, title="tie", assignee="dev")
+        _comment_at(conn, other, "See https://github.com/o/r/pull/70", 60)
+        _comment_at(conn, tid, "Opened https://github.com/o/r/pull/70", 60)
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
 
 
 def test_dispatch_json_exposes_suppression_reasons(

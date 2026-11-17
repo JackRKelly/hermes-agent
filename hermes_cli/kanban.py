@@ -19,13 +19,14 @@ from typing import Optional
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_due as kb_due
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
-    _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
+    _fmt_counts, _fmt_due, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
@@ -85,16 +86,10 @@ def _parse_workspace_flag(value: Optional[str]) -> tuple[Optional[str], Optional
 
 def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     """Normalize an optional branch name from ``kanban create --branch``."""
-    if value is None:
-        return None
-    branch = value.strip()
-    if not branch:
-        raise argparse.ArgumentTypeError("--branch requires a non-empty name")
-    if branch.startswith("-"):
-        raise argparse.ArgumentTypeError("--branch must not start with '-'")
-    if any(ch.isspace() for ch in branch):
-        raise argparse.ArgumentTypeError("--branch must not contain whitespace")
-    return branch
+    try:
+        return kbw.normalize_branch_name(value, "--branch")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool, str]:
@@ -356,6 +351,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
         max_runtime = _parse_duration(getattr(args, "max_runtime", None))
     except ValueError as exc:
         return _err(f"kanban: --max-runtime: {exc}", 2)
+    try:
+        due_at = kb_due.parse_due(getattr(args, "due", None))
+    except ValueError as exc:
+        return _err(f"kanban: --due: {exc}", 2)
     max_retries = getattr(args, "max_retries", None)
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
@@ -373,7 +372,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             provider_override=getattr(args, "provider_override", None),
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
-            completion_contract=getattr(args, "completion_contract", None),
+            completion_contract=getattr(args, "completion_contract", None), due_at=due_at,
             initial_status=getattr(args, "initial_status", "running"),
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if is_dispatcher_owned_worker_context() else None),
@@ -501,16 +500,15 @@ def _cmd_show(args: argparse.Namespace) -> int:
         return 0
 
     def field(label: str, value) -> None:
-        print(f"  {label + ':':<11}{value}")
+        if value:  # an unset optional field (tenant, branch, due) prints no line at all
+            print(f"  {label + ':':<11}{value}")
 
     print(f"Task {task.id}: {task.title}")
     field("status", task.status)
     field("assignee", task.assignee or "-")
-    if task.tenant:
-        field("tenant", task.tenant)
+    field("tenant", task.tenant)
     field("workspace", f"{task.workspace_kind}" + (f" @ {task.workspace_path}" if task.workspace_path else ""))
-    if task.branch_name:
-        field("branch", task.branch_name)
+    field("branch", task.branch_name)
     if task.skills:
         field("skills", ", ".join(task.skills))
     if task.model_override:
@@ -526,6 +524,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         else:
             print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
     field("created", f"{_fmt_ts(task.created_at)} by {task.created_by or '-'}")
+    field("due", _fmt_due(task.due_at))
 
     # Diagnostics up top so CLI users see distress signals before scrolling.
     from hermes_cli import kanban_diagnostics as kd
@@ -951,18 +950,31 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     title = getattr(args, "title", None)
     body = getattr(args, "body", None)
     priority = getattr(args, "priority", None)
+    due = getattr(args, "due", None)
     if result is None and (summary is not None or raw_metadata is not None):
         return _err("kanban edit: --summary and --metadata require --result", 2)
-    if all(value is None for value in (title, body, priority, result)):
-        return _err("kanban edit: provide --title, --body, --priority, or --result", 2)
+    if all(value is None for value in (title, body, priority, result, due)):
+        return _err("kanban edit: provide --title, --body, --priority, --due, or --result", 2)
+    # The due date and the other fields are two writes; refuse the one pairing whose second write
+    # can fail on a known task (--result needs a done task), so a refused edit never half-applies.
+    if due is not None and result is not None:
+        return _err("kanban edit: --due cannot be combined with --result (a done task needs no due date)", 2)
     metadata, rc = _parse_metadata_flag(raw_metadata)
     if rc:
         return rc
+    try:
+        due_at = None if due is None or due.strip().lower() in kb_due.CLEAR_WORDS else kb_due.parse_due(due)
+    except ValueError as exc:
+        return _err(f"kanban edit: --due: {exc}", 2)
     with kbc.connect_closing() as conn:
-        ok = kb.edit_task(
-            conn, args.task_id, title=title, body=body, priority=priority,
-            result=result, summary=summary, metadata=metadata,
-        )
+        ok = True
+        if due is not None:
+            ok = kb_due.set_due_at(conn, args.task_id, due_at)
+        if ok and any(value is not None for value in (title, body, priority, result)):
+            ok = kb.edit_task(
+                conn, args.task_id, title=title, body=body, priority=priority,
+                result=result, summary=summary, metadata=metadata,
+            )
     return _ok_or_err(
         ok,
         f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)",
@@ -1152,6 +1164,33 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_health(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_db_health as kbh
+    from hermes_cli import kanban_db_provider_breaker as kbpb
+    with kbc.connect_closing() as conn:
+        for provider, act, verb in ((getattr(args, "probe", None), kbpb.probe_now, "half-open: one probe on the next tick"),
+                                    (getattr(args, "reset", None), kbpb.reset_breaker, "closed")):
+            if provider:
+                if not act(conn, provider):
+                    print(f"provider {provider}: no open breaker", file=sys.stderr)
+                    return 1
+                print(f"provider {provider}: {verb}", file=sys.stderr)
+        doc = kbh.live_health(conn, kb.kanban_db_path())
+    if _json_out(args, doc):
+        return 0
+    for p in doc["providers"]:
+        print(f"provider {p['provider']}: {p['state']} ({p['reason']}) since {_fmt_ts(p['opened_at'])}"
+              f"{' resets ' + _fmt_ts(p['reset_at']) if p['reset_at'] else ''}; profiles {', '.join(p['profiles'])}")
+        if p["message"]:
+            print(f"  {p['message']}")
+    d = doc["dispatch"]
+    held = ", ".join(f"{k}={v}" for k, v in d["held_back"].items() if v) or "nothing"
+    print(f"ready spawnable {d['ready_spawnable']}, bad ticks {d['bad_ticks']}, held back: {held}")
+    for i in doc["idle"]:
+        print(f"idle {i['state']}: {i['task_id']} run {i['run_id']} ({i['profile']}) {i['idle_seconds']}s")
+    return 0
+
+
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
     delivery_metadata = {
         key: value
@@ -1332,6 +1371,7 @@ _HANDLERS = {
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
     "daemon": _cmd_daemon, "watch": _cmd_watch, "stats": _cmd_stats,
+    "health": _cmd_health,
     "log": _cmd_log, "runs": _cmd_runs, "heartbeat": _cmd_heartbeat,
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
