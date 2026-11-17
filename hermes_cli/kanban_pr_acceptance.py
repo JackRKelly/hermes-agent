@@ -165,7 +165,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
-        receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
+        receipt["classification"] = next((x for x in outcomes if x not in _PASSING), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
         return receipt
     except _GateAuthError as exc:
@@ -208,15 +208,38 @@ def _ruleset_required_checks(repo: str, branch: str, profile_home: str | None) -
             for r in rule["parameters"]["required_status_checks"]}
 
 
-def _record(receipt: dict, name: str, check: dict, sha: str) -> str:
-    is_run = "conclusion" in check
-    outcome = check.get("conclusion") if is_run else check["state"]
-    classification = _classify(check, sha, outcome, is_run)
-    receipt["checks"].append({"name": name, "id": check["id"],
-        "url": check.get("html_url") or check.get("target_url"),
-        "head_sha": check.get("head_sha", check.get("sha")),
-        "classification": classification, "conclusion": outcome})
-    return classification
+# A second workflow run at the same head (a re-trigger, or two events firing one
+# workflow) reports every job name again, and GitHub's ``filter=latest`` keeps the
+# newest run per check suite, so both copies arrive. The duplicate's jobs are usually
+# conditioned off and conclude skipped/neutral. Such a twin never undoes a pass of the
+# same name at the exact head; alone, it still blocks (nothing actually passed).
+_DUPLICATE_SAFE = frozenset({"skipped", "neutral"})
+# Per-check classifications that let the card complete; anything else blocks.
+_PASSING = frozenset({"success", "superseded"})
+
+
+def _record_group(receipt: dict, name: str, checks: list, sha: str) -> list[str]:
+    """Record every check reported under ``name`` and return their classifications.
+
+    A skipped/neutral check is ``superseded`` (non-blocking) when another check of the
+    same name passed at ``sha``; otherwise each check is classified on its own.
+    """
+    classified = []
+    for check in checks:
+        is_run = "conclusion" in check
+        outcome = check.get("conclusion") if is_run else check["state"]
+        classified.append((check, outcome, _classify(check, sha, outcome, is_run)))
+    passed = any(c == "success" for _, _, c in classified)
+    result = []
+    for check, outcome, classification in classified:
+        if passed and classification == "infra" and outcome in _DUPLICATE_SAFE:
+            classification = "superseded"
+        receipt["checks"].append({"name": name, "id": check["id"],
+            "url": check.get("html_url") or check.get("target_url"),
+            "head_sha": check.get("head_sha", check.get("sha")),
+            "classification": classification, "conclusion": outcome})
+        result.append(classification)
+    return result
 
 
 def _required_outcomes(required: set, runs: list, statuses: list, sha: str, receipt: dict) -> list:
@@ -230,7 +253,7 @@ def _required_outcomes(required: set, runs: list, statuses: list, sha: str, rece
         if not selected:
             outcomes.append("missing")
             receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
-        outcomes += [_record(receipt, context, check, sha) for check in selected]
+        outcomes += _record_group(receipt, context, selected, sha)
     return outcomes
 
 
@@ -240,8 +263,13 @@ def _all_head_outcomes(runs: list, statuses: list, sha: str, receipt: dict) -> l
     for status in statuses:
         if status["context"] not in latest or status["id"] > latest[status["context"]]["id"]:
             latest[status["context"]] = status
-    return ([_record(receipt, run["name"], run, sha) for run in runs] +
-            [_record(receipt, context, status, sha) for context, status in sorted(latest.items())])
+    by_name: dict = {}
+    for run in runs:
+        by_name.setdefault(run["name"], []).append(run)
+    outcomes = [x for name, group in by_name.items() for x in _record_group(receipt, name, group, sha)]
+    for context, status in sorted(latest.items()):
+        outcomes += _record_group(receipt, context, [status], sha)
+    return outcomes
 
 
 def _has_active_workflows(repo: str, sha: str, profile_home: str | None) -> bool:
