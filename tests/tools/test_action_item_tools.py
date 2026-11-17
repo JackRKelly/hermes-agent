@@ -411,6 +411,29 @@ def test_owner_update_reparks_in_place_and_voids_the_old_id(board, monkeypatch):
     assert "nothing changed" in call("action_item_update", id=updated["id"])["error"]
 
 
+@pytest.mark.parametrize("stored_note", ["Low risk", "medium"])
+def test_updating_an_item_stored_with_no_reason_asks_for_one(board, monkeypatch, stored_note):
+    """An item parked before the risk.note rule with a level-only note still reads, but an update re-runs the
+    add-time rules on the merged envelope: it is refused, naming the field, until the update passes a reason.
+    (An empty stored note cannot exist: the envelope schema has always refused one, "must not be empty".)"""
+    from tools.action_item_kinds import readability
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    with monkeypatch.context() as before_the_rule:
+        before_the_rule.setattr(readability, "check_risk_note", lambda *a, **k: None)
+        item = call("action_item_add", **{**MERGE, "risk": {"level": "low", "note": stored_note}})
+    assert item["ok"], item
+    as_chat(monkeypatch, "engineering")
+    monkeypatch.setattr(FakeGh, "head", "c" * 40)
+    refused = call("action_item_update", id=item["id"], payload={"head_sha": "c" * 40})
+    assert refused["error"].startswith("action_item_update refused: risk.note: "), refused
+    assert refused["error"].endswith("Nothing was written."), refused
+    fixed = call("action_item_update", id=item["id"], payload={"head_sha": "c" * 40},
+                 risk={"level": "low", "note": "UI only."})
+    assert fixed["ok"], fixed
+    assert call("action_item_get_decision", id=fixed["id"])["trusted_item"] is True
+
+
 def test_owner_withdraw_records_it_and_hands_the_card_back(board, monkeypatch):
     tid, run_id = make_card("engineering", claim=True)
     as_worker(monkeypatch, "engineering", tid, run_id)

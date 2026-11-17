@@ -429,6 +429,8 @@ def check_risk_note(risk: Any, where: str = "risk.note") -> None:
     if not isinstance(note, str):
         return  # the envelope schema reports the missing or mistyped note
     # The app shows the note beside the level on every card, so it must say why: never empty, never the level again.
+    # These two refusals are word for word the JackRKelly/assistant CLI's (``action_item.risk_note_refusal``), so an
+    # agent gets one answer whichever way it parks; both repos' tests assert the full strings.
     if not note.strip():
         raise fix(where, "required, one line saying why this level", EXAMPLE_RISK_NOTE)
     if restates_level(note):

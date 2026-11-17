@@ -169,7 +169,8 @@ def test_the_banned_tag_refusal_names_the_token_and_a_conforming_example():
     ("summary", "x" * 241, "summary", "241 chars, max 240"),
     ("risk", {"level": "low", "note": "x" * 121}, "risk.note", "121 chars, max 120"),
     ("risk", {"level": "low", "note": "one\ntwo"}, "risk.note", "must be one line"),
-    # Jack, Nov 17: the note is the reason shown beside the level on every card, never empty or the level again.
+    # Jack, Nov 17: the note is the reason shown beside the level on every card, never empty or the level again
+    # (exact refusal text: test_the_risk_note_refusals_match_the_assistant_cli_word_for_word below).
     ("risk", {"level": "low", "note": ""}, "risk.note", "required, one line saying why this level"),
     ("risk", {"level": "low", "note": "  "}, "risk.note", "required"),
     ("risk", {"level": "medium", "note": "medium risk"}, "risk.note", "'medium risk' only restates the level"),
@@ -184,7 +185,32 @@ def test_each_envelope_limit_is_refused_with_the_field_name(field, value, where,
     assert message.startswith(f"{where}: ") and problem in message and message.endswith(GUIDE_TAIL), message
 
 
-@pytest.mark.parametrize("note", ["Low risk: docs only", "UI only.", "x", "Medium: touches billing screens"])
+# The same table of notes and the same refusal strings as JackRKelly/assistant
+# tests/test_action_items_risk_reason.py, whose CLI (scripts/action_item.py) gives these refusals word for word;
+# its SameRuleAsTheTools test also runs this module's rule against the CLI's once this is installed.
+LEVEL_ONLY_NOTES = ("", "  ", "medium risk", "Medium risk.", "LOW", "Risk: high", "High-risk", "Low risk change",
+                    "This is a moderate risk item")
+REASON_NOTES = ("Low risk: docs only", "Replies on an existing customer thread", "draft", "UI only.", "x",
+                "Medium: touches billing screens")
+RISK_TAIL = ' Write e.g. "Waiting past Dec 1 breaks the next prod deploy." (see docs/action-items-card-guide.md)'
+EMPTY_REFUSAL = "risk.note: required, one line saying why this level." + RISK_TAIL
+LEVEL_ONLY_REFUSAL = "risk.note: 'Medium risk.' only restates the level; say why in a few words." + RISK_TAIL
+
+
+def test_the_risk_note_refusals_match_the_assistant_cli_word_for_word():
+    for note, want in (("Medium risk.", LEVEL_ONLY_REFUSAL), ("", EMPTY_REFUSAL), ("  ", EMPTY_REFUSAL)):
+        with pytest.raises(SchemaError) as refused:
+            build(questions(q()), risk={"level": "medium", "note": note})
+        assert str(refused.value) == want
+
+
+def test_the_shared_table_of_notes():
+    from tools.action_item_kinds.readability import restates_level
+    assert all(restates_level(note) for note in LEVEL_ONLY_NOTES)
+    assert not any(restates_level(note) for note in REASON_NOTES)
+
+
+@pytest.mark.parametrize("note", REASON_NOTES)
 def test_a_note_that_explains_the_level_is_accepted(note):
     assert build(questions(q()), risk={"level": "low", "note": note})["risk"]["note"] == note
 
