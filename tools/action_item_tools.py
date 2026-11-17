@@ -33,7 +33,8 @@ _ENVELOPE = {
         f"happened and why Jack is needed now, {_PLAIN}.")},
     "ask": {"type": "string", "description": "One line (<=140 chars): the decision or action, as a question for Jack."},
     "why": {"type": "string", "description": "<=280 chars: why it matters and what waits on it."},
-    "risk": {"type": "object", "description": f"{{level: low|medium|high, note: one line, <={rd.RISK_NOTE_MAX_CHARS} chars}}.",
+    "risk": {"type": "object", "description": (f"{{level: low|medium|high, note: one line, <={rd.RISK_NOTE_MAX_CHARS} "
+                                                "chars, saying why (shown beside the level; never just the level)}."),
              "properties": {"level": {"type": "string", "enum": ["low", "medium", "high"]},
                             "note": {"type": "string"}}, "required": ["level", "note"]},
     "deadline": {"type": "string", "description": "A real deadline only, ISO 8601 with a UTC offset."},

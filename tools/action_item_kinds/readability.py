@@ -409,10 +409,32 @@ def check_summary(value: Any, where: str = "summary") -> None:
     check_chars(value, SUMMARY_MAX_CHARS, where, EXAMPLE_SUMMARY)
 
 
+# Words a risk note can be made of and still say nothing beyond its level (Jack, Nov 17: "You should be adding an
+# explanation on the risk level for every Action Items card"): "Medium risk.", "low", "Risk: high", "Low risk
+# change". Any other word ("Low risk: docs only") explains something. The same list as JackRKelly/assistant
+# ``scripts/action_item.py`` ``LEVEL_ONLY_WORDS``, whose app derives a reason for an older item with such a note.
+LEVEL_ONLY_WORDS = frozenset({"low", "medium", "med", "high", "moderate", "minimal", "minor", "risk", "risky",
+                              "level", "rated", "rating", "is", "it", "its", "this", "the", "a", "an", "overall",
+                              "very", "fairly", "quite", "pretty", "relatively", "change", "item"})
+_WORD_RE = re.compile(r"[a-z]+")
+
+
+def restates_level(note: str) -> bool:
+    """True when ``note`` is empty or only restates the risk level (``LEVEL_ONLY_WORDS``)."""
+    return all(word in LEVEL_ONLY_WORDS for word in _WORD_RE.findall(note.lower()))
+
+
 def check_risk_note(risk: Any, where: str = "risk.note") -> None:
     note = risk.get("note") if isinstance(risk, dict) else None
     if not isinstance(note, str):
         return  # the envelope schema reports the missing or mistyped note
+    # The app shows the note beside the level on every card, so it must say why: never empty, never the level again.
+    # These two refusals are word for word the JackRKelly/assistant CLI's (``action_item.risk_note_refusal``), so an
+    # agent gets one answer whichever way it parks; both repos' tests assert the full strings.
+    if not note.strip():
+        raise fix(where, "required, one line saying why this level", EXAMPLE_RISK_NOTE)
+    if restates_level(note):
+        raise fix(where, f"{note.strip()!r} only restates the level; say why in a few words", EXAMPLE_RISK_NOTE)
     if "\n" in note or "\r" in note:
         raise fix(where, "must be one line", EXAMPLE_RISK_NOTE)
     check_chars(note, RISK_NOTE_MAX_CHARS, where, EXAMPLE_RISK_NOTE)
