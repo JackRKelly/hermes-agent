@@ -169,12 +169,24 @@ def test_the_banned_tag_refusal_names_the_token_and_a_conforming_example():
     ("summary", "x" * 241, "summary", "241 chars, max 240"),
     ("risk", {"level": "low", "note": "x" * 121}, "risk.note", "121 chars, max 120"),
     ("risk", {"level": "low", "note": "one\ntwo"}, "risk.note", "must be one line"),
+    # Jack, Nov 17: the note is the reason shown beside the level on every card, never empty or the level again.
+    ("risk", {"level": "low", "note": ""}, "risk.note", "required, one line saying why this level"),
+    ("risk", {"level": "low", "note": "  "}, "risk.note", "required"),
+    ("risk", {"level": "medium", "note": "medium risk"}, "risk.note", "'medium risk' only restates the level"),
+    ("risk", {"level": "high", "note": "High risk."}, "risk.note", "only restates the level"),
+    ("risk", {"level": "low", "note": "Risk: low"}, "risk.note", "only restates the level"),
+    ("risk", {"level": "low", "note": "Low risk change"}, "risk.note", "only restates the level"),
 ])
 def test_each_envelope_limit_is_refused_with_the_field_name(field, value, where, problem):
     with pytest.raises(SchemaError) as refused:
         build(questions(q()), **{field: value})
     message = str(refused.value)
     assert message.startswith(f"{where}: ") and problem in message and message.endswith(GUIDE_TAIL), message
+
+
+@pytest.mark.parametrize("note", ["Low risk: docs only", "UI only.", "x", "Medium: touches billing screens"])
+def test_a_note_that_explains_the_level_is_accepted(note):
+    assert build(questions(q()), risk={"level": "low", "note": note})["risk"]["note"] == note
 
 
 @pytest.mark.parametrize("payload, where, problem", [
