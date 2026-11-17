@@ -188,6 +188,93 @@ def test_an_invalid_add_is_refused_and_writes_nothing(board, monkeypatch, change
     assert status == "running" and comments == [] and not [e for e in events if e.kind == "blocked"]
 
 
+DRIVE = "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/view?usp=sharing"
+DOC = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/edit"
+
+
+def test_drive_and_docs_links_park_and_read_back_trusted(board, monkeypatch):
+    """A Drive video or Google Doc goes in links[] (Jack, Nov 17), and the stored item still loads."""
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    links = [{"label": "Rules video v4", "url": DRIVE}, {"label": "Post copy", "url": DOC}]
+    out = call("action_item_add", **MERGE, links=links)
+    assert out["ok"], out
+    assert json.loads(card_state(tid)[1][-1].body[17:])["links"] == links
+    assert call("action_item_get_decision", id=out["id"])["trusted_item"] is True
+
+
+@pytest.mark.parametrize("url", [
+    "javascript:alert(1)",
+    "http://drive.google.com/file/d/1/view",
+    "https://jack:pw@drive.google.com/file/d/1/view",
+    "https://drive.google.com.evil.example/file/d/1/view",
+    "https://docs.google.com:8443/document/d/1/edit",
+])
+def test_the_new_hosts_keep_the_https_and_credential_rules(board, monkeypatch, url):
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    out = call("action_item_add", **MERGE, links=[{"label": "Video", "url": url}])
+    assert "only https links" in out["error"] and "Nothing was written" in out["error"]
+    assert card_state(tid)[1] == []
+
+
+URL_SUMMARY = f"Rules video v4 is ready: {DRIVE}"
+
+
+def test_a_summary_that_is_mostly_a_url_parks_with_a_warning(board, monkeypatch):
+    """Never a refusal: the item parks, and the result says to move the URL into links[]."""
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    out = call("action_item_add", **{**MERGE, "summary": URL_SUMMARY})
+    assert out["ok"] and "error" not in out, out
+    assert card_state(tid)[0] == "blocked"
+    [warning] = out["warnings"]
+    assert warning.startswith("summary: ") and "links[] with a short label" in warning
+    assert "say in words what it is" in warning
+
+
+def test_a_normal_summary_or_a_short_url_gets_no_warning(board, monkeypatch):
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    summary = ("The rules video v4 is rendered and on Drive, ready to post today. Jack picks the "
+               f"caption: https://drive.google.com/file/d/1abc/view")
+    out = call("action_item_add", **{**MERGE, "summary": summary})
+    assert out["ok"] and "warnings" not in out, out
+
+
+def test_update_warns_on_a_url_heavy_summary_too(board, monkeypatch):
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    item = call("action_item_add", **MERGE)
+    assert "warnings" not in item
+    as_chat(monkeypatch, "engineering")
+    updated = call("action_item_update", id=item["id"], summary=URL_SUMMARY)
+    assert updated["ok"] and updated["replaces"] == item["id"], updated
+    assert "links[]" in updated["warnings"][0]
+
+
+@pytest.mark.parametrize("summary, warns", [
+    (DRIVE, True),
+    (f"Video: {DRIVE}", True),
+    ("x" * (len(DRIVE) - 1) + " " + DRIVE, False),  # URL just under half
+    ("The product page never loads. This PR fixes it.", False),
+    ("", False),
+    (None, False),
+])
+def test_url_heavy_threshold_is_more_than_half_the_summary(summary, warns):
+    from tools.action_item_kinds.readability import url_heavy_warnings
+    assert bool(url_heavy_warnings(summary)) is warns
+
+
+def test_the_tool_description_lists_the_allowed_link_hosts_and_prefers_links():
+    from tools.action_item_kinds.core import STATIC_LINK_HOSTS
+    schema = registry.get_schema("action_item_add")
+    links = schema["parameters"]["properties"]["links"]["description"]
+    assert {"drive.google.com", "docs.google.com"} <= STATIC_LINK_HOSTS
+    assert all(host in links for host in STATIC_LINK_HOSTS)
+    assert "goes in links[] with a short label" in schema["description"]
+
+
 DECISION = {"kind": "design_decision", "title": "Railway: when to roll out staging and prod?",
             "summary": "Dev now uses the new deploy settings. Staging and prod need the same change before Dec 1.",
             "ask": "Pick the rollout timing and what to do with Convoy.", "why": "Dev is done.",
