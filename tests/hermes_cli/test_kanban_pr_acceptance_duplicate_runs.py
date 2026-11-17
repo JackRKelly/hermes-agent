@@ -36,8 +36,33 @@ def test_failed_required_check_still_blocks_beside_a_passing_duplicate(gh):
 
 
 @pytest.mark.platforms("posix")
-def test_skipped_required_check_without_a_passing_sibling_still_blocks(gh):
-    gh(protection=REQUIRED, runs=[_run("skipped", "lint", rid=1), _run("success", "build", rid=2)])
+@pytest.mark.parametrize("twin", ["cancelled", "timed_out", "action_required"])
+def test_run_that_started_and_did_not_pass_blocks_beside_a_passing_duplicate(gh, twin):
+    # A cancel-in-progress twin is the likeliest real duplicate: it must never count
+    # as superseded, whichever suite is newer.
+    for runs in ([_run("success", "lint", rid=1), _run(twin, "lint", rid=2)],
+                 [_run(twin, "lint", rid=1), _run("success", "lint", rid=2)]):
+        gh(protection=REQUIRED, runs=[*runs, _run("success", "build", rid=3)])
+        receipt = collect_acceptance("acme/repo", PR)
+        assert not receipt["ok"] and receipt["classification"] == "infra"
+        assert "superseded" not in {c["classification"] for c in receipt["checks"]}
+
+
+@pytest.mark.platforms("posix")
+def test_older_failure_still_blocks_beside_a_newer_pass_in_another_suite(gh):
+    # Any failure at the head blocks, regardless of order: a failed re-trigger is not
+    # erased by a later green one. Re-running the failed job replaces it in its own suite.
+    gh(protection=REQUIRED, runs=[{**_run("failure", "lint", rid=1), "check_suite": {"id": 10}},
+                                  {**_run("success", "lint", rid=2), "check_suite": {"id": 11}},
+                                  _run("success", "build", rid=3)])
+    receipt = collect_acceptance("acme/repo", PR)
+    assert not receipt["ok"] and receipt["classification"] == "failure"
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("only", ["skipped", "cancelled"])
+def test_lone_skipped_or_cancelled_required_check_blocks(gh, only):
+    gh(protection=REQUIRED, runs=[_run(only, "lint", rid=1), _run("success", "build", rid=2)])
     receipt = collect_acceptance("acme/repo", PR)
     assert not receipt["ok"] and receipt["classification"] == "infra"
 

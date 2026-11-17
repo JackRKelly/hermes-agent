@@ -213,18 +213,26 @@ def _ruleset_required_checks(repo: str, branch: str, profile_home: str | None) -
 # newest run per check suite, so both copies arrive. The duplicate's jobs are usually
 # conditioned off and conclude skipped/neutral. Such a twin never undoes a pass of the
 # same name at the exact head; alone, it still blocks (nothing actually passed).
+# Only conclusions that mean "did not run" belong here: cancelled, timed_out,
+# action_required and failure mean a run started and did not pass, so a pass in
+# another suite never excuses them (a concurrency cancel-in-progress twin included).
 _DUPLICATE_SAFE = frozenset({"skipped", "neutral"})
 # Per-check classifications that let the card complete; anything else blocks.
 _PASSING = frozenset({"success", "superseded"})
 
 
-def _record_group(receipt: dict, name: str, checks: list, sha: str) -> list[str]:
+def _record_group(receipt: dict, name: str, checks: list[dict], sha: str) -> list[str]:
     """Record every check reported under ``name`` and return their classifications.
 
-    A skipped/neutral check is ``superseded`` (non-blocking) when another check of the
-    same name passed at ``sha``; otherwise each check is classified on its own.
+    ``checks`` are check runs (they carry ``conclusion``) or legacy statuses (``state``).
+    The only upgrade is ``infra`` -> ``superseded`` for a skipped/neutral check when
+    another check of the same name passed at ``sha``. Every other classification
+    stands as is, whatever the run order: a failure, cancelled, timed_out or
+    action_required check blocks even when an older or newer same-name run passed
+    (fail closed; re-running the failed job replaces it in its own suite, which
+    ``filter=latest`` then reports instead). Stale and pending checks never upgrade.
     """
-    classified = []
+    classified: list[tuple[dict, str | None, str]] = []
     for check in checks:
         is_run = "conclusion" in check
         outcome = check.get("conclusion") if is_run else check["state"]
