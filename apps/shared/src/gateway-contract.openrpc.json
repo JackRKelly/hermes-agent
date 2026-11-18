@@ -15728,6 +15728,11 @@
             "default": null,
             "title": "Provider"
           },
+          "pinned": {
+            "default": false,
+            "title": "Pinned",
+            "type": "boolean"
+          },
           "base_url": {
             "anyOf": [
               {
@@ -15960,6 +15965,18 @@
             "default": null,
             "title": "Monitor Url"
           },
+          "monitor_quiet_empty": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Monitor Quiet Empty"
+          },
           "monitor_state": {
             "anyOf": [
               {},
@@ -15969,6 +15986,18 @@
             ],
             "default": null,
             "title": "Monitor State"
+          },
+          "interpreter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Interpreter"
           },
           "no_agent": {
             "anyOf": [
