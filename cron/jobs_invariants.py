@@ -12,6 +12,14 @@ NO_AGENT_WITHOUT_SCRIPT_ERROR = (
     "there is nothing for the job to run."
 )
 
+# The flag only changes how the monitor gate treats empty output; on a job without a monitor it
+# would silently do nothing, so it is refused rather than stored.
+MONITOR_QUIET_EMPTY_WITHOUT_MONITOR_ERROR = (
+    "monitor_quiet_empty=True requires monitor_script or monitor_url — it only changes how a "
+    "monitor job treats empty monitor output. Clear monitor_quiet_empty in the same update "
+    "when removing the monitor."
+)
+
 SCRIPT_IS_COMMAND_LINE_ERROR = (
     "script must name a file under {scripts_dir} (e.g. 'watchdog.sh'), not a shell command line: "
     "{script!r} has no such file. Write the command into a script there and pass its filename."
@@ -23,9 +31,12 @@ def _validate_job_mode_invariants(
     monitor_url: Optional[str],
     no_agent: bool,
     script: Optional[str],
+    monitor_quiet_empty: bool = False,
 ) -> None:
     """Execution-mode invariants shared by create_job and update_job (no bypass via the update
     door)."""
+    if monitor_quiet_empty and not (monitor_script or monitor_url):
+        raise ValueError(MONITOR_QUIET_EMPTY_WITHOUT_MONITOR_ERROR)
     if monitor_script and monitor_url:
         raise ValueError(
             "monitor_script and monitor_url are mutually exclusive — a job "

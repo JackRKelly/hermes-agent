@@ -1601,6 +1601,16 @@ def _apply_monitor_gate(
         return (
             False, f"{header}**Status:** monitor source failed\n\n{_mon.error}\n", _mon_alert, _mon.error,
         ), extra_prompt, None
+    if _mon.suppressed_empty:
+        # monitor_quiet_empty: the output changed to empty (state already persisted). Nothing is
+        # left to judge, so skip the LLM exactly like an unchanged tick. The doc keeps the
+        # ``**Status:** no_change`` prefix that context_from treats as a silent audit doc.
+        logger.info("Job '%s': monitor output empty (monitor_quiet_empty) — suppressing agent run",
+                    job_id)
+        return (
+            True, f"{header}**Status:** no_change (empty monitor output, agent run suppressed)\n",
+            SILENT_MARKER, None,
+        ), extra_prompt, None
     if not _mon.changed:
         # Unchanged: silent no_change tick (ledger doc kept; SILENT_MARKER blocks delivery).
         logger.info("Job '%s': monitor output unchanged — suppressing agent run", job_id)

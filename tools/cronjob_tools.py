@@ -694,6 +694,8 @@ def _action_create(a: dict[str, Any]) -> str:
             no_agent=_no_agent, attach_to_session=a["attach_to_session"],
             monitor_script=_normalize_optional_job_value(a["monitor_script"]),
             monitor_url=_normalize_optional_job_value(a["monitor_url"]),
+            # Passed raw (None = off): create_job refuses a non-boolean instead of coercing it.
+            monitor_quiet_empty=a["monitor_quiet_empty"] if a["monitor_quiet_empty"] is not None else False,
             # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch (models don't pick models).
             reasoning_effort=a["reasoning_effort"], interpreter=a["interpreter"],
             pinned=bool(a["pinned"]),
@@ -865,8 +867,12 @@ def _update_core_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[st
 
 
 def _update_script_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str, Any]) -> Optional[str]:
-    """script / monitor_script / monitor_url (empty string clears); returns an error string or None."""
+    """script / monitor_script / monitor_url (empty string clears) / monitor_quiet_empty; returns an
+    error string or None."""
     monitor_script, monitor_url = a["monitor_script"], a["monitor_url"]
+    if a["monitor_quiet_empty"] is not None:
+        # update_job validates the type and that the merged job still has a monitor source.
+        updates["monitor_quiet_empty"] = a["monitor_quiet_empty"]
     for field, value in (("script", a["script"]), ("monitor_script", monitor_script)):
         if value is not None:
             if value:
@@ -1007,6 +1013,7 @@ def cronjob(
     attach_to_session: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
+    monitor_quiet_empty: Optional[bool] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str | list[str]] = None,
     task_id: str | None = None,
@@ -1115,6 +1122,10 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "type": "string",
                 "description": "Optional change-detector that gates the agent: an http(s) URL (fetched each tick) or a script path (same rules as `script`, run each tick) — cheap, no LLM. Output identical to the previous tick skips the agent run entirely; changed output wakes the agent with a diff injected into the prompt. First tick always runs (baseline). Output must be deterministic (no timestamps) or every tick looks changed. Incompatible with no_agent. On update, '' clears."
             },
+            "monitor_quiet_empty": {
+                "type": "boolean",
+                "description": "With monitor: True = output that becomes empty or whitespace-only is recorded but does NOT wake the agent. Default false. On update, false turns it off."
+            },
             "no_agent": {
                 "type": "boolean",
                 "default": False,
@@ -1170,7 +1181,7 @@ def check_cronjob_requirements() -> bool:
 _HANDLER_FORWARDED_ARGS = (
     "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
     "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session",
-    "paused_reason", "pinned")
+    "paused_reason", "pinned", "monitor_quiet_empty")
 
 
 def _cronjob_handler(args, **kw):

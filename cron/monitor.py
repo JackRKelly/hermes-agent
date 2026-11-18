@@ -5,7 +5,10 @@ Each tick runs the source FIRST and hashes its EXACT output bytes (no timestamp/
 normalization — scripts must emit stable output) against the hash from the last agent-triggering
 tick: unchanged → agent run suppressed (silent ``no_change`` run); changed/first run → a "MONITOR
 CHANGE DETECTED" block (capped unified diff + new output) is injected into the prompt; source
-failure → an ERROR, never a change, and the stored hash is left untouched. State:
+failure → an ERROR, never a change, and the stored hash is left untouched. Opt-in
+``monitor_quiet_empty``: a change TO empty output (after ``.strip()``) is recorded like any change
+but does not wake the agent (silent ``no_change`` tick), so a monitor whose candidates were all
+handled costs no LLM call. State:
 ``job["monitor_state"]`` in jobs.json (hash + last_changed_at) and
 ``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` (for the diff).
 """
@@ -36,6 +39,10 @@ class MonitorOutcome:
 
     ok: bool
     changed: bool = False
+    # The output changed to empty on a ``monitor_quiet_empty`` job: state was persisted like a
+    # change, but the agent must not run. Always paired with ``changed=False``, so a caller that
+    # predates this field still suppresses the run.
+    suppressed_empty: bool = False
     first_run: bool = False
     context_block: Optional[str] = None
     error: Optional[str] = None
@@ -128,7 +135,9 @@ def check_monitor(job: dict) -> MonitorOutcome:
 
     On change (or first run) the new hash + snapshot are persisted BEFORE the agent runs — detection
     time is the state boundary, so a failed agent run doesn't re-alert on the same content forever.
-    On failure nothing is persisted.
+    On failure nothing is persisted. With ``monitor_quiet_empty`` set, a new output that is empty
+    after ``.strip()`` is persisted the same way (so the next non-empty output diffs against
+    empty) and returned as ``suppressed_empty`` instead of a change.
     """
     job_id = str(job.get("id") or "")
     ok, output = _run_monitor_source(job)
@@ -141,6 +150,10 @@ def check_monitor(job: dict) -> MonitorOutcome:
 
     if last_hash is not None and new_hash == last_hash:
         return MonitorOutcome(ok=True, changed=False)
+
+    if job.get("monitor_quiet_empty") is True and not output.strip():
+        _persist_monitor_state(job_id, new_hash, output)
+        return MonitorOutcome(ok=True, changed=False, suppressed_empty=True)
 
     first_run = last_hash is None
     old_output = "" if first_run else _read_last_output(job_id)

@@ -1737,6 +1737,16 @@ def _normalize_reasoning_effort(value: Any) -> Optional[str]:
     return text
 
 
+def _normalize_monitor_quiet_empty(value: Any) -> bool:
+    """``monitor_quiet_empty`` is a real boolean (None = off). A string such as ``"false"`` is
+    refused rather than coerced, because ``bool("false")`` would silently turn the flag ON."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError("monitor_quiet_empty must be a boolean.")
+    return value
+
+
 # Normalizers for create_job (all fields) / update_job (present fields). Invalid values raise BEFORE
 # storing.
 _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
@@ -1746,6 +1756,7 @@ _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "script": _normalize_job_optional_text,
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
+    "monitor_quiet_empty": _normalize_monitor_quiet_empty,
     "enabled_toolsets": _normalize_enabled_toolsets,
     "workdir": _normalize_workdir,
     "no_agent": bool,
@@ -1759,6 +1770,7 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "workdir": lambda v: None if v in {None, "", False} else _normalize_workdir(v),
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
+    "monitor_quiet_empty": _normalize_monitor_quiet_empty,
     "interpreter": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
 }
@@ -1805,6 +1817,7 @@ def create_job(
     attach_to_session: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
+    monitor_quiet_empty: bool = False,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
     paused: bool = False,
@@ -1819,7 +1832,9 @@ def create_job(
     delivered verbatim, requires ``script``). context_from: job id(s) whose latest output is
     injected. workdir: absolute cwd for tools/scripts. monitor_script/monitor_url: cheap monitor
     source run FIRST each tick; unchanged output suppresses the agent run (mutually exclusive,
-    incompatible with ``no_agent``). reasoning_effort: per-job pin; capability NOT validated.
+    incompatible with ``no_agent``). monitor_quiet_empty: output that changes to empty (after
+    strip) is recorded but does not wake the agent; requires a monitor source.
+    reasoning_effort: per-job pin; capability NOT validated.
     interpreter: absolute/``~`` Python for ``.py`` script/monitor_script, validated at run time
     (a venv can be rebuilt or moved after creation)."""
     if not isinstance(paused, bool):
@@ -1846,7 +1861,8 @@ def create_job(
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
 
-    _validate_job_mode_invariants(f["monitor_script"], f["monitor_url"], f["no_agent"], f["script"])
+    _validate_job_mode_invariants(f["monitor_script"], f["monitor_url"], f["no_agent"], f["script"],
+                                  f["monitor_quiet_empty"])
     prompt_text = _coerce_job_text(prompt).strip()
     if not prompt_text and not f["script"] and not normalized_skills:
         raise ValueError(EMPTY_PAYLOAD_ERROR)
@@ -1912,6 +1928,10 @@ def create_job(
     ):
         if value is not None:
             job[key] = value
+    # Same rule for the opt-in flag: only an ON value is written, so a default job stays
+    # byte-identical to one created before the field existed.
+    if f["monitor_quiet_empty"]:
+        job["monitor_quiet_empty"] = True
 
     with _jobs_lock():
         save_jobs(load_jobs() + [job])
@@ -2097,12 +2117,13 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
         updated = _apply_skill_fields({**job, **updates})
         _reject_terminal_activation(job, updated, job_id)
         # Re-check on the MERGED record; scoped to changed fields so legacy records keep loading.
-        if {"monitor_script", "monitor_url", "no_agent", "script"}.intersection(updates):
+        if {"monitor_script", "monitor_url", "monitor_quiet_empty", "no_agent", "script"}.intersection(updates):
             _validate_job_mode_invariants(
                 updated.get("monitor_script") or None,
                 updated.get("monitor_url") or None,
                 bool(updated.get("no_agent")),
-                _normalize_job_optional_text(updated.get("script")))
+                _normalize_job_optional_text(updated.get("script")),
+                updated.get("monitor_quiet_empty") is True)
         if any(k in updates for k in _PAYLOAD_FIELDS) and job_payload_is_empty(updated):
             raise ValueError(EMPTY_PAYLOAD_ERROR)
         if "schedule" in updates:

@@ -761,6 +761,7 @@ _JOB_ARG_FIELDS = (("name", "name"), ("deliver", "deliver"), ("failure_deliver",
                    ("repeat", "repeat"), ("script", "script"), ("workdir", "workdir"),
                    ("model", "model"), ("provider", "model_provider"), ("pinned", "pinned"),
                    ("monitor_script", "monitor_script"), ("monitor_url", "monitor_url"),
+                   ("monitor_quiet_empty", "monitor_quiet_empty"),
                    ("continuity", "continuity"), ("reasoning_effort", "reasoning_effort"),
                    ("interpreter", "interpreter"))
 
@@ -774,6 +775,7 @@ _JOB_DETAIL_LINES = (
     ("script", "  Script: {}"),
     ("monitor_script", "  Monitor: {} (agent runs only on output change)"),
     ("monitor_url", "  Monitor: {} (agent runs only on output change)"),
+    ("monitor_quiet_empty", "  Monitor quiet on empty: on (empty output never wakes the agent)"),
     ("no_agent", "  Mode: no-agent (script stdout delivered directly)"),
     ("continuity", "  Continuity: on (each run sees the previous run's output)"),
     ("workdir", "  Workdir: {}"),
