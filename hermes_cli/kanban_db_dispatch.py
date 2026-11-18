@@ -107,6 +107,8 @@ class DispatchResult:
     :func:`reap_terminal_workers`."""
     spawned: list[tuple[str, str, str]] = field(default_factory=list)
     """``(task_id, assignee, workspace_path)`` triples."""
+    fast_lane_spawned: list[str] = field(default_factory=list)
+    """Ids in ``spawned`` that went through ``kanban.fast_lane``, past the caps."""
     skipped_unassigned: list[str] = field(default_factory=list)
     """Ready task ids with no assignee at all — operator-actionable (usually a
     misfiled task waiting for routing)."""
@@ -1987,6 +1989,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    fast_lane: Optional[_kbcaps.FastLaneSettings] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2009,7 +2012,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
-            reconcile_orphans=reconcile_orphans,
+            reconcile_orphans=reconcile_orphans, fast_lane=fast_lane,
         )
 
     try:
@@ -2381,48 +2384,44 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    fast_lane: Optional[_kbcaps.FastLaneSettings] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
-    :func:`_tick_spawn_budget`."""
+    :func:`_tick_spawn_budget`; ``fast_lane`` cards spawn first, past the caps
+    (:func:`hermes_cli.kanban_db_dispatch_caps.run_fast_lane`)."""
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    # Per-profile cap (#21582): no single profile's local model / API quota /
+    # browser pool is melted by a fan-out. Deferred tasks go to
+    # skipped_per_profile_capped, not skipped_unassigned. Counted BEFORE the
+    # fast lane so its spawns count against the profile in the loops below, and
+    # before the review reservation, which must see the rows the loop refuses.
+    per_profile_cap, per_profile_running = _kbcaps.per_profile_state(conn, max_in_progress_per_profile)
+    lane_kwargs: dict[str, Any] = dict(
+        dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
+        failure_limit=failure_limit, spawn_fn=spawn_fn,
+        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+    )
+    fast_tried = _kbcaps.run_fast_lane(conn, result, fast_lane, lane_kwargs)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
+    spawn_budget = _kbcaps.budget_after_fast_lane(result, spawn_budget, dry_run=dry_run)
+    # The fast lane already spawned or recorded the rows it tried.
+    ready_rows = [r for r in _lane_rows(conn, "ready") if r["id"] not in fast_tried]
     if not may_spawn:
-        result.held_cap = 0 if result.memory_pressure else len(_lane_rows(conn, "ready"))
+        result.held_cap = 0 if result.memory_pressure else len(ready_rows)
         return result
 
-    ready_rows = _lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
     review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
-    # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
-    # skipped_unassigned — "busy, retry later" differs from "needs routing".
-    # Resolved BEFORE the review reservation so the reservation can see which
-    # review rows the lane loop would refuse this tick.
-    per_profile_cap = max_in_progress_per_profile if (
-        # Per-profile concurrency cap (#21582): when set, track how many workers each assignee already has
-        # in flight, and refuse to spawn when this would push that assignee past the cap. Prevents fan-out
-        # workloads from melting a single profile's local model / API quota / browser pool while leaving
-        # other profiles idle.
-        isinstance(max_in_progress_per_profile, int)
-        and max_in_progress_per_profile > 0
-    ) else None
-    per_profile_running: dict[str, int] = {}
-    if per_profile_cap is not None:
-        for prow in conn.execute(
-            "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
-            "GROUP BY assignee"
-        ):
-            per_profile_running[prow["assignee"]] = int(prow["n"])
     # Review-lane reservation: the ready loop runs first and would otherwise
     # consume the ENTIRE shared budget, starving reviews under a sustained ready
     # backlog. When spawnable review work exists and there is any budget, hold
@@ -2433,11 +2432,6 @@ def _dispatch_once_locked(
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     ):
         ready_budget = max(spawn_budget - 1, 0)
-    lane_kwargs: dict[str, Any] = dict(
-        dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
-        failure_limit=failure_limit, spawn_fn=spawn_fn,
-        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
-    )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
     for index, row in enumerate(ready_rows):
@@ -2939,6 +2933,7 @@ def run_daemon(
 # module is fully populated before ``kanban_db`` imports from it.
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
+from hermes_cli import kanban_db_dispatch_caps as _kbcaps
 from hermes_cli import kanban_db_health as _kbh
 from hermes_cli import kanban_db_idle as _kbi
 from hermes_cli import kanban_db_provider_breaker as _kbpb

@@ -11,11 +11,14 @@ import contextlib
 import os
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
+
+if TYPE_CHECKING:
+    from hermes_cli.kanban_db_dispatch_caps import FastLaneSettings
 
 
 def _kbc():
@@ -42,6 +45,7 @@ class _DispatcherSettings:
     reconcile_orphans: bool
     default_assignee: Optional[str]
     max_in_progress_per_profile: Optional[int]
+    fast_lane: Optional[FastLaneSettings] = None  # None = no fast lane
 
 
 def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettings:
@@ -102,6 +106,13 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         logger.info("kanban dispatcher: default_assignee=%r (unassigned ready tasks "
                     "will route to this profile)", default_assignee)
 
+    # Cards made by these creators (e.g. email reply drafts) spawn past the caps.
+    from hermes_cli.kanban_db_dispatch_caps import parse_fast_lane
+    fast_lane = parse_fast_lane(kanban_cfg.get("fast_lane"))
+    if fast_lane is not None:
+        logger.info("kanban dispatcher: fast_lane created_by=%s max_running=%d",
+                    list(fast_lane.created_by), fast_lane.max_running)
+
     return _DispatcherSettings(
         interval=interval,
         max_spawn=max_spawn,
@@ -115,6 +126,7 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         # Per-profile concurrency cap: no single profile's local model / API
         # quota / browser pool gets overwhelmed by a fan-out.
         max_in_progress_per_profile=_positive_int_setting(kanban_cfg, "max_in_progress_per_profile"),
+        fast_lane=fast_lane,
     )
 
 
@@ -183,7 +195,8 @@ class _KanbanDispatcher:
         fingerprint = self.board_db_fingerprint(slug)
         if not self._quarantine_lifted(slug, fingerprint):
             return None
-        kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+        # fields(), not asdict(): asdict() would turn the nested fast_lane settings into a dict.
+        kwargs = {f.name: getattr(self.settings, f.name) for f in fields(self.settings) if f.name != "interval"}
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
@@ -335,11 +348,12 @@ def _log_spawn_results(results: Optional[list]) -> bool:
             # Quiet by default: an idle gateway stays silent.
             logger.info(
                 "kanban dispatcher [%s]: spawned=%d reclaimed=%d "
-                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d fast_lane=%d",
                 slug, len(res.spawned), res.reclaimed,
                 len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                 len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                 res.promoted,
                 len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                len(getattr(res, "fast_lane_spawned", None) or ()),
             )
     return any_spawned

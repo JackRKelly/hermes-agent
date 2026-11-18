@@ -1896,9 +1896,6 @@ DEFAULT_CONFIG = {
         # Assignee when the orchestrator can't match one to an installed profile; "" = default
         # profile. A task never ends up with assignee=None.
         "default_assignee": "",
-        # Global cap: positive int = the HOST never has more than N tasks 'running' across all
-        # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where
-        # MemTotal is unreadable (macOS/Windows) None means no cap.
         # Global concurrency cap (#33488): when set to a positive int, the HOST never has more than N tasks
         # in 'running' at once — counted across every active board and across both the ready and review
         # dispatch lanes (workers are OS processes sharing one machine's memory, so the cap bounds the
@@ -1909,11 +1906,12 @@ DEFAULT_CONFIG = {
         "max_in_progress": None,
         # Per-profile cap: positive int = no single profile runs more than N workers even if the
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
-        # when fan-out would saturate one profile's model/API quota/browser pool.
-        # Unset (None) means "no per-profile cap" — backward-compatible with existing installs. Useful for
-        # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
-        # pool while leaving other profiles idle. See #21582.
+        # when fan-out would saturate one profile's model/API quota/browser pool (#21582).
         "max_in_progress_per_profile": None,
+        # Fast lane: ready cards whose created_by is listed (e.g. email reply drafts) spawn past
+        # max_in_progress / max_spawn / the per-profile cap, at most max_running at once on the
+        # board. Keyed on creator, never priority. Memory pressure still applies. [] = off.
+        "fast_lane": {"created_by": [], "max_running": 2},
         # Provider breaker and opt-in idle reclaim (0 = off): see the kanban docs, "Provider breaker".
         "provider_breaker": {"failures": 3, "window_seconds": 300, "probe_seconds": 90, "max_probe_wait_seconds": 1800},
         "idle_reclaim_minutes": 0, "idle_reclaim_grace_minutes": 5,
