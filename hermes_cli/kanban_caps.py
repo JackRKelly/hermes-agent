@@ -336,6 +336,29 @@ def _parse_profile_pairs(pairs: Optional[list[str]]) -> dict[str, int]:
     return out
 
 
+def _dispatcher_kanban_section(live: Optional[Mapping[str, Any]]) -> tuple[Path, Optional[dict[str, Any]]]:
+    """The config.yaml the dispatcher reads and its ``kanban`` section.
+
+    A dashboard or ``hermes -p other kanban caps`` can resolve a different profile than the
+    gateway dispatcher; comparing the live record with that profile's file would show a
+    permanent "pending" state. So when the live record names another file, read that one.
+    """
+    from hermes_cli.config import get_config_path
+    from hermes_cli.config_backend import ConfigBackendUnavailable, read_config_doc_readonly
+
+    own = get_config_path()
+    recorded = (live or {}).get("config_path")
+    if not recorded or Path(recorded).resolve() == own.resolve():
+        return own, read_kanban_section()
+    try:
+        doc = read_config_doc_readonly(recorded) or {}
+    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- logged; summary shows no config
+        logger.warning("kanban caps: cannot read the dispatcher's config %s", recorded, exc_info=True)
+        return Path(recorded), None
+    section = doc.get("kanban") if isinstance(doc, Mapping) else None
+    return Path(recorded), dict(section) if isinstance(section, Mapping) else {}
+
+
 def caps_summary() -> dict[str, Any]:
     """Configured caps next to the dispatcher's live record (no board reads; the dashboard uses it).
 
@@ -343,12 +366,12 @@ def caps_summary() -> dict[str, Any]:
     tick, or when config.yaml holds caps the dispatcher refused (``config_errors``).
     """
     from hermes_cli import kanban_db_dispatch as kbd
-    from hermes_cli.config import get_config_path
 
-    caps, errors = parse_caps(read_kanban_section() or {})
     live = read_live_caps()
+    config_path, section = _dispatcher_kanban_section(live)
+    caps, errors = parse_caps(section or {})
     return {
-        "config_path": str(get_config_path()),
+        "config_path": str(config_path),
         "configured": caps.as_dict() if caps else None,
         "config_errors": errors,
         "effective_total": kbd.resolve_max_in_progress(caps.total) if caps else None,
@@ -406,7 +429,9 @@ def cmd_caps(args: argparse.Namespace) -> int:
     edits = {"total": args.total, "per_profile": args.per_profile,
              "set_profiles": _parse_profile_pairs(args.profile),
              "clear_profiles": tuple(args.clear_profile or ())}
-    if all(not v for v in edits.values()):
+    # `is None`/empty, not falsiness: `--total 0` is an edit that validation must refuse
+    # as "outside 1..32", not "nothing to set".
+    if all(v is None or v in ({}, ()) for v in edits.values()):
         raise ValueError("nothing to set: pass --total, --per-profile, --profile NAME=N or --clear-profile NAME")
     _refuse_other_profile_config()
     caps, backup = save_caps(**edits)

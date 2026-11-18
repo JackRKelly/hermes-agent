@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli import kanban as kanban_cli
 from hermes_cli import kanban_caps
@@ -54,6 +54,26 @@ def test_set_rejects_invalid_caps(home, capsys):
     assert _run("caps", "set", "--per-profile", "11") != 0
     assert "above max_in_progress=10" in capsys.readouterr().err
     assert yaml.safe_load(get_config_path().read_text())["kanban"] == {"max_in_progress": 10}
+
+
+def test_set_zero_is_refused_as_out_of_range_not_as_empty(home, capsys):
+    assert _run("caps", "set", "--total", "0") != 0
+    err = capsys.readouterr().err
+    assert "nothing to set" not in err and "1..32" in err
+    assert yaml.safe_load(get_config_path().read_text())["kanban"] == {"max_in_progress": 10}
+
+
+def test_summary_compares_against_the_dispatchers_config(home, tmp_path):
+    """A caller on another profile still sees in_sync against the file the dispatcher reads."""
+    dispatcher_cfg = tmp_path / "dispatcher" / "config.yaml"
+    dispatcher_cfg.parent.mkdir()
+    dispatcher_cfg.write_text("kanban:\n  max_in_progress: 14\n  max_in_progress_per_profile: 7\n", encoding="utf-8")
+    kanban_caps.write_live_caps(kanban_caps.KanbanCaps(total=14, per_profile=7), effective_total=14,
+                                config_path=dispatcher_cfg)
+    summary = kanban_caps.caps_summary()
+    assert summary["config_path"] == str(dispatcher_cfg)
+    assert summary["configured"]["total"] == 14
+    assert summary["in_sync"] is True
 
 
 def test_set_refuses_a_config_the_dispatcher_does_not_read(home, tmp_path, capsys):
