@@ -4047,6 +4047,7 @@ export interface CronJobRow {
   prompt_preview?: string
   model?: string | null
   provider?: string | null
+  pinned?: boolean
   base_url?: string | null
   schedule?: string
   repeat?: number | string | null
@@ -4067,7 +4068,9 @@ export interface CronJobRow {
   reasoning_effort?: string | null
   monitor_script?: string | null
   monitor_url?: string | null
+  monitor_quiet_empty?: boolean | null
   monitor_state?: unknown | null
+  interpreter?: string | null
   no_agent?: boolean | null
   enabled_toolsets?: string[] | null
   continuity?: boolean | null

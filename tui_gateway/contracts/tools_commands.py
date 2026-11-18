@@ -465,6 +465,7 @@ class CronJobRow(_Open):
     prompt_preview: str = ""
     model: str | None = None
     provider: str | None = None
+    pinned: bool = False  # the job keeps its own ``model``; unpinned jobs follow ``cron.model``
     base_url: str | None = None
     schedule: str = "?"
     repeat: int | str | None = None
@@ -485,7 +486,9 @@ class CronJobRow(_Open):
     reasoning_effort: str | None = None
     monitor_script: str | None = None
     monitor_url: str | None = None
+    monitor_quiet_empty: bool | None = None  # output turning empty is recorded but does not wake the agent
     monitor_state: JsonValue | None = None
+    interpreter: str | None = None  # Python that runs a ``.py`` script/monitor_script
     no_agent: bool | None = None
     enabled_toolsets: list[str] | None = None
     continuity: bool | None = None
