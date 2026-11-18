@@ -30,6 +30,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_caps import cmd_caps
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
 )
@@ -1376,7 +1377,7 @@ _HANDLERS = {
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
-    "gc": _cmd_gc,
+    "gc": _cmd_gc, "caps": cmd_caps,
 }
 
 
@@ -1461,6 +1462,9 @@ def run_slash(rest: str) -> str:
         return f"⚠ /kanban usage error\n{body}" if body else "⚠ /kanban usage error"
     except argparse.ArgumentError as exc:
         return f"⚠ /kanban usage error\n{_usage_for_error()}\n{exc}"
+    # Chat surfaces may read the caps; changing config.yaml stays a terminal action, like `hermes config set`.
+    if getattr(args, "kanban_action", None) == "caps" and getattr(args, "caps_action", None) == "set":
+        return "⚠ /kanban caps set is terminal-only: run `hermes kanban caps set ...` on the host"
 
     with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
         try:

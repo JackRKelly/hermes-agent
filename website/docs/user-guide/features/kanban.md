@@ -1021,6 +1021,7 @@ All commands are also available as a slash command in the interactive CLI and in
 |------------|---------|--------------|
 | `kanban.max_in_progress` | unset (unlimited) | Caps the number of simultaneously running tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited. |
 | `kanban.max_in_progress_per_profile` | unset (unlimited) | Per-profile variant of `max_in_progress` — caps how many tasks any single assignee profile may run concurrently. Useful when one profile is slow or rate-limited but others should keep flowing. Applies alongside the board-wide `max_in_progress`; both must allow a spawn for it to proceed. |
+| `kanban.max_in_progress_by_profile` | `{}` | Per-lane overrides of `max_in_progress_per_profile`, as `{profile: N}` — e.g. a builder lane at 7 while every other profile stays at the default 4. |
 | `kanban.dispatch_profiles` | unset (any existing profile) | Per-home claim allowlist for boards shared across Hermes homes. When the key is present, this home's dispatcher only claims cards whose assignee is listed — fail-closed: an empty list, `null` or a bare `dispatch_profiles:` claims nothing, and a config read that fails logs a warning and claims nothing; other assignees land in `skipped_nonspawnable`. Only omitting the key means "any existing profile". `hermes kanban diagnostics` prints the resolved value for this home (`any`, the listed names, or `none (fail-closed: …)`). See [Shared boards across homes](#shared-boards-across-homes). |
 | `kanban.auto_promote_children` | `true` | After `decompose_triage_task()` produces children with no parent-blocker dependencies, they're automatically promoted to `ready` so the dispatcher can pick them up. Set to `false` to require manual review — children stay in `todo` until you promote them. |
 | `kanban.default_workdir` | unset | Board-level default working directory applied to new tasks when neither `--workspace` nor the task itself overrides it. Per-task `workspace:` still wins. |
@@ -1031,6 +1032,18 @@ kanban:
   auto_promote_children: false
   default_workdir: ~/work/active-project
 ```
+
+#### Changing concurrency live (no restart)
+
+The gateway dispatcher re-reads the three caps (`max_in_progress`, `max_in_progress_per_profile`, `max_in_progress_by_profile`) before every tick, so a change applies within one `dispatch_interval_seconds` with no gateway restart. The other `kanban.*` keys are still read at gateway start.
+
+```bash
+hermes kanban caps                                   # configured vs live caps, running/ready per lane
+hermes kanban caps set --total 14 --per-profile 7    # validated, backed up, applied on the next tick
+hermes kanban caps set --profile builder=7           # per-lane override; --clear-profile builder drops it
+```
+
+`caps set` checks the whole set before writing: every value an integer in 1..32, per-profile caps at most the total. It saves a backup to `backups/config/config.yaml.kanban-caps.*` and writes `config.yaml` atomically, keeping your comments. A hand edit of `config.yaml` works the same way. If the edit is invalid, the dispatcher logs one warning (`ignoring invalid caps in config.yaml (...)`) and keeps the caps it has. When a change applies, the gateway log shows `kanban dispatcher: caps changed 10/5 -> 14/7 (applied live, no restart)`. Lowering a cap never stops running workers: the dispatcher just starts nothing new until the running count drops below it. The caps in force are recorded in `<kanban root>/kanban/dispatcher_caps.json`. `hermes kanban caps` and the dashboard's In Progress header read that file, and the badge turns amber while `config.yaml` holds a change that has not applied yet. `/kanban caps` works in chat, but `caps set` only runs in a terminal.
 
 ### Scheduled task starts (`scheduled_at`)
 

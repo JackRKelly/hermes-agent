@@ -394,6 +394,20 @@ _SPECS = [
         _arg("--interval", type=float, default=0.5, help="Poll interval in seconds (default: 0.5)"),
     ], help="Live-stream task_events to the terminal (Ctrl+C to exit)"),
     _cmd("stats", [_json_flag()], help="Per-status + per-assignee counts + oldest-ready age"),
+    _cmd("caps", [_json_flag()], children=("caps_action", [
+        _cmd("show", [_json_flag()], help="Show configured and live caps (the default)"),
+        _cmd("set", [
+            _arg("--total", type=int, metavar="N", help="kanban.max_in_progress: host-wide running workers"),
+            _arg("--per-profile", type=int, metavar="N",
+                 help="kanban.max_in_progress_per_profile: running workers per assignee profile"),
+            _arg("--profile", action="append", metavar="NAME=N",
+                 help="Per-lane override (kanban.max_in_progress_by_profile); repeatable"),
+            _arg("--clear-profile", action="append", metavar="NAME", help="Drop a per-lane override; repeatable"),
+        ], help="Change caps in config.yaml (validated, backed up); applies on the next tick"),
+    ]), help="Show or change worker concurrency caps live, no gateway restart",
+         description="Concurrency caps (kanban.max_in_progress, kanban.max_in_progress_per_profile, "
+                     "kanban.max_in_progress_by_profile) are re-read by the gateway dispatcher every "
+                     "tick. Values must be integers in 1..32 and per-profile caps at most the total."),
     _cmd("health", [_json_flag(),
                     _arg("--probe", metavar="PROVIDER", help="Half-open PROVIDER's breaker: one probe on the next tick"),
                     _arg("--reset", metavar="PROVIDER", help="Close PROVIDER's breaker: its cards spawn again")],

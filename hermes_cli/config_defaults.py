@@ -1914,6 +1914,10 @@ DEFAULT_CONFIG = {
         # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
         # pool while leaving other profiles idle. See #21582.
         "max_in_progress_per_profile": None,
+        # Per-lane overrides of max_in_progress_per_profile, {profile: N} (e.g. a builder lane at 7
+        # while others stay at 4). The three caps apply live on the dispatcher's next tick, no
+        # restart; change them with `hermes kanban caps set` (validated: 1..32, <= the total).
+        "max_in_progress_by_profile": {},
         # Provider breaker and opt-in idle reclaim (0 = off): see the kanban docs, "Provider breaker".
         "provider_breaker": {"failures": 3, "window_seconds": 300, "probe_seconds": 90, "max_probe_wait_seconds": 1800},
         "idle_reclaim_minutes": 0, "idle_reclaim_grace_minutes": 5,
