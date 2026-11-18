@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
@@ -30,6 +31,10 @@ def kanban_home(tmp_path, monkeypatch, all_assignees_spawnable):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # The test process is the email monitor, outside the worker fleet, even when the suite itself
+    # runs inside a dispatched worker.
+    for key in ("HERMES_KANBAN_TASK", DELEGATED_CHILD_ENV_MARKER):
+        monkeypatch.delenv(key, raising=False)
     kb.init_db()
     return home
 
@@ -197,6 +202,74 @@ def test_dry_run_counts_fast_lane_spawns_against_the_budget(kanban_home):
     # 3 slots - 1 running build - 1 draft = 1 build, the same as a real tick would spawn.
     assert res.fast_lane_spawned == [draft]
     assert len(res.spawned) == 2
+
+
+def _cli_draft(monkeypatch, capsys, env: dict[str, str]) -> str:
+    """A ``created_by=email-monitor`` card made the way anyone can: ``hermes kanban create``."""
+    import argparse
+    import json
+
+    from hermes_cli.kanban import kanban_command
+    from hermes_cli.kanban_parser import build_parser
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers())
+    with monkeypatch.context() as m:
+        for key, value in env.items():
+            m.setenv(key, value)
+        argv = ["kanban", "create", "reply draft", "--assignee", "drafter", "--created-by", "email-monitor", "--json"]
+        assert kanban_command(parser.parse_args(argv)) == 0
+    return json.loads(capsys.readouterr().out)["id"]
+
+
+def _api_draft(monkeypatch, env: dict[str, str]) -> str:
+    """The same card from a script calling the board API directly (no ``creator_task_id``)."""
+    with monkeypatch.context() as m:
+        for key, value in env.items():
+            m.setenv(key, value)
+        with kbc.connect() as conn:
+            return _draft(conn)
+
+
+@pytest.mark.parametrize("surface", ["cli", "api"])
+def test_creator_forged_inside_a_worker_gets_no_fast_lane(kanban_home, spawns, spawn_fn,
+                                                          monkeypatch, capsys, surface):
+    with kbc.connect() as conn:
+        _running_builds(conn, 3)
+        worker = kb.create_task(conn, title="worker", assignee="builder")
+    env = {"HERMES_KANBAN_TASK": worker}
+    forged = _cli_draft(monkeypatch, capsys, env) if surface == "cli" else _api_draft(monkeypatch, env)
+    real = _cli_draft(monkeypatch, capsys, {})
+    with kbc.connect() as conn:
+        res = kbd.dispatch_once(conn, spawn_fn=spawn_fn, max_in_progress=3, fast_lane=DRAFTS)
+        assert _status(conn, forged) == "ready"
+    assert res.fast_lane_spawned == [real]
+    assert spawns == [real]
+
+
+def test_forged_running_card_does_not_hold_a_fast_lane_slot(kanban_home, spawns, spawn_fn, monkeypatch, capsys):
+    lane = FastLaneSettings(created_by=("email-monitor",), max_running=1)
+    with kbc.connect() as conn:
+        worker = kb.create_task(conn, title="worker", assignee="builder")
+    forged = _cli_draft(monkeypatch, capsys, {"HERMES_KANBAN_TASK": worker})
+    with kbc.connect() as conn:
+        assert kb.claim_task(conn, forged) is not None  # e.g. spawned by the normal loop
+        draft = _draft(conn)
+        res = kbd.dispatch_once(conn, spawn_fn=spawn_fn, max_in_progress=2, fast_lane=lane)
+    assert res.fast_lane_spawned == [draft]
+
+
+def test_elevated_pressure_with_full_caps_still_reports_the_cap_hold(kanban_home, spawns, spawn_fn, monkeypatch):
+    _pressure(monkeypatch, "elevated")
+    with kbc.connect() as conn:
+        _running_builds(conn, 3)
+        draft = _draft(conn)
+        kb.create_task(conn, title="next build", assignee="builder", priority=300)
+        res = kbd.dispatch_once(conn, spawn_fn=spawn_fn, max_in_progress=3, fast_lane=DRAFTS)
+    assert res.fast_lane_spawned == [draft]
+    # The cap, not memory, holds the build: the same counts as a tick without the lane.
+    assert res.memory_pressure is None
+    assert res.held_cap == 1
 
 
 def test_health_snapshot_counts_fast_lane_spawns(kanban_home, spawn_fn):

@@ -5,6 +5,23 @@ import sqlite3
 import time
 from typing import Any, Optional
 
+def created_in_worker_lineage(creator_task_id: Optional[str]) -> Optional[bool]:
+    """``True`` when the card is created from inside a dispatched worker's process tree.
+
+    Stored on the ``created`` event as ``worker_lineage`` so a card cannot claim a trusted
+    creator (``kanban.fast_lane``) from inside the worker fleet: ``created_by`` is free text, and
+    ``creator_task_id`` is only set by the CLI and the kanban tools, while a script in a worker's
+    terminal can call ``create_task`` directly. Every process the worker spawns inherits
+    ``HERMES_KANBAN_TASK``. (``delegate_task`` children need no check: ``write_txn`` refuses them.)
+    ``None`` otherwise. This does not stop a worker that strips its own environment or writes the
+    board's SQLite directly; no check stored in the board can, and such a worker can already
+    rewrite any card's status or claim.
+    """
+    import os
+
+    return True if creator_task_id or (os.environ.get("HERMES_KANBAN_TASK") or "").strip() else None
+
+
 def inherit_creator_origin(
     conn: sqlite3.Connection, task_id: str, creator_task_id: Optional[str], *,
     created_at: int,

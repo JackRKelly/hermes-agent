@@ -2408,13 +2408,13 @@ def _dispatch_once_locked(
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     )
-    fast_tried = _kbcaps.run_fast_lane(conn, result, fast_lane, lane_kwargs)
+    fast = _kbcaps.run_fast_lane(conn, result, fast_lane, lane_kwargs)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
-    spawn_budget = _kbcaps.budget_after_fast_lane(result, spawn_budget, dry_run=dry_run)
+    spawn_budget = _kbcaps.budget_after_fast_lane(result, spawn_budget, fast, dry_run=dry_run)
     # The fast lane already spawned or recorded the rows it tried.
-    ready_rows = [r for r in _lane_rows(conn, "ready") if r["id"] not in fast_tried]
+    ready_rows = [r for r in _lane_rows(conn, "ready") if r["id"] not in fast.tried]
     if not may_spawn:
         result.held_cap = 0 if result.memory_pressure else len(ready_rows)
         return result

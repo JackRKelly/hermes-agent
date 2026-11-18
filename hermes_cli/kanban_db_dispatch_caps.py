@@ -4,9 +4,11 @@ The fast lane (``kanban.fast_lane``) exists for short, latency-bound cards such 
 under the host caps (``max_in_progress``, ``max_in_progress_per_profile``) long builds hold every
 slot for hours, and priority cannot help because builds already sit at the top of the priority
 range. A fast-lane card is chosen by its ``created_by`` (who made it), never by priority, so a
-high-priority build can never use the lane. Its own bound is ``max_running`` concurrent fast-lane
-runs on the board; memory pressure, profile existence, the provider breaker, the respawn guard and
-claim semantics still apply because every spawn goes through ``_dispatch_lane_task``.
+high-priority build can never use the lane, and only when it was created outside the worker fleet,
+so a worker cannot forge that name (:func:`_fast_lane_rows_sql`). Its own bound is
+``max_running`` concurrent fast-lane runs on the board; memory pressure, profile existence, the
+provider breaker, the respawn guard and claim semantics still apply because every spawn goes
+through ``_dispatch_lane_task``.
 """
 
 from __future__ import annotations
@@ -73,51 +75,81 @@ def per_profile_state(conn: sqlite3.Connection, cap: Optional[int]) -> tuple[Opt
     return cap, running
 
 
+def _fast_lane_rows_sql(settings: FastLaneSettings) -> str:
+    """``WHERE`` clause (on ``tasks t``) for the cards the lane trusts; bind ``settings.created_by``.
+
+    ``created_by`` is free text (``hermes kanban create --created-by``), so the creator name alone
+    would let any worker forge a fast-lane card. A card is trusted only when its ``created`` event
+    shows it was made outside the worker fleet: no ``creator_task_id`` (set by the CLI and the
+    kanban tools inside a dispatched worker) and no ``worker_lineage`` (set for any create from a
+    worker's process tree, see ``kanban_db_graph.created_in_worker_lineage``). A card with no
+    readable ``created`` event is not trusted. The same clause bounds ``max_running``, so a forged
+    card that the normal loop spawned never holds a fast-lane slot.
+    """
+    marks = ",".join("?" for _ in settings.created_by)
+    return (
+        f"t.created_by IN ({marks}) AND EXISTS (SELECT 1 FROM task_events e "
+        "WHERE e.task_id = t.id AND e.kind = 'created' AND json_valid(e.payload) "
+        "AND json_extract(e.payload, '$.creator_task_id') IS NULL "
+        "AND json_extract(e.payload, '$.worker_lineage') IS NULL)"
+    )
+
+
+@dataclass(frozen=True)
+class FastLaneOutcome:
+    """What :func:`run_fast_lane` did this tick."""
+
+    tried: frozenset[str] = frozenset()
+    """Ids spawned or refused; the normal ready loop must skip them (already recorded)."""
+    pressure: Optional[str] = None
+    """The memory pressure level that limited the lane (``critical``/``elevated``), if any.
+
+    Kept off ``result.memory_pressure`` on purpose: the tick's own cap check owns that field, and
+    ``held_cap`` reads it to decide whether the cap or memory held the ready rows.
+    """
+
+
 def run_fast_lane(
     conn: sqlite3.Connection,
     result: DispatchResult,
     settings: Optional[FastLaneSettings],
     lane_kwargs: dict[str, Any],
-) -> frozenset[str]:
-    """Spawn ready fast-lane cards ahead of, and beyond, the normal caps; returns the ids tried.
+) -> FastLaneOutcome:
+    """Spawn ready fast-lane cards ahead of, and beyond, the normal caps.
 
     Runs before the cap check so a full host still admits a reply draft. Ignores
     ``max_in_progress``, ``max_spawn`` and ``max_in_progress_per_profile`` (passes no per-profile
-    cap), and is bounded by ``settings.max_running`` running fast-lane cards on this board. Critical
-    memory pressure spawns nothing; elevated allows one spawn. Each spawn bumps
+    cap), and is bounded by ``settings.max_running`` running fast-lane cards on this board. Only
+    cards created outside the worker fleet qualify (:func:`_fast_lane_rows_sql`). Critical memory
+    pressure spawns nothing; elevated allows one spawn. Each spawn bumps
     ``lane_kwargs["per_profile_running"]`` so the normal ready loop counts it against the profile.
 
-    The returned ids (spawned or refused) must be left out of this tick's normal ready loop: a
-    refused card is already recorded on ``result`` (respawn guard, provider pause, missing profile)
-    and would otherwise be recorded twice. Unassigned cards are not tried; the normal loop applies
-    ``kanban.default_assignee`` to them.
+    Unassigned cards are not tried; the normal loop applies ``kanban.default_assignee`` to them.
     """
     if settings is None:
-        return frozenset()
+        return FastLaneOutcome()
     from hermes_cli import kanban_db_dispatch as kbd
 
-    marks = ",".join("?" for _ in settings.created_by)
+    trusted = _fast_lane_rows_sql(settings)
     rows = conn.execute(
-        "SELECT id, assignee FROM tasks WHERE status = 'ready' AND claim_lock IS NULL "
-        f"AND assignee IS NOT NULL AND assignee != '' AND created_by IN ({marks}) "
-        "ORDER BY priority DESC, created_at ASC",
+        "SELECT t.id, t.assignee FROM tasks t WHERE t.status = 'ready' AND t.claim_lock IS NULL "
+        f"AND t.assignee IS NOT NULL AND t.assignee != '' AND {trusted} "
+        "ORDER BY t.priority DESC, t.created_at ASC",
         settings.created_by,
     ).fetchall()
     if not rows:
-        return frozenset()
+        return FastLaneOutcome()
     running = int(conn.execute(
-        f"SELECT COUNT(*) FROM tasks WHERE status = 'running' AND created_by IN ({marks})",
-        settings.created_by,
+        f"SELECT COUNT(*) FROM tasks t WHERE t.status = 'running' AND {trusted}", settings.created_by,
     ).fetchone()[0])
     if running >= settings.max_running:
-        return frozenset()
+        return FastLaneOutcome()
     pressure = kbd._memory_pressure_level()
     if pressure == "critical":
-        result.memory_pressure = pressure
-        return frozenset()
+        kbd._kb._log.warning(
+            "kanban dispatch: memory pressure is critical; %d fast-lane card(s) wait", len(rows))
+        return FastLaneOutcome(pressure=pressure)
     pressure_limit = 1 if pressure == "elevated" else None
-    if pressure_limit is not None:
-        result.memory_pressure = pressure
 
     per_profile_running: dict[str, int] = lane_kwargs["per_profile_running"]
     kwargs = {**lane_kwargs, "per_profile_cap": None}
@@ -132,20 +164,23 @@ def run_fast_lane(
         if kbd._dispatch_lane_task(conn, row, row["assignee"], result, lane="ready", **kwargs):
             result.fast_lane_spawned.append(row["id"])
             per_profile_running[row["assignee"]] = per_profile_running.get(row["assignee"], 0) + 1
-    return frozenset(tried)
+    return FastLaneOutcome(tried=frozenset(tried), pressure=pressure if pressure_limit else None)
 
 
-def budget_after_fast_lane(result: DispatchResult, spawn_budget: Optional[int], *, dry_run: bool) -> Optional[int]:
+def budget_after_fast_lane(
+    result: DispatchResult, spawn_budget: Optional[int], lane: FastLaneOutcome, *, dry_run: bool,
+) -> Optional[int]:
     """The normal lanes' spawn budget once this tick's fast-lane spawns are counted.
 
     A real fast-lane spawn is already ``running`` in the DB when the caps are counted, so the
     budget needs no change; a ``dry_run`` spawn claims nothing, so it is subtracted here. Under
-    elevated memory pressure the tick allows one new worker in total, so a fast-lane spawn uses it.
+    elevated memory pressure the tick allows one new worker in total, so a fast-lane spawn uses it
+    (the lane's own reading counts, in case the cap check's later sample disagrees).
     """
     spawned = len(result.fast_lane_spawned)
     if not spawned:
         return spawn_budget
-    if result.memory_pressure == "elevated":
+    if lane.pressure == "elevated" or result.memory_pressure == "elevated":
         return 0
     if dry_run and spawn_budget is not None:
         return max(spawn_budget - spawned, 0)
