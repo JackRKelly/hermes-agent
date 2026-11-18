@@ -16,6 +16,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
+from hermes_cli.kanban_db_dispatch_caps import parse_fast_lane
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
 
@@ -59,7 +60,7 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     # Honour kanban.default_assignee, kanban.max_in_progress,
-    # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
+    # kanban.max_in_progress_per_profile, kanban.fast_lane and kanban.max_spawn with the same
     # semantics as the gateway dispatch path.
     try:
         from hermes_cli.config import load_config
@@ -78,8 +79,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_spawn = (
             cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
         )
+        fast_lane = parse_fast_lane(_kanban_cfg.get("fast_lane"))
     except Exception:
-        default_assignee = max_in_progress_per_profile = max_in_progress = None
+        default_assignee = max_in_progress_per_profile = max_in_progress = fast_lane = None
         max_spawn = getattr(args, "max", None)
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
@@ -90,6 +92,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            fast_lane=fast_lane,
         )
     if getattr(args, "json", False):
         _print_json({
@@ -99,6 +102,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "spawned": [
                 {"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned
             ],
+            "fast_lane_spawned": res.fast_lane_spawned,
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
             "skipped_per_profile_capped": [
@@ -132,6 +136,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     tag = " (dry)" if args.dry_run else ""
     for tid, who, ws in res.spawned:
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
+    if res.fast_lane_spawned:
+        print(f"Fast lane (past the caps): {', '.join(res.fast_lane_spawned)}")
     if res.auto_assigned_default:
         print(
             f"Auto-assigned to kanban.default_assignee={default_assignee!r}: "

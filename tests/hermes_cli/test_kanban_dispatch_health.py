@@ -23,7 +23,7 @@ from hermes_cli import kanban_db_provider_breaker as kbpb
 TOP = {"schema", "generated_at", "providers", "dispatch", "idle", "failure_rate"}
 PROVIDER = {"provider", "state", "reason", "message", "reset_at", "opened_at", "trip_id", "failures_window",
             "profiles", "next_probe_at"}
-DISPATCH = {"ready_spawnable", "bad_ticks", "last_spawn_at", "held_back"}
+DISPATCH = {"ready_spawnable", "bad_ticks", "last_spawn_at", "held_back", "fast_lane_spawned"}
 HELD = {"cap", "per_profile_cap", "active_pr", "provider_paused", "rate_limit_cooldown", "blocker_auth", "other"}
 FAILURE = {"profile", "window_seconds", "runs", "failed", "rate_limited", "auth"}
 
