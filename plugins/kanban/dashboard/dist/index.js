@@ -771,6 +771,22 @@
     const wsBackoffRef = useRef(1000);
     const wsClosedRef = useRef(false);
 
+    // --- worker concurrency caps ---------------------------------------------
+    // The dispatcher re-reads them every tick, so poll: a `hermes kanban caps set`
+    // shows in the In Progress header without a page reload.
+    const [caps, setCaps] = useState(null);
+    useEffect(function () {
+      let alive = true;
+      function loadCaps() {
+        SDK.fetchJSON(`${API}/caps`)
+          .then(function (c) { if (alive) setCaps(c); })
+          .catch(function () { if (alive) setCaps(null); });
+      }
+      loadCaps();
+      const timer = setInterval(loadCaps, CAPS_POLL_MS);
+      return function () { alive = false; clearInterval(timer); };
+    }, []);
+
     // --- load config once ---------------------------------------------------
     useEffect(function () {
       SDK.fetchJSON(withBoard(`${API}/config`, board))
@@ -1436,6 +1452,7 @@
           board: filteredBoard,
           boardMeta: boardList.find(function (item) { return item.slug === board; }) || null,
           laneByProfile,
+          caps,
           selectedIds,
           failedIds,
           draggingTaskId,
@@ -3020,6 +3037,7 @@
           column: col,
           boardMeta: props.boardMeta,
           laneByProfile: props.laneByProfile,
+          caps: props.caps,
           selectedIds: props.selectedIds,
           failedIds: props.failedIds,
           draggingTaskId: props.draggingTaskId,
@@ -3040,6 +3058,50 @@
         onDeleteSelected: props.onDeleteSelected,
       }),
     );
+  }
+
+  const CAPS_POLL_MS = 30000;
+
+  // Badge text and tooltip for the live worker caps: what the dispatcher enforces
+  // (its own record), flagged when config.yaml holds a change not applied yet.
+  function capsBadgeView(caps) {
+    const live = caps && (caps.live || caps.configured);
+    if (!live) return null;
+    const effective = live.effective_total != null ? live.effective_total : caps.effective_total;
+    const total = live.total != null ? String(live.total)
+      : (effective != null ? `${effective} (auto)` : "none");
+    const overrides = Object.entries(live.by_profile || {})
+      .map(function (pair) { return `${pair[0]}=${pair[1]}`; }).join(", ");
+    const lines = [
+      // `live` is null both before the first record and when the record's dispatcher is gone
+      // (`live_state: "stale"`): either way nothing proves these caps are enforced.
+      `Worker caps ${caps.live ? "applied by the dispatcher" : "in config.yaml (no live dispatcher record)"}:`,
+      `total ${total} running host-wide`,
+      `per profile ${live.per_profile != null ? live.per_profile : "none"}`,
+    ];
+    if (overrides) lines.push(`overrides ${overrides}`);
+    const pending = !!caps.live && !caps.in_sync;
+    if (pending) {
+      lines.push((caps.config_errors || []).length
+        ? `config.yaml has invalid caps, ignored: ${caps.config_errors.join("; ")}`
+        : "config.yaml has a newer change: it applies on the next dispatcher tick");
+    }
+    lines.push("Change with `hermes kanban caps set` (no restart).");
+    return {
+      text: `cap ${total}` + (live.per_profile != null ? ` · ${live.per_profile}/profile` : ""),
+      title: lines.join("\n"),
+      pending: pending,
+    };
+  }
+
+  function CapsBadge(props) {
+    const view = capsBadgeView(props.caps);
+    if (!view) return null;
+    return h("span", {
+      className: cn("hermes-kanban-column-caps", view.pending ? "hermes-kanban-column-caps--pending" : ""),
+      title: view.title,
+      "data-kanban-caps": "",
+    }, view.text);
   }
 
   function Column(props) {
@@ -3128,6 +3190,7 @@
         h("span", { className: "hermes-kanban-column-count",
                     title: `${props.column.tasks.length} task${props.column.tasks.length === 1 ? "" : "s"} in this column` },
           props.column.tasks.length),
+        props.column.name === "running" ? h(CapsBadge, { caps: props.caps }) : null,
         h("button", {
           type: "button",
           className: "hermes-kanban-column-add",

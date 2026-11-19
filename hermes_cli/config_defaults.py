@@ -1908,6 +1908,10 @@ DEFAULT_CONFIG = {
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
         # when fan-out would saturate one profile's model/API quota/browser pool (#21582).
         "max_in_progress_per_profile": None,
+        # Per-lane overrides of max_in_progress_per_profile, {profile: N} (e.g. a builder lane at 7
+        # while others stay at 4). The three caps apply live on the dispatcher's next tick, no
+        # restart; change them with `hermes kanban caps set` (validated: 1..32, <= the total).
+        "max_in_progress_by_profile": {},
         # Fast lane: ready cards whose created_by is listed (e.g. email reply drafts) spawn past
         # max_in_progress / max_spawn / the per-profile cap, at most max_running at once on the
         # board. Keyed on creator, never priority. Memory pressure still applies. [] = off.

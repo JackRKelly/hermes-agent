@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
+    from hermes_cli.kanban_caps import ProfileCapPolicy
     from hermes_cli.kanban_db_dispatch import DispatchResult
 
 # Used when ``kanban.fast_lane.max_running`` is absent or not a positive integer.
@@ -56,14 +57,17 @@ def parse_fast_lane(raw: Any) -> Optional[FastLaneSettings]:
     )
 
 
-def per_profile_state(conn: sqlite3.Connection, cap: Optional[int]) -> tuple[Optional[int], dict[str, int]]:
-    """``(cap, running per assignee)`` for ``kanban.max_in_progress_per_profile`` (#21582).
+def per_profile_state(
+    conn: sqlite3.Connection, cap: ProfileCapPolicy,
+) -> tuple[Optional[ProfileCapPolicy], dict[str, int]]:
+    """``(cap, running per assignee)`` for ``kanban.max_in_progress_per_profile`` and its
+    per-lane overrides ``kanban.max_in_progress_by_profile`` (#21582).
 
-    A cap that is not a positive int means no per-profile cap, and then no counts are read. The
-    counts are read once per tick, before any spawn, and bumped in memory per spawn so later rows
-    in the same tick see this tick's spawns.
+    A policy with no limit for any lane means no per-profile cap: ``None``, and no counts are read.
+    The counts are read once per tick, before any spawn, and bumped in memory per spawn so later
+    rows in the same tick see this tick's spawns.
     """
-    if not (isinstance(cap, int) and cap > 0):
+    if not cap.active:
         return None, {}
     running = {
         row["assignee"]: int(row["n"])
@@ -73,6 +77,28 @@ def per_profile_state(conn: sqlite3.Connection, cap: Optional[int]) -> tuple[Opt
         )
     }
     return cap, running
+
+
+def held_for_profile(conn: sqlite3.Connection, task_id: str, assignee: str, result: DispatchResult, *,
+                     dry_run: bool, per_profile_cap: Optional[ProfileCapPolicy],
+                     per_profile_running: dict[str, int]) -> bool:
+    """Per-profile cap (one profile's local model / API quota / browser pool must not be overwhelmed
+    by a fan-out even with global headroom), then the provider breaker; records the hold.
+
+    ``per_profile_cap`` is ``None`` when no lane has a limit, and for the fast lane, which spawns
+    past the per-profile cap by design.
+    """
+    from hermes_cli import kanban_db_provider_breaker as kbpb
+
+    current = per_profile_running.get(assignee, 0)
+    limit = per_profile_cap.limit(assignee) if per_profile_cap is not None else None
+    if limit is not None and current >= limit:
+        result.skipped_per_profile_capped.append((task_id, assignee, current))
+        return True
+    if kbpb.paused(conn, assignee, note=not dry_run):  # no per-tick event: the breaker row says why
+        result.respawn_guarded.append((task_id, "provider_paused"))
+        return True
+    return False
 
 
 def _fast_lane_rows_sql(settings: FastLaneSettings) -> str:

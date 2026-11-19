@@ -1190,6 +1190,17 @@ def get_config():
         "render_markdown": bool(k_cfg.get("render_markdown", True))}
 
 
+@router.get("/caps")
+def get_caps():
+    """Worker concurrency caps, configured and live, for the In Progress column header.
+
+    Read-only: caps change with `hermes kanban caps set` (or config.yaml) and the gateway dispatcher
+    applies them on its next tick. The page polls this, so a live change shows up without a reload.
+    """
+    from hermes_cli.kanban_caps import caps_summary
+    return caps_summary()
+
+
 # --- Home-channel subscriptions (per-task, per-platform toggles) -------------
 # Each gateway platform has at most one "home" (chat_id, thread_id, name); a toggle-on writes
 # exactly the notify_subs row ``/kanban create`` would, so the gateway notifier needs no plumbing.

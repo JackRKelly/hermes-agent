@@ -11,11 +11,12 @@ import contextlib
 import os
 import sqlite3
 import time
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
+from hermes_cli.kanban_caps import CapsReloader, KanbanCaps, parse_caps, write_live_caps
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db_dispatch_caps import FastLaneSettings
@@ -31,11 +32,15 @@ def _kbd():
     return kanban_db_dispatch
 
 _CORRUPT_DB_MARKERS = ("file is not a database", "database disk image is malformed")
+# _DispatcherSettings fields that are loop state, not ``dispatch_once`` kwargs.
+_NOT_DISPATCH_KWARGS = frozenset({"interval", "configured_caps"})
 
 
 @dataclass
 class _DispatcherSettings:
-    """``kanban.*`` dispatch settings, read once at boot (restart to apply)."""
+    """``kanban.*`` dispatch settings, read at boot. The three concurrency caps
+    (``max_in_progress``, ``max_in_progress_per_profile``, ``max_in_progress_by_profile``) are
+    re-read before every tick (:meth:`_KanbanDispatcher.refresh_caps`); the rest need a restart."""
 
     interval: float
     max_spawn: Any
@@ -45,7 +50,23 @@ class _DispatcherSettings:
     reconcile_orphans: bool
     default_assignee: Optional[str]
     max_in_progress_per_profile: Optional[int]
+    max_in_progress_by_profile: dict[str, int] = field(default_factory=dict)
     fast_lane: Optional[FastLaneSettings] = None  # None = no fast lane
+    # The caps as configured (total unset = memory-derived default): the hot-reload baseline.
+    configured_caps: KanbanCaps = field(default_factory=KanbanCaps)
+
+
+def _boot_caps(kanban_cfg: dict) -> KanbanCaps:
+    """Caps at boot. A file that fails the live-change rules (say ``max_in_progress: 40``) still
+    boots on the old lenient parse, with a warning, so an upgrade never changes a running fleet's
+    concurrency; per-lane overrides apply only when the whole set validates."""
+    caps, errors = parse_caps(kanban_cfg)
+    if caps is not None:
+        return caps
+    logger.warning("kanban dispatcher: caps in config.yaml fail validation (%s); booting with the "
+                   "plain integer values and no per-lane overrides", "; ".join(errors))
+    return KanbanCaps(total=_positive_int_setting(kanban_cfg, "max_in_progress"),
+                      per_profile=_positive_int_setting(kanban_cfg, "max_in_progress_per_profile"))
 
 
 def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettings:
@@ -65,7 +86,9 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     # Cap simultaneously running tasks so slow workers don't pile up and time
     # out. Explicit config wins; otherwise a memory-derived default (unbounded
     # fan-out swap-thrashes small hosts), or None where total memory can't be read.
-    max_in_progress = _positive_int_setting(kanban_cfg, "max_in_progress")
+    caps = _boot_caps(kanban_cfg)
+    logger.info("kanban dispatcher: caps %s (total/per-profile; edits apply live on the next tick)", caps.label())
+    max_in_progress = caps.total
     effective_max_in_progress = _kbd().resolve_max_in_progress(max_in_progress)
     if max_in_progress is None and effective_max_in_progress is not None:
         logger.info(
@@ -125,8 +148,10 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         default_assignee=default_assignee,
         # Per-profile concurrency cap: no single profile's local model / API
         # quota / browser pool gets overwhelmed by a fan-out.
-        max_in_progress_per_profile=_positive_int_setting(kanban_cfg, "max_in_progress_per_profile"),
+        max_in_progress_per_profile=caps.per_profile,
+        max_in_progress_by_profile=dict(caps.by_profile),
         fast_lane=fast_lane,
+        configured_caps=caps,
     )
 
 
@@ -141,10 +166,36 @@ class _KanbanDispatcher:
 
     CORRUPT_BOARD_RETRY_AFTER_SECONDS = 300
 
-    def __init__(self, kb: Any, settings: _DispatcherSettings) -> None:
+    def __init__(self, kb: Any, settings: _DispatcherSettings, *,
+                 boot_kanban_cfg: Optional[dict] = None, config_path: Optional[Path] = None) -> None:
         self.kb = kb
         self.settings = settings
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
+        # Live caps: the baseline is the boot config, so an unchanged file never logs or re-applies.
+        self.caps_reloader = CapsReloader(settings.configured_caps, boot_kanban_cfg or {})
+        # The config.yaml this dispatcher reads, recorded so `hermes kanban caps set` can refuse
+        # to edit a different profile's file (a write the dispatcher would never see).
+        self.config_path = config_path
+
+    def record_live_caps(self) -> None:
+        write_live_caps(self.settings.configured_caps, effective_total=self.settings.max_in_progress,
+                        config_path=self.config_path)
+
+    def refresh_caps(self, kanban_cfg: Optional[dict]) -> bool:
+        """Apply cap edits from *kanban_cfg* (the live ``kanban`` section) before a tick.
+
+        Returns True when the caps changed. Only future spawns see the new values: running workers
+        are never reclaimed, so lowering a cap just holds new spawns until the count drops below it.
+        """
+        caps = self.caps_reloader.poll(kanban_cfg)
+        if caps is None:
+            return False
+        self.settings.configured_caps = caps
+        self.settings.max_in_progress = _kbd().resolve_max_in_progress(caps.total)
+        self.settings.max_in_progress_per_profile = caps.per_profile
+        self.settings.max_in_progress_by_profile = dict(caps.by_profile)
+        self.record_live_caps()
+        return True
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
@@ -196,7 +247,8 @@ class _KanbanDispatcher:
         if not self._quarantine_lifted(slug, fingerprint):
             return None
         # fields(), not asdict(): asdict() would turn the nested fast_lane settings into a dict.
-        kwargs = {f.name: getattr(self.settings, f.name) for f in fields(self.settings) if f.name != "interval"}
+        kwargs = {f.name: getattr(self.settings, f.name) for f in fields(self.settings)
+                  if f.name not in _NOT_DISPATCH_KWARGS}
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).

@@ -118,6 +118,22 @@
   font-weight: 500;
 }
 
+/* Live worker caps on the In Progress header; amber while config.yaml holds an unapplied change. */
+.hermes-kanban-column-caps {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-muted-foreground);
+  font-size: 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 0.25rem);
+  padding: 0 0.3rem;
+  white-space: nowrap;
+  cursor: help;
+}
+.hermes-kanban-column-caps--pending {
+  color: #b45309;
+  border-color: #f59e0b;
+}
+
 .hermes-kanban-column-add {
   appearance: none;
   background: transparent;
