@@ -77,6 +77,12 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Monitor mode: http(s) URL fetched with a bounded GET each tick "
             "instead of a script. Same hash-suppression semantics as "
             "--monitor-script.")
+    cron_create.add_argument(
+        "--monitor-quiet-empty", dest="monitor_quiet_empty", action="store_const", const=True,
+        default=None,
+        help="With --monitor-script/--monitor-url: when the monitor output changes to empty "
+            "(or whitespace only), record it as the new baseline but do not wake the agent. "
+            "Use when empty output means nothing is left to handle.")
     cron_create.add_argument("--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
@@ -156,6 +162,15 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "--monitor-script`). Pass empty string to clear.")
     cron_edit.add_argument("--monitor-url", dest="monitor_url",
         help=("Set/replace the monitor source URL. Pass empty string to clear."))
+    _quiet = cron_edit.add_mutually_exclusive_group()
+    _quiet.add_argument(
+        "--monitor-quiet-empty", dest="monitor_quiet_empty", action="store_const", const=True,
+        default=None,
+        help="Do not wake the agent when the monitor output changes to empty (see `hermes cron "
+            "create --monitor-quiet-empty`). Requires a monitor source on the job.")
+    _quiet.add_argument(
+        "--no-monitor-quiet-empty", dest="monitor_quiet_empty", action="store_const", const=False,
+        help="Wake the agent on every monitor output change again, including a change to empty.")
     cron_edit.add_argument("--workdir",
         help="Absolute path for the job to run from (injects AGENTS.md etc. and sets terminal cwd). Pass empty string to clear.",
     )

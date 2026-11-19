@@ -107,6 +107,8 @@ class DispatchResult:
     :func:`reap_terminal_workers`."""
     spawned: list[tuple[str, str, str]] = field(default_factory=list)
     """``(task_id, assignee, workspace_path)`` triples."""
+    fast_lane_spawned: list[str] = field(default_factory=list)
+    """Ids in ``spawned`` that went through ``kanban.fast_lane``, past the caps."""
     skipped_unassigned: list[str] = field(default_factory=list)
     """Ready task ids with no assignee at all — operator-actionable (usually a
     misfiled task waiting for routing)."""
@@ -1988,6 +1990,7 @@ def dispatch_once(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
     max_in_progress_by_profile: Optional[Mapping[str, int]] = None,
+    fast_lane: Optional[_kbcaps.FastLaneSettings] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2012,6 +2015,7 @@ def dispatch_once(
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
             max_in_progress_by_profile=max_in_progress_by_profile,
+            fast_lane=fast_lane,
         )
 
     try:
@@ -2050,11 +2054,15 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
 
 
 def _held_for_profile(conn, task_id: str, assignee: str, result: DispatchResult, *, dry_run: bool,
-                      per_profile_cap: _kcaps.ProfileCapPolicy, per_profile_running: dict[str, int]) -> bool:
+                      per_profile_cap: Optional[_kcaps.ProfileCapPolicy],
+                      per_profile_running: dict[str, int]) -> bool:
     """Per-profile cap (one profile's local model / API quota / browser pool must not be overwhelmed
-    by a fan-out even with global headroom), then the provider breaker; records the hold."""
+    by a fan-out even with global headroom), then the provider breaker; records the hold.
+
+    ``per_profile_cap`` is ``None`` when no lane has a limit, and for the fast lane, which spawns
+    past the per-profile cap by design."""
     current = per_profile_running.get(assignee, 0)
-    limit = per_profile_cap.limit(assignee)
+    limit = per_profile_cap.limit(assignee) if per_profile_cap is not None else None
     if limit is not None and current >= limit:
         result.skipped_per_profile_capped.append((task_id, assignee, current))
         return True
@@ -2076,7 +2084,7 @@ def _dispatch_lane_task(
     board: Optional[str],
     failure_limit: int,
     spawn_fn,
-    per_profile_cap: _kcaps.ProfileCapPolicy,
+    per_profile_cap: Optional[_kcaps.ProfileCapPolicy],
     per_profile_running: dict[str, int],
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
@@ -2129,7 +2137,7 @@ def _dispatch_lane_task(
     def _count_spawn(name: str) -> None:
         # Later rows in this tick respect the per-profile cap; subsequent
         # ticks re-query from the DB.
-        if per_profile_cap.active and name:
+        if per_profile_cap is not None and name:
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
 
     if dry_run:
@@ -2386,42 +2394,45 @@ def _dispatch_once_locked(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
     max_in_progress_by_profile: Optional[Mapping[str, int]] = None,
+    fast_lane: Optional[_kbcaps.FastLaneSettings] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
-    :func:`_tick_spawn_budget`."""
+    :func:`_tick_spawn_budget`; ``fast_lane`` cards spawn first, past the caps
+    (:func:`hermes_cli.kanban_db_dispatch_caps.run_fast_lane`)."""
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    # Per-profile cap (#21582): no single profile's local model / API quota /
+    # browser pool is melted by a fan-out. Deferred tasks go to
+    # skipped_per_profile_capped, not skipped_unassigned. Counted BEFORE the
+    # fast lane so its spawns count against the profile in the loops below, and
+    # before the review reservation, which must see the rows the loop refuses.
+    per_profile_cap, per_profile_running = _kbcaps.per_profile_state(
+        conn, _kcaps.ProfileCapPolicy.build(max_in_progress_per_profile, max_in_progress_by_profile))
+    lane_kwargs: dict[str, Any] = dict(
+        dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
+        failure_limit=failure_limit, spawn_fn=spawn_fn,
+        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+    )
+    fast = _kbcaps.run_fast_lane(conn, result, fast_lane, lane_kwargs)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
+    spawn_budget = _kbcaps.budget_after_fast_lane(result, spawn_budget, fast, dry_run=dry_run)
+    # The fast lane already spawned or recorded the rows it tried.
+    ready_rows = [r for r in _lane_rows(conn, "ready") if r["id"] not in fast.tried]
     if not may_spawn:
-        result.held_cap = 0 if result.memory_pressure else len(_lane_rows(conn, "ready"))
+        result.held_cap = 0 if result.memory_pressure else len(ready_rows)
         return result
 
-    ready_rows = _lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
     review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
-    # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
-    # skipped_unassigned — "busy, retry later" differs from "needs routing".
-    # Resolved BEFORE the review reservation so the reservation can see which
-    # review rows the lane loop would refuse this tick.
-    # Per-profile cap (#21582) + per-lane overrides: no fan-out melts one profile's model/API quota.
-    per_profile_cap = _kcaps.ProfileCapPolicy.build(max_in_progress_per_profile, max_in_progress_by_profile)
-    per_profile_running: dict[str, int] = {}
-    if per_profile_cap.active:
-        for prow in conn.execute(
-            "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
-            "GROUP BY assignee"
-        ):
-            per_profile_running[prow["assignee"]] = int(prow["n"])
     # Review-lane reservation: the ready loop runs first and would otherwise
     # consume the ENTIRE shared budget, starving reviews under a sustained ready
     # backlog. When spawnable review work exists and there is any budget, hold
@@ -2432,11 +2443,6 @@ def _dispatch_once_locked(
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     ):
         ready_budget = max(spawn_budget - 1, 0)
-    lane_kwargs: dict[str, Any] = dict(
-        dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
-        failure_limit=failure_limit, spawn_fn=spawn_fn,
-        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
-    )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
     for index, row in enumerate(ready_rows):
@@ -2939,6 +2945,7 @@ def run_daemon(
 from hermes_cli import kanban_caps as _kcaps
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
+from hermes_cli import kanban_db_dispatch_caps as _kbcaps
 from hermes_cli import kanban_db_health as _kbh
 from hermes_cli import kanban_db_idle as _kbi
 from hermes_cli import kanban_db_provider_breaker as _kbpb

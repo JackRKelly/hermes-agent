@@ -14,7 +14,7 @@ import logging
 from typing import Callable
 
 from tools.action_item_kinds import readability as rd
-from tools.action_item_kinds.core import SchemaError
+from tools.action_item_kinds.core import STATIC_LINK_HOSTS, SchemaError
 from tools.action_item_kinds.registry import KINDS
 from tools.action_item_view import ItemRefused
 from tools.registry import no_cache_check_fn, registry, tool_error
@@ -33,12 +33,15 @@ _ENVELOPE = {
         f"happened and why Jack is needed now, {_PLAIN}.")},
     "ask": {"type": "string", "description": "One line (<=140 chars): the decision or action, as a question for Jack."},
     "why": {"type": "string", "description": "<=280 chars: why it matters and what waits on it."},
-    "risk": {"type": "object", "description": f"{{level: low|medium|high, note: one line, <={rd.RISK_NOTE_MAX_CHARS} chars}}.",
+    "risk": {"type": "object", "description": (f"{{level: low|medium|high, note: one line, <={rd.RISK_NOTE_MAX_CHARS} "
+                                                "chars, saying why (shown beside the level; never just the level)}."),
              "properties": {"level": {"type": "string", "enum": ["low", "medium", "high"]},
                             "note": {"type": "string"}}, "required": ["level", "note"]},
     "deadline": {"type": "string", "description": "A real deadline only, ISO 8601 with a UTC offset."},
-    "links": {"type": "array", "description": "<=5 {label, url}; https on github.com, linear.app, "
-              "mail.google.com, app.slack.com or the dashboard host only.",
+    "links": {"type": "array", "description": (
+        f"<=5 {{label, url}}; https on {', '.join(sorted(STATIC_LINK_HOSTS))} or the dashboard host only. "
+        "Every URL Jack should open (a PR, a Drive video or doc, a thread) goes here with a short label, "
+        "not pasted into summary."),
               "items": {"type": "object", "properties": {"label": {"type": "string"},
                                                          "url": {"type": "string"}}}},
     "then": {"type": "string", "enum": ["complete", "ready"],
@@ -71,6 +74,9 @@ _KIND_PAYLOADS = (
 _WRITING = (
     " Writing for Jack (ask, why, risk.note, body, steps, effects, rec_reason): name PRs and Linear "
     "issues inline as #n, owner/repo#n or CYB-n (the app links them in place; never paste their URLs); "
+    "any other URL Jack should open goes in links[] with a short label (e.g. {label: \"Rules video v4\", "
+    "url: <Drive URL>}) while the text says in words what it is (a summary that is mostly a URL comes "
+    "back with warnings[]); "
     "wrap commands, env var names (`REDIS_PUBLIC_URL`), Redis/SQL keywords (`KEYS`, `FLUSH`, `EVAL`, "
     "`CONFIG`, `SELECT`), file names and identifiers in backticks; put a multi-step command in a fenced "
     "block with its language (```bash, sql, redis, json, ts or python); in a body, write steps as `1.` / "

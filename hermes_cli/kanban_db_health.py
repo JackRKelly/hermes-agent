@@ -105,6 +105,8 @@ def dispatch_section(conn: sqlite3.Connection, result: Any, previous: Optional[d
         "bad_ticks": int(prev.get("bad_ticks") or 0) + 1 if ready and not spawned else 0,
         "last_spawn_at": now if spawned else prev.get("last_spawn_at"),
         "held_back": held,
+        # Spawns this tick that went past the caps through kanban.fast_lane.
+        "fast_lane_spawned": len(getattr(result, "fast_lane_spawned", []) or []),
     }
 
 
@@ -137,5 +139,6 @@ def live_health(conn: sqlite3.Connection, db_path: Path) -> dict:
     """``hermes kanban health``: live board sections plus the last tick's ``dispatch`` section."""
     previous = read_snapshot(db_path) or {}
     dispatch = previous.get("dispatch") or {"ready_spawnable": _ready_spawnable(conn), "bad_ticks": 0,
-                                            "last_spawn_at": None, "held_back": dict.fromkeys(HELD_BACK_KEYS, 0)}
+                                            "last_spawn_at": None, "held_back": dict.fromkeys(HELD_BACK_KEYS, 0),
+                                            "fast_lane_spawned": 0}
     return build(conn, dispatch=dispatch)

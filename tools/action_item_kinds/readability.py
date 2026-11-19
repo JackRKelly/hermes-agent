@@ -61,7 +61,8 @@ EXAMPLE_QUESTIONS = [
 
 # Jack, Nov 12: how text he reads is written. Every banned-content and local-path refusal repeats it,
 # and the action_item_add description carries the same rules (the guide's section 7).
-STYLE_HINT = ("Name PRs and Linear issues inline as #n, owner/repo#n or CYB-n (the app links them); wrap "
+STYLE_HINT = ("Name PRs and Linear issues inline as #n, owner/repo#n or CYB-n (the app links them); put any "
+              "other URL Jack should open in links[] with a short label; wrap "
               "commands, env var names, Redis/SQL keywords, file names and identifiers in backticks")
 
 
@@ -131,6 +132,25 @@ _WORD_START_RE = re.compile(r"[\s(\[{\"'`=<*]")
 _ALWAYS_LOCAL_RE = re.compile(r"/Users/|~/|/private/|\.hermes/", re.IGNORECASE)
 _PATH_EDGE = ".,;:()[]{}<>\"'`*"
 EXAMPLE_PLAIN_FILE = "the rollout report is attached to the card"
+
+# Jack, Nov 17: a park put a Drive URL in its summary with ``links: []``, so the card face read as a
+# raw URL instead of a sentence. A URL in text stays accepted (the app links it in place), so this is
+# a warning on the tool result, never a refusal: a summary whose URLs are more than this share of its
+# characters gets one.
+URL_HEAVY_SHARE = 0.5
+EXAMPLE_LINK = {"label": "Rules video v4", "url": "https://drive.google.com/file/d/<id>/view"}
+
+
+def url_heavy_warnings(summary: Any) -> list[str]:
+    """Non-blocking warnings for a summary that is mostly a raw URL (empty when it is not)."""
+    if not isinstance(summary, str) or not summary.strip():
+        return []
+    url_chars = sum(len(m.group(0)) for m in _URL_RE.finditer(summary))
+    if url_chars <= URL_HEAVY_SHARE * len(summary.strip()):
+        return []
+    return [f"summary: {url_chars} of its {len(summary.strip())} characters are a raw URL. Put the URL in "
+            f"links[] with a short label, e.g. {json.dumps(EXAMPLE_LINK)}, and say in words what it is "
+            f'(e.g. "The rules video v4 is on Drive, ready to post."). The item was still parked (see {GUIDE})']
 
 
 def card_file_dirs(card: str) -> tuple[Path, Path]:
@@ -409,10 +429,32 @@ def check_summary(value: Any, where: str = "summary") -> None:
     check_chars(value, SUMMARY_MAX_CHARS, where, EXAMPLE_SUMMARY)
 
 
+# Words a risk note can be made of and still say nothing beyond its level (Jack, Nov 17: "You should be adding an
+# explanation on the risk level for every Action Items card"): "Medium risk.", "low", "Risk: high", "Low risk
+# change". Any other word ("Low risk: docs only") explains something. The same list as JackRKelly/assistant
+# ``scripts/action_item.py`` ``LEVEL_ONLY_WORDS``, whose app derives a reason for an older item with such a note.
+LEVEL_ONLY_WORDS = frozenset({"low", "medium", "med", "high", "moderate", "minimal", "minor", "risk", "risky",
+                              "level", "rated", "rating", "is", "it", "its", "this", "the", "a", "an", "overall",
+                              "very", "fairly", "quite", "pretty", "relatively", "change", "item"})
+_WORD_RE = re.compile(r"[a-z]+")
+
+
+def restates_level(note: str) -> bool:
+    """True when ``note`` is empty or only restates the risk level (``LEVEL_ONLY_WORDS``)."""
+    return all(word in LEVEL_ONLY_WORDS for word in _WORD_RE.findall(note.lower()))
+
+
 def check_risk_note(risk: Any, where: str = "risk.note") -> None:
     note = risk.get("note") if isinstance(risk, dict) else None
     if not isinstance(note, str):
         return  # the envelope schema reports the missing or mistyped note
+    # The app shows the note beside the level on every card, so it must say why: never empty, never the level again.
+    # These two refusals are word for word the JackRKelly/assistant CLI's (``action_item.risk_note_refusal``), so an
+    # agent gets one answer whichever way it parks; both repos' tests assert the full strings.
+    if not note.strip():
+        raise fix(where, "required, one line saying why this level", EXAMPLE_RISK_NOTE)
+    if restates_level(note):
+        raise fix(where, f"{note.strip()!r} only restates the level; say why in a few words", EXAMPLE_RISK_NOTE)
     if "\n" in note or "\r" in note:
         raise fix(where, "must be one line", EXAMPLE_RISK_NOTE)
     check_chars(note, RISK_NOTE_MAX_CHARS, where, EXAMPLE_RISK_NOTE)

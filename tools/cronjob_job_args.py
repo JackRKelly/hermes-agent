@@ -157,6 +157,11 @@ def _mode_guidance_notes(job: dict[str, Any], user_deliver: Optional[str]) -> li
             "DETECTED diff into the prompt. The first tick always runs as "
             "baseline. The source must emit STABLE output (no timestamps, no "
             "random ordering) or every tick will look changed.")
+        if job.get("monitor_quiet_empty"):
+            notes.append(
+                "monitor_quiet_empty: output that changes to empty or whitespace-only is "
+                "recorded as the new baseline but does not wake the agent, so the next "
+                "non-empty output arrives as a diff from empty.")
     if job.get("no_agent"):
         notes.append(
             "no_agent mode: stdout is delivered verbatim; EMPTY stdout sends "
@@ -469,7 +474,7 @@ def _validate_context_from_refs(refs: list[Any]) -> Optional[str]:
 
 # Optional fields echoed by _format_job only when truthy (order = JSON key order).
 _FORMAT_JOB_OPTIONAL_KEYS = (
-    "script", "reasoning_effort", "monitor_script", "monitor_url",
+    "script", "reasoning_effort", "monitor_script", "monitor_url", "monitor_quiet_empty",
     "monitor_state", "no_agent", "enabled_toolsets", "workdir", "interpreter")
 
 

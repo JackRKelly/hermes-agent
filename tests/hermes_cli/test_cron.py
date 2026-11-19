@@ -48,6 +48,45 @@ class TestCronCommandLifecycle:
         assert updated["provider"] == "nous"
         assert "Updated job" in capsys.readouterr().out
 
+    def test_monitor_quiet_empty_create_edit_round_trip(self, tmp_cron_dir, capsys):
+        """--monitor-quiet-empty on create stores True; edit --no-monitor-quiet-empty turns it off
+        and --monitor-quiet-empty turns it back on."""
+        parser = argparse.ArgumentParser(prog="hermes")
+        subparsers = parser.add_subparsers(dest="command")
+        build_cron_parser(subparsers, cmd_cron=cron_command)
+
+        assert cron_command(parser.parse_args([
+            "cron", "create", "every 1h", "Handle new candidates", "--name", "quiet-mon",
+            "--monitor-url", "https://example.com/status", "--monitor-quiet-empty",
+        ])) == 0
+        assert "Monitor quiet on empty: on" in capsys.readouterr().out
+        job = next(j for j in list_jobs(include_disabled=True) if j["name"] == "quiet-mon")
+        assert job["monitor_quiet_empty"] is True
+
+        cron_command(parser.parse_args(["cron", "edit", job["id"], "--no-monitor-quiet-empty"]))
+        assert get_job(job["id"])["monitor_quiet_empty"] is False
+        cron_command(parser.parse_args(["cron", "edit", job["id"], "--monitor-quiet-empty"]))
+        assert get_job(job["id"])["monitor_quiet_empty"] is True
+
+        # An edit that touches neither flag leaves the stored value alone.
+        cron_command(parser.parse_args(["cron", "edit", job["id"], "--name", "renamed"]))
+        assert get_job(job["id"])["monitor_quiet_empty"] is True
+
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["cron", "edit", job["id"], "--monitor-quiet-empty", "--no-monitor-quiet-empty"])
+
+    def test_monitor_quiet_empty_refused_without_monitor(self, tmp_cron_dir, capsys):
+        parser = argparse.ArgumentParser(prog="hermes")
+        subparsers = parser.add_subparsers(dest="command")
+        build_cron_parser(subparsers, cmd_cron=cron_command)
+
+        assert cron_command(parser.parse_args([
+            "cron", "create", "every 1h", "Daily report", "--monitor-quiet-empty",
+        ])) == 1
+        assert "requires monitor_script or monitor_url" in capsys.readouterr().out
+        assert list_jobs(include_disabled=True) == []
+
     def test_edit_can_replace_and_clear_skills(self, tmp_cron_dir, capsys):
         job = create_job(
             prompt="Combine skill outputs",

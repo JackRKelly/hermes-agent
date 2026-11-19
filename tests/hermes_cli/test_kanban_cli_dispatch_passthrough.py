@@ -44,6 +44,7 @@ def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, m
             "max_spawn": 5,
             "default_assignee": "default",
             "max_in_progress_per_profile": 2,
+            "fast_lane": {"created_by": ["email-monitor"], "max_running": 1},
         }
     }
     monkeypatch.setattr(
@@ -70,6 +71,8 @@ def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, m
     )
     assert captured.get("default_assignee") == "default"
     assert captured.get("max_in_progress_per_profile") == 2
+    from hermes_cli.kanban_db_dispatch_caps import FastLaneSettings  # after the fixture's module purge
+    assert captured.get("fast_lane") == FastLaneSettings(created_by=("email-monitor",), max_running=1)
 
 
 def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypatch):

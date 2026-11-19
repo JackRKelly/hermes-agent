@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
+from tools.action_item_kinds import readability
 from tools.action_item_kinds.core import (
     WITHDRAWN_PREFIX, SchemaError, canonical_json, check_text, comment_body, comment_hash16,
     reason_item_hash, refuse_decision_text,
@@ -187,8 +188,15 @@ def add_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
         result = _write(kb, conn, board, task, caller, env, current=legacy)
         if legacy is not None:
             result["migrated_from"] = legacy.id
-        result = _hand_back_if_carried(kb, conn, board, task, caller, result)
+        result = _with_warnings(_hand_back_if_carried(kb, conn, board, task, caller, result), env)
         return {**result, "stale_items": [s.as_dict() for s in stale]} if stale else result
+
+
+def _with_warnings(result: dict, env: dict) -> dict:
+    """``result`` plus ``warnings`` when the stored item breaks a writing rule that is advice, not a
+    refusal (today: a summary that is mostly a raw URL). The item is already parked either way."""
+    warnings = readability.url_heavy_warnings(env.get("summary"))
+    return {**result, "warnings": warnings} if warnings else result
 
 
 def _free_text_gate_to_migrate(kb, conn, board: str, task, env: dict) -> Optional[ItemView]:
@@ -287,7 +295,8 @@ def update_item(args: dict, *, sources: Optional[LiveSources] = None) -> dict:
                 (task.status == "running" and caller.env_task != task.id):
             raise ItemRefused(f"card {task.id} is {task.status}; it cannot be re-parked now")
         result = _write(kb, conn, board, task, caller, env, current=view)
-        return _hand_back_if_carried(kb, conn, board, task, caller, {**result, "replaces": view.id})
+        return _with_warnings(_hand_back_if_carried(kb, conn, board, task, caller,
+                                                    {**result, "replaces": view.id}), env)
 
 
 def withdraw_item(args: dict) -> dict:

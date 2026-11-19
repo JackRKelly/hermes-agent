@@ -419,8 +419,210 @@ def test_monitor_script_failure_is_error_not_change(hermes_env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# monitor_quiet_empty: a change TO empty output records state but skips the agent
+# ---------------------------------------------------------------------------
+
+_QUIET_EMPTY_DOC = "**Status:** no_change (empty monitor output, agent run suppressed)"
+
+
+def _make_quiet_job(hermes_env, script_body: str, quiet: bool = True):
+    from cron.jobs import create_job
+
+    _write_script(hermes_env, "mon.sh", script_body)
+    return create_job(
+        prompt="Handle new candidates", model="test-model",
+        schedule="every 5m",
+        monitor_script="mon.sh",
+        monitor_quiet_empty=quiet,
+        deliver="local",
+    )
+
+
+def _snapshot_text(job_id: str) -> str:
+    from cron.monitor import _snapshot_path
+
+    return _snapshot_path(job_id).read_text(encoding="utf-8")
+
+
+def test_quiet_empty_suppresses_agent_and_next_output_diffs_from_empty(hermes_env, monkeypatch):
+    from cron.jobs import get_job
+    from cron.monitor import hash_monitor_output
+    from cron.scheduler import SILENT_MARKER, run_job
+
+    job = _make_quiet_job(hermes_env, "echo 'state A'\n")
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+    run_job(job)
+    assert observed["agent_runs"] == 1
+
+    # Candidates handled: the monitor now prints nothing. State moves, the agent does not run.
+    _write_script(hermes_env, "mon.sh", "exit 0\n")
+    success, doc, final, error = run_job(get_job(job["id"]))
+    assert (success, final, error) == (True, SILENT_MARKER, None)
+    assert _QUIET_EMPTY_DOC in doc
+    assert observed["agent_runs"] == 1
+    stored = get_job(job["id"])["monitor_state"]
+    assert stored["last_output_hash"] == hash_monitor_output("")
+    assert _snapshot_text(job["id"]) == ""
+
+    # A repeat of the empty output is the ordinary unchanged tick.
+    success, doc, final, _ = run_job(get_job(job["id"]))
+    assert final == SILENT_MARKER and "no_change (agent run suppressed)" in doc
+    assert observed["agent_runs"] == 1
+
+    # New candidate: the agent wakes with a diff against EMPTY, never against 'state A'.
+    _write_script(hermes_env, "mon.sh", "echo 'state B'\n")
+    success, _doc, _final, error = run_job(get_job(job["id"]))
+    assert success is True and error is None
+    assert observed["agent_runs"] == 2
+    prompt = observed["prompts"][1]
+    assert "MONITOR CHANGE DETECTED" in prompt
+    assert "+state B" in prompt
+    assert "state A" not in prompt
+
+
+def test_empty_output_without_flag_still_wakes_agent(hermes_env, monkeypatch):
+    """Default (flag unset) is upstream behavior: a change to empty output is a change."""
+    from cron.jobs import get_job
+    from cron.scheduler import run_job
+
+    job = _make_quiet_job(hermes_env, "echo 'state A'\n", quiet=False)
+    assert "monitor_quiet_empty" not in job  # default jobs stay byte-identical
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+    run_job(job)
+
+    _write_script(hermes_env, "mon.sh", "exit 0\n")
+    success, doc, _final, _error = run_job(get_job(job["id"]))
+    assert success is True
+    assert observed["agent_runs"] == 2
+    assert "-state A" in observed["prompts"][1]
+    assert "empty monitor output" not in doc
+
+
+def test_quiet_empty_treats_whitespace_only_as_empty_on_first_run(hermes_env, monkeypatch):
+    """Whitespace-only output counts as empty, including on the baseline tick; the exact bytes
+    are still what is hashed and snapshotted."""
+    from cron.jobs import get_job
+    from cron.monitor import hash_monitor_output
+    from cron.scheduler import SILENT_MARKER, run_job
+
+    job = _make_quiet_job(hermes_env, "printf '  \\n\\t\\n'\n")
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+
+    success, doc, final, error = run_job(job)
+    assert (success, final, error) == (True, SILENT_MARKER, None)
+    assert _QUIET_EMPTY_DOC in doc
+    assert observed["agent_runs"] == 0
+    stored_hash = get_job(job["id"])["monitor_state"]["last_output_hash"]
+    snapshot = _snapshot_text(job["id"])
+    assert snapshot.strip() == ""
+    assert stored_hash == hash_monitor_output(snapshot)
+
+
+def test_quiet_empty_source_failure_is_unchanged_error(hermes_env, monkeypatch):
+    from cron.jobs import get_job
+    from cron.scheduler import run_job
+
+    job = _make_quiet_job(hermes_env, "echo 'state A'\n")
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+    run_job(job)
+    stored_hash = get_job(job["id"])["monitor_state"]["last_output_hash"]
+
+    # A failing source with no stdout must stay an ERROR, never a quiet empty tick.
+    _write_script(hermes_env, "mon.sh", "exit 3\n")
+    success, doc, final, error = run_job(get_job(job["id"]))
+    assert success is False
+    assert error is not None
+    assert "monitor source failed" in doc
+    assert "source failed" in final
+    assert observed["agent_runs"] == 1
+    assert get_job(job["id"])["monitor_state"]["last_output_hash"] == stored_hash
+
+
+def test_quiet_empty_requires_a_monitor_source(hermes_env):
+    from cron.jobs import create_job
+
+    with pytest.raises(ValueError, match="monitor_quiet_empty"):
+        create_job(prompt="p", schedule="every 5m", monitor_quiet_empty=True)
+
+
+def test_quiet_empty_rejects_non_boolean(hermes_env):
+    from cron.jobs import create_job, update_job
+
+    _write_script(hermes_env, "mon.sh", "echo hi\n")
+    with pytest.raises(ValueError, match="must be a boolean"):
+        create_job(prompt="p", schedule="every 5m", monitor_script="mon.sh",
+                   monitor_quiet_empty="false")
+    job = create_job(prompt="p", schedule="every 5m", monitor_script="mon.sh")
+    with pytest.raises(ValueError, match="must be a boolean"):
+        update_job(job["id"], {"monitor_quiet_empty": "true"})
+
+
+def test_update_removing_monitor_must_clear_quiet_empty(hermes_env):
+    """The flag cannot outlive its monitor: clearing the source alone is refused, clearing both
+    in one update is fine."""
+    from cron.jobs import get_job, update_job
+
+    job = _make_quiet_job(hermes_env, "echo hi\n")
+    with pytest.raises(ValueError, match="monitor_quiet_empty"):
+        update_job(job["id"], {"monitor_script": ""})
+    assert get_job(job["id"])["monitor_script"] == "mon.sh"
+
+    update_job(job["id"], {"monitor_script": "", "monitor_quiet_empty": False})
+    reloaded = get_job(job["id"])
+    assert reloaded.get("monitor_script") is None
+    assert reloaded["monitor_quiet_empty"] is False
+
+
+def test_quiet_empty_is_an_authored_job_definition_field(hermes_env):
+    """Profile distributions refresh the flag from the authored store like the other monitor
+    fields, and keep the scheduler-owned monitor_state."""
+    from cron.job_definition import JOB_DEFINITION_FIELDS, merge_job_definition
+
+    assert "monitor_quiet_empty" in JOB_DEFINITION_FIELDS
+    local = {"id": "j1", "schedule": {"kind": "interval", "minutes": 5},
+             "monitor_script": "mon.sh", "monitor_state": {"last_output_hash": "h"}}
+    authored = {**local, "monitor_quiet_empty": True}
+    authored.pop("monitor_state")
+    merged = merge_job_definition(local, authored)
+    assert merged["monitor_quiet_empty"] is True
+    assert merged["monitor_state"] == {"last_output_hash": "h"}
+
+
+# ---------------------------------------------------------------------------
 # cronjob tool: API-layer wiring
 # ---------------------------------------------------------------------------
+
+
+def test_cronjob_tool_monitor_quiet_empty_round_trip(hermes_env):
+    from cron.jobs import get_job
+    from tools.cronjob_tools import _cronjob_handler
+
+    _write_script(hermes_env, "mon.sh", "echo hi\n")
+    created = json.loads(_cronjob_handler({
+        "action": "create", "prompt": "React", "schedule": "every 5m",
+        "monitor": "mon.sh", "monitor_quiet_empty": True, "deliver": "local",
+    }))
+    assert created.get("success") is True
+    assert created["job"]["monitor_quiet_empty"] is True
+    assert any("monitor_quiet_empty" in note for note in created.get("guidance", []))
+    assert get_job(created["job_id"])["monitor_quiet_empty"] is True
+
+    updated = json.loads(_cronjob_handler({
+        "action": "update", "job_id": created["job_id"], "monitor_quiet_empty": False,
+    }))
+    assert updated.get("success") is True
+    assert get_job(created["job_id"])["monitor_quiet_empty"] is False
+
+    refused = json.loads(_cronjob_handler({
+        "action": "create", "prompt": "React", "schedule": "every 5m",
+        "monitor_quiet_empty": True, "deliver": "local",
+    }))
+    assert refused.get("success") is False
+    assert "monitor_quiet_empty" in refused["error"]
 
 
 def test_cronjob_tool_create_with_monitor_script(hermes_env):
