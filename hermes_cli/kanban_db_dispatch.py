@@ -1560,24 +1560,60 @@ def _ended_run_worker_alive(conn: sqlite3.Connection, task_id: str) -> bool:
     the block-loop breaker routes it to triage) clears the claim but signals nothing, and
     :func:`reap_terminal_workers` ends that worker only after ``TERMINAL_WORKER_REAP_GRACE_SECONDS``.
     A new run claimed in between would be a second writer on the same worktree and branch
-    (t_efcda9e3, Nov 19). The rows are exactly the reaper's: retained pid and fingerprint, issued
-    by this host. Liveness needs the fingerprint to match (a recycled pid is not our worker), and an
-    UNVERIFIED fingerprint proves nothing, as the reaper never signals it either: holding a card on
-    it could hold the card forever. The hold therefore lasts until the worker exits or is reaped,
-    and the reaper clears the evidence in the same step.
+    (t_efcda9e3, Nov 19).
+
+    Two processes per run are checked, because either can still write:
+      * the submitter (``task_runs.worker_pid``), with exactly the reaper's filter;
+      * the managed interpreter the owner bound to the run (its ``worker_bound`` event), which is
+        the process that actually edits the worktree. The reaper clears the submitter's row in the
+        same step it kills it, but the interpreter notices that death only on its watcher's next
+        tick, so a guard on the submitter alone let the same dispatch tick claim the card beside a
+        still-live interpreter. The interpreter's exit is bounded: its watcher ends it (and its
+        process group) once its submitter is gone, or once its run has been over for the reaper's
+        grace when no submitter was ever recorded.
+
+    Each pid is judged as the reaper judges one: issued by this host (claim lock prefix), never this
+    process, and alive with a matching fingerprint (a recycled pid is not our worker). An
+    UNVERIFIED fingerprint proves nothing and nothing signals it, so holding a card on it could hold
+    the card forever: it never holds.
     """
     host_prefix = _kb._host_prefix()
-    rows = conn.execute(
-        "SELECT worker_pid, worker_started_at, claim_lock FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL",
+    candidates = [
+        (row["worker_pid"], row["worker_started_at"], row["claim_lock"])
+        for row in conn.execute(
+            "SELECT worker_pid, worker_started_at, claim_lock FROM task_runs "
+            "WHERE task_id = ? AND ended_at IS NOT NULL "
+            "AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL",
+            (task_id,),
+        )
+    ]
+    for row in conn.execute(
+        "SELECT e.payload FROM task_events e JOIN task_runs r ON r.id = e.run_id "
+        "WHERE e.task_id = ? AND e.kind = 'worker_bound' AND r.ended_at IS NOT NULL",
         (task_id,),
-    ).fetchall()
+    ):
+        bound = _kb._json_dict(row["payload"])
+        if bound.get("started_at"):
+            candidates.append((bound.get("pid"), bound["started_at"], bound.get("claim_lock")))
     return any(
-        str(row["claim_lock"] or "").startswith(host_prefix)
-        and row["worker_started_at"] != UNVERIFIED_WORKER_FINGERPRINT
-        and _worker_alive(int(row["worker_pid"]), row["worker_started_at"])
-        for row in rows
+        _host_local_verified_worker_alive(pid, fingerprint, claim_lock, host_prefix)
+        for pid, fingerprint, claim_lock in candidates
+    )
+
+
+def _host_local_verified_worker_alive(pid, fingerprint, claim_lock, host_prefix: str) -> bool:
+    """The reaper's test for a worker it may act on (see ``_reap_terminal_worker_row``), as a
+    liveness answer: a pid this host issued, not this process, fingerprint-verified and alive."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    return (
+        pid > 0
+        and pid != os.getpid()
+        and str(claim_lock or "").startswith(host_prefix)
+        and fingerprint != UNVERIFIED_WORKER_FINGERPRINT
+        and _worker_alive(pid, fingerprint)
     )
 
 
