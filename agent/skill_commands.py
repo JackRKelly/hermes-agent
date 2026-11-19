@@ -910,6 +910,13 @@ def _disabled_skill_names(platform: str | None = None) -> set:
         return set()
 
 
+def _skill_is_disabled(skill_name: str, identifier: str, disabled_names: set | None) -> bool:
+    """True when the loaded skill (canonical *skill_name*, typed *identifier*) is operator-disabled."""
+    return bool(disabled_names) and (
+        skill_name in disabled_names or identifier in disabled_names
+        or (":" in skill_name and skill_name.split(":", 1)[1] in disabled_names))
+
+
 def _load_skill_blocks(
     identifiers: list[str], load, activation_note, task_id: str | None, *,
     missing_label=lambda ident: ident, disabled_names: set | None = None, disabled_as_missing: bool = False,
@@ -935,8 +942,7 @@ def _load_skill_blocks(
             missing.append(missing_label(identifier))
             continue
         skill_name = loaded[2]
-        if disabled_names and (skill_name in disabled_names or identifier in disabled_names
-                               or (":" in skill_name and skill_name.split(":", 1)[1] in disabled_names)):
+        if _skill_is_disabled(skill_name, identifier, disabled_names):
             if disabled_as_missing:
                 missing.append(identifier)
             else:
@@ -978,6 +984,22 @@ def build_preloaded_skills_prompt(
         disabled_as_missing=True, already_loaded=excluded_loaded_names,
     )
     return "\n\n".join(prompt_parts), loaded_names, missing
+
+
+def unresolved_preloaded_skills(skill_identifiers: list[str]) -> list[str]:
+    """The identifiers :func:`build_preloaded_skills_prompt` would report missing under the
+    current home (unknown, or operator-disabled), without rendering them: no Curator usage bump
+    and no skill message build, so a card-creation preflight leaves the target profile untouched.
+    The safe-worker gate is not applied: it belongs to the process that runs the skill."""
+    disabled = _disabled_skill_names()
+    missing: list[str] = []
+    for identifier in dict.fromkeys((raw or "").strip() for raw in skill_identifiers):
+        if not identifier:
+            continue
+        loaded = _load_skill_payload(identifier)
+        if not loaded or _skill_is_disabled(loaded[2], identifier, disabled):
+            missing.append(identifier)
+    return missing
 
 
 def resolve_auto_load_skills(user_config: dict | None = None) -> list[str]:
