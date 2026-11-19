@@ -45,12 +45,20 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/auth/login", "/auth/callback", "/auth/native/authorize", "/auth/native/token",
     "/auth/native/refresh", "/auth/password-login", "/auth/logout", "/login",
     "/api/auth/providers", "/api/mcp/oauth/callback/",
-    "/assets/", "/dashboard-plugins/", "/favicon.ico", "/ds-assets/", "/fonts/", "/fonts-terminal/")
+    "/assets/", "/dashboard-plugins/", "/favicon.ico", "/ds-assets/", "/fonts/", "/fonts-terminal/",
+    # Action Items PWA shell: static HTML/JS/CSS/service worker with no data in it (the queue is
+    # /api/plugins/action-items/items, still gated). Public so a signed-out app can load and show
+    # its own "Signed out · Sign in" link instead of a blank page or a raw 401 JSON body.
+    "/api/plugins/action-items/app/")
 
 # Page icons, matched exactly. Browsers fetch them without cookies (the Webapp's page icon and
 # home-screen icon are ``/apple-touch-icon.png``), so behind the gate they hit the sign-in redirect
 # and log an auto-SSO ``login_start`` with no sign-in behind it.
-_GATE_PUBLIC_ICONS: frozenset[str] = frozenset({"/apple-touch-icon.png"})
+_GATE_PUBLIC_ICONS: frozenset[str] = frozenset({
+    "/apple-touch-icon.png",
+    # Action Items PWA manifest and home-screen icons (static, no data).
+    "/api/plugins/action-items/app.webmanifest", "/api/plugins/action-items/icon-180.png",
+    "/api/plugins/action-items/icon-192.png", "/api/plugins/action-items/icon-512.png"})
 
 
 def _path_is_public(path: str) -> bool:
