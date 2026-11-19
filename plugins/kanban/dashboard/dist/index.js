@@ -3073,7 +3073,9 @@
     const overrides = Object.entries(live.by_profile || {})
       .map(function (pair) { return `${pair[0]}=${pair[1]}`; }).join(", ");
     const lines = [
-      `Worker caps ${caps.live ? "applied by the dispatcher" : "in config.yaml (no live record yet)"}:`,
+      // `live` is null both before the first record and when the record's dispatcher is gone
+      // (`live_state: "stale"`): either way nothing proves these caps are enforced.
+      `Worker caps ${caps.live ? "applied by the dispatcher" : "in config.yaml (no live dispatcher record)"}:`,
       `total ${total} running host-wide`,
       `per profile ${live.per_profile != null ? live.per_profile : "none"}`,
     ];

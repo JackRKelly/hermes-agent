@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +84,56 @@ def test_set_refuses_a_config_the_dispatcher_does_not_read(home, tmp_path, capsy
                                 config_path=tmp_path / "elsewhere" / "config.yaml")
     assert _run("caps", "set", "--total", "12") != 0
     assert "the live dispatcher reads" in capsys.readouterr().err
+
+
+def _leave_stale_record(config_path: Path, **overrides) -> None:
+    """A record as a gateway that has since stopped would leave it: written by this process,
+    then its owner fields changed so they no longer name a running process."""
+    kanban_caps.write_live_caps(kanban_caps.KanbanCaps(total=10), effective_total=10, config_path=config_path)
+    path = kanban_caps.live_caps_path()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record.update(overrides)
+    path.write_text(json.dumps({k: v for k, v in record.items() if v is not None}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("owner", [
+    # Same pid, different start time: the pid was recycled by an unrelated process.
+    {"pid_start_time": -1},
+    # A record from before the owner fields existed.
+    {"pid": None, "pid_start_time": None},
+], ids=["recycled-pid", "no-owner"])
+def test_stale_record_is_not_shown_as_live_and_does_not_drive_the_refusal(home, tmp_path, capsys, owner):
+    _leave_stale_record(tmp_path / "elsewhere" / "config.yaml", **owner)
+    summary = kanban_caps.caps_summary()
+    assert summary["live"] is None and summary["live_state"] == "stale"
+    assert summary["in_sync"] is False
+    assert summary["config_path"] == str(get_config_path())
+
+    assert _run("caps") == 0
+    out = capsys.readouterr().out
+    assert "no live dispatcher record" in out and "no longer running" in out
+
+    # The old record names another profile's config.yaml; with its dispatcher gone it must not
+    # block an edit of this profile's file.
+    assert _run("caps", "set", "--total", "12") == 0
+    assert yaml.safe_load(get_config_path().read_text())["kanban"]["max_in_progress"] == 12
+
+
+def test_record_whose_writer_exited_is_stale(home):
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()  # reaped: the pid names no process now
+    kanban_caps.write_live_caps(kanban_caps.KanbanCaps(total=10), effective_total=10, config_path=get_config_path())
+    record = kanban_caps.read_live_caps_record()
+    assert record is not None
+    assert kanban_caps.live_record_is_current({**record, "pid": child.pid}) is False
+
+
+def test_record_from_the_running_dispatcher_is_live(home):
+    kanban_caps.write_live_caps(kanban_caps.KanbanCaps(total=10), effective_total=10, config_path=get_config_path())
+    record = kanban_caps.read_live_caps_record()
+    assert record is not None
+    assert record["pid"] == os.getpid() and record["pid_start_time"] is not None
+    assert kanban_caps.caps_summary()["live_state"] == "live"
 
 
 def test_show_json_reports_lanes_and_live_state(home, capsys):

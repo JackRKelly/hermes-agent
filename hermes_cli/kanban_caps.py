@@ -22,10 +22,11 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,9 @@ PER_PROFILE_KEY = "max_in_progress_per_profile"
 BY_PROFILE_KEY = "max_in_progress_by_profile"
 
 LIVE_CAPS_FILENAME = "dispatcher_caps.json"
+
+# Where the live record stands: written by the running dispatcher, left by one that is gone, or absent.
+LiveState = Literal["live", "stale", "none"]
 
 
 @dataclass(frozen=True)
@@ -221,11 +225,19 @@ def live_caps_path() -> Path:
 
 def write_live_caps(caps: KanbanCaps, *, effective_total: Optional[int], config_path: Optional[Path]) -> None:
     """Record the caps the dispatcher applied (boot and every change). Never raises: the
-    record is for humans and must not stop dispatch."""
+    record is for humans and must not stop dispatch.
+
+    The writer's ``pid`` and ``pid_start_time`` go in too. Nothing deletes this file when a
+    gateway stops (a crash cannot), so a reader uses them to tell a record from the running
+    dispatcher from one left behind by an earlier gateway (:func:`live_record_is_current`).
+    """
+    from gateway.status import get_process_start_time
     from utils import atomic_json_write
 
+    pid = os.getpid()
     payload = {**caps.as_dict(), "effective_total": effective_total, "applied_at": int(time.time()),
-               "config_path": str(config_path) if config_path else None}
+               "config_path": str(config_path) if config_path else None,
+               "pid": pid, "pid_start_time": get_process_start_time(pid)}
     try:
         path = live_caps_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -234,12 +246,44 @@ def write_live_caps(caps: KanbanCaps, *, effective_total: Optional[int], config_
         logger.warning("kanban dispatcher: could not record live caps", exc_info=True)
 
 
-def read_live_caps() -> Optional[dict[str, Any]]:
-    """The dispatcher's last record, or ``None`` when absent or unreadable."""
+def live_record_is_current(record: Mapping[str, Any]) -> bool:
+    """Whether *record*'s writer is still running: its pid exists with the same start time.
+
+    The start time is the pid-reuse guard: after a reboot or a gateway restart the old pid can
+    belong to an unrelated process, which would otherwise make an old record look live. A record
+    without both fields, or whose start time cannot be read now, counts as stale (fail closed:
+    showing "no live dispatcher record" is safer than presenting old caps as enforced).
+    """
+    from gateway.status import get_process_start_time, start_time_fingerprints_match
+
+    pid, recorded = record.get("pid"), record.get("pid_start_time")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or recorded is None:
+        return False
+    current = get_process_start_time(pid)
+    if current is None:
+        return False
+    try:
+        return start_time_fingerprints_match(recorded, current)
+    except (TypeError, ValueError):
+        return False
+
+
+def read_live_caps_record() -> Optional[dict[str, Any]]:
+    """The last record on disk, live or stale, or ``None`` when absent or unreadable."""
     from utils import read_json_or_empty
 
     data = read_json_or_empty(live_caps_path())
     return data or None
+
+
+def read_live_caps() -> Optional[dict[str, Any]]:
+    """The running dispatcher's record, or ``None`` when absent, unreadable or stale.
+
+    Every reader that acts on the record (the summary, the other-profile refusal) uses this,
+    so a record from a dispatcher that is gone never drives a decision.
+    """
+    record = read_live_caps_record()
+    return record if record and live_record_is_current(record) else None
 
 
 # --- Writer (``hermes kanban caps set``) -----------------------------------------------------
@@ -362,12 +406,16 @@ def _dispatcher_kanban_section(live: Optional[Mapping[str, Any]]) -> tuple[Path,
 def caps_summary() -> dict[str, Any]:
     """Configured caps next to the dispatcher's live record (no board reads; the dashboard uses it).
 
-    ``live`` is what the dispatcher enforces; ``in_sync`` is False while an edit waits for the next
-    tick, or when config.yaml holds caps the dispatcher refused (``config_errors``).
+    ``live`` is what the running dispatcher enforces, ``None`` when no running dispatcher wrote a
+    record; ``live_state`` says which (``live``, ``stale``: the record's writer is gone, ``none``:
+    no record). ``in_sync`` is False while an edit waits for the next tick, or when config.yaml holds
+    caps the dispatcher refused (``config_errors``).
     """
     from hermes_cli import kanban_db_dispatch as kbd
 
-    live = read_live_caps()
+    record = read_live_caps_record()
+    live = record if record and live_record_is_current(record) else None
+    live_state: LiveState = "live" if live else ("stale" if record else "none")
     config_path, section = _dispatcher_kanban_section(live)
     caps, errors = parse_caps(section or {})
     return {
@@ -376,6 +424,7 @@ def caps_summary() -> dict[str, Any]:
         "config_errors": errors,
         "effective_total": kbd.resolve_max_in_progress(caps.total) if caps else None,
         "live": live,
+        "live_state": live_state,
         "in_sync": bool(live and caps and KanbanCaps.from_dict(live) == caps),
     }
 
@@ -402,7 +451,10 @@ def _print_snapshot(snap: dict[str, Any]) -> None:
     else:
         print(f"  configured  {KanbanCaps.from_dict(configured).label()}")
     if live is None:
-        print("  live        no record yet (the gateway dispatcher writes one at start and on every change)")
+        why = ("the last record is from a dispatcher that is no longer running"
+               if snap["live_state"] == "stale"
+               else "the gateway dispatcher writes one at start and on every change")
+        print(f"  live        no live dispatcher record ({why})")
     else:
         applied = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(live.get("applied_at") or 0))
         state = "in sync" if snap["in_sync"] else "differs from config.yaml: applies on the next dispatcher tick"
