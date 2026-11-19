@@ -79,6 +79,28 @@ def per_profile_state(
     return cap, running
 
 
+def held_for_profile(conn: sqlite3.Connection, task_id: str, assignee: str, result: DispatchResult, *,
+                     dry_run: bool, per_profile_cap: Optional[ProfileCapPolicy],
+                     per_profile_running: dict[str, int]) -> bool:
+    """Per-profile cap (one profile's local model / API quota / browser pool must not be overwhelmed
+    by a fan-out even with global headroom), then the provider breaker; records the hold.
+
+    ``per_profile_cap`` is ``None`` when no lane has a limit, and for the fast lane, which spawns
+    past the per-profile cap by design.
+    """
+    from hermes_cli import kanban_db_provider_breaker as kbpb
+
+    current = per_profile_running.get(assignee, 0)
+    limit = per_profile_cap.limit(assignee) if per_profile_cap is not None else None
+    if limit is not None and current >= limit:
+        result.skipped_per_profile_capped.append((task_id, assignee, current))
+        return True
+    if kbpb.paused(conn, assignee, note=not dry_run):  # no per-tick event: the breaker row says why
+        result.respawn_guarded.append((task_id, "provider_paused"))
+        return True
+    return False
+
+
 def _fast_lane_rows_sql(settings: FastLaneSettings) -> str:
     """``WHERE`` clause (on ``tasks t``) for the cards the lane trusts; bind ``settings.created_by``.
 
