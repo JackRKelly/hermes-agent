@@ -26,7 +26,13 @@ WITHDRAWN_PREFIX = "[action-item-withdrawn"
 # handler). No agent-facing path may emit one, anywhere in its text.
 DECISION_PREFIXES = ("[jack-approved", "[jack-rejected", "[jack-done", "[jack-answer")
 ITEM_RE = re.compile(r"(?<!\S)item=([0-9a-f]{16})(?!\S)")
-STATIC_LINK_HOSTS = frozenset({"github.com", "linear.app", "mail.google.com", "app.slack.com"})
+# Drive and Docs (Jack, Nov 17): a video or doc for Jack lives on Drive, and with only the first
+# four hosts allowed an agent had to paste its URL into the summary instead of ``links[]``. The
+# assistant app's ``LINK_HOSTS`` (``scripts/action_item.py`` and the dashboard bundle) must list at
+# least these hosts, or its Links row drops them. The app lists are a superset: both also carry
+# ``cybershiptechnologies.slack.com``, which this set does not.
+STATIC_LINK_HOSTS = frozenset({"github.com", "linear.app", "mail.google.com", "app.slack.com",
+                               "drive.google.com", "docs.google.com"})
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 # An HTML tag (``<p>``, ``</div>``, ``<br/>``, ``<a href=...>``); ``<dave@x.com>`` is not one.
 HTML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)?/?>")
