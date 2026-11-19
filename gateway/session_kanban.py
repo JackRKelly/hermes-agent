@@ -405,8 +405,10 @@ def _park_unavailable_skills(context, missing):
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect_closing
+    from agent.safe_worker_policy import safe_worker_enabled
     from hermes_cli.kanban_skill_preflight import missing_skills_block_reason
-    reason = missing_skills_block_reason(missing, context['profile'])
+    # A safe-mode worker loads no skill on purpose, so its park must not say "not installed".
+    reason = missing_skills_block_reason(missing, context['profile'], safe_mode=safe_worker_enabled())
     with connect_closing(Path(context['db'])) as conn:
         kb.block_task(conn, context['task_id'], reason=reason, kind='capability',
                       expected_run_id=context['run_id'])

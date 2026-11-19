@@ -56,6 +56,20 @@ def test_missing_pinned_skill_parks_the_card_instead_of_crashing(tmp_path, monke
     assert session_kanban.worker_result(path, context)["last_output"] == reason
 
 
+def test_safe_mode_worker_park_does_not_claim_the_skill_is_missing(tmp_path, monkeypatch):
+    """Safe mode loads no skill on purpose: the reason says so instead of "not installed"."""
+    import agent.safe_worker_policy as policy
+    path, context = _bound_attempt(tmp_path, monkeypatch, ["reviewer-skill"])
+    monkeypatch.setattr(policy, "safe_worker_enabled", lambda: True)
+
+    result = session_kanban._park_unavailable_skills(context, ["reviewer-skill"])
+
+    assert result["final_response"] == ("[captain:skills] pinned skill(s) reviewer-skill not loaded: "
+                                        "reviewer's worker runs in safe mode, which loads no skills")
+    with connect_closing(path) as conn:
+        assert kb.get_task(conn, context["task_id"]).block_kind == "capability"
+
+
 def test_park_is_fenced_to_the_attempt_run(tmp_path, monkeypatch):
     """A reclaimed attempt (its run superseded) must not block the card's newer run."""
     path, context = _bound_attempt(tmp_path, monkeypatch, ["not-installed-review"])

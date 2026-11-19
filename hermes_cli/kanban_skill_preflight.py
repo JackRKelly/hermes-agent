@@ -5,32 +5,99 @@ does not resolve there makes every attempt fail the same way, so it is refused w
 created (``kanban_create`` tool, ``hermes kanban create --skill``) and, for a card that got past
 that (created before this check, or the skill was removed later), parked once by the worker with
 :func:`missing_skills_block_reason` instead of crashing and spending the retry budget.
+
+The check runs in a FRESH process under the assignee's home (:func:`missing_pinned_skills`), not in
+the caller's: agents call ``kanban_create`` from inside a managed worker, where every config reader
+returns that worker's frozen session config (``agent/safe_worker_policy.py``), so an in-process
+lookup would judge ``skills.external_dirs`` and the disabled list by the CREATOR's profile. A fresh
+process reads the assignee's own ``config.yaml``, the file its worker's session config is frozen
+from, and the tool and the CLI get the same answer.
+
+Run as ``python -m hermes_cli.kanban_skill_preflight <skill>...``: prints the missing ones as one
+JSON line after :data:`_RESULT_MARKER`.
 """
 from __future__ import annotations
 
+import json
+import logging
+import subprocess
+import sys
+from pathlib import Path
 from typing import Iterable
+
+logger = logging.getLogger(__name__)
 
 # The card-comment tag Captain triages on: installing a skill into a crew profile is Captain's call.
 SKILLS_BLOCK_TAG = "[captain:skills]"
 
+# Prefix of the child's answer line, so a stray print from an import cannot be mistaken for it.
+_RESULT_MARKER = "kanban-skill-preflight:"
 
-def missing_skills_block_reason(missing: Iterable[str], profile: str) -> str:
-    """The park reason for a card whose pinned *missing* skills do not load for *profile*."""
-    return f"{SKILLS_BLOCK_TAG} pinned skill(s) {', '.join(missing)} not installed for {profile}"
+# Platform env the kanban worker does not bind (``gateway/session_kanban.py`` sets no session
+# platform, and nothing exports ``HERMES_PLATFORM``), dropped so the creator's platform cannot pick
+# ``skills.platform_disabled`` entries the worker would not apply.
+_UNBOUND_PLATFORM_ENV = ("HERMES_PLATFORM", "HERMES_SESSION_PLATFORM")
+
+# Bound on the child (a cold import plus one skills scan). Past it the check does not refuse: the
+# card is created and the run-time park reports a missing skill instead.
+_CHILD_TIMEOUT_S = 60
+
+
+def missing_skills_block_reason(missing: Iterable[str], profile: str, *, safe_mode: bool = False) -> str:
+    """The park reason for a card whose pinned *missing* skills do not load for *profile*.
+    *safe_mode*: the worker runs in safe mode, which loads no skills at all, so they are not
+    "not installed" there."""
+    names = ", ".join(missing)
+    if safe_mode:
+        return (f"{SKILLS_BLOCK_TAG} pinned skill(s) {names} not loaded: {profile}'s worker runs in "
+                "safe mode, which loads no skills")
+    return f"{SKILLS_BLOCK_TAG} pinned skill(s) {names} not installed for {profile}"
+
+
+def _resolve_in_child(home: str, names: list[str]) -> list[str] | None:
+    """Missing *names* as a fresh process under *home* resolves them, or None when the child failed."""
+    from tools.environments.local import served_profile_child_env
+    env = served_profile_child_env(target_home=home, inherit_credentials=False)
+    for key in _UNBOUND_PLATFORM_ENV:
+        env.pop(key, None)
+    # Same interpreter and working directory the managed worker is spawned with
+    # (gateway/session_managed_worker.py), so the child imports this checkout's code.
+    source_root = Path(__file__).resolve().parents[1]
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "hermes_cli.kanban_skill_preflight", *names],
+            cwd=source_root, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=_CHILD_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("pinned-skill preflight under %s did not run: %s", home, exc)
+        return None
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith(_RESULT_MARKER):
+            try:
+                missing = json.loads(line[len(_RESULT_MARKER):])
+            except ValueError:
+                break
+            if isinstance(missing, list) and all(isinstance(n, str) for n in missing):
+                return missing
+            break
+    logger.warning("pinned-skill preflight under %s gave no answer (exit %s): %s",
+                   home, proc.returncode, (proc.stderr or "").strip()[-500:])
+    return None
 
 
 def missing_pinned_skills(assignee: str | None, skills: Iterable[str] | None) -> list[str]:
-    """Pinned *skills* that would not load for *assignee*'s worker: the resolution its preload
-    runs (``build_preloaded_skills_prompt``: the profile's skills dir, its ``skills.external_dirs``,
-    operator-disabled skills count as missing), done under that profile's home.
+    """Pinned *skills* that would not load for *assignee*'s worker: the lookup its preload runs
+    (``build_preloaded_skills_prompt``: the profile's skills dir, its ``skills.external_dirs``,
+    operator-disabled skills count as missing), done in a fresh process under that profile's home.
 
-    Empty when every skill resolves, and when the assignee's home cannot be resolved (no assignee,
-    unknown profile): the dispatcher already refuses to spawn those, and this check must not invent
-    a second answer. Plugin-qualified names (``plugin:skill``) are skipped: they resolve through the
-    plugins loaded in the WORKER's process, which this process cannot see, so the run-time park
-    covers them.
+    Empty when every skill resolves, and also (never a refusal) when the answer is unknown: no
+    assignee or an unknown profile (the dispatcher already refuses to spawn those, and this check
+    must not invent a second answer), or a child that failed or timed out (logged; the run-time
+    park covers it). Plugin-qualified names (``plugin:skill``) are skipped: they resolve through
+    the plugins loaded in the worker's process.
     """
-    names = [s.strip() for s in skills or () if isinstance(s, str) and s.strip() and ":" not in s]
+    names = list(dict.fromkeys(
+        s.strip() for s in skills or () if isinstance(s, str) and s.strip() and ":" not in s))
     if not names or not assignee:
         return []
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
@@ -38,15 +105,7 @@ def missing_pinned_skills(assignee: str | None, skills: Iterable[str] | None) ->
         home = resolve_profile_env(normalize_profile_name(assignee))
     except (FileNotFoundError, ValueError):
         return []
-    from agent.skill_commands import unresolved_preloaded_skills
-    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-    # Context-local, never os.environ: the skills dir, config (external_dirs, disabled list) and the
-    # skill scan all read get_hermes_home() at call time.
-    token = set_hermes_home_override(home)
-    try:
-        return unresolved_preloaded_skills(names)
-    finally:
-        reset_hermes_home_override(token)
+    return _resolve_in_child(str(home), names) or []
 
 
 def pinned_skills_error(assignee: str | None, skills: Iterable[str] | None) -> str | None:
@@ -57,3 +116,14 @@ def pinned_skills_error(assignee: str | None, skills: Iterable[str] | None) -> s
     return (f"pinned skill(s) {', '.join(missing)} not installed for profile {assignee}: its worker "
             "could not load them and every run would fail. Install them into that profile (or "
             "its skills.external_dirs), assign a profile that has them, or drop them from skills.")
+
+
+def main(argv: list[str]) -> int:
+    """Child entry: print which *argv* skills this process's home cannot load."""
+    from agent.skill_commands import unresolved_preloaded_skills
+    print(_RESULT_MARKER + json.dumps(unresolved_preloaded_skills(argv)), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

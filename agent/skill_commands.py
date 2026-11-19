@@ -987,17 +987,22 @@ def build_preloaded_skills_prompt(
 
 
 def unresolved_preloaded_skills(skill_identifiers: list[str]) -> list[str]:
-    """The identifiers :func:`build_preloaded_skills_prompt` would report missing under the
-    current home (unknown, or operator-disabled), without rendering them: no Curator usage bump
-    and no skill message build, so a card-creation preflight leaves the target profile untouched.
-    The safe-worker gate is not applied: it belongs to the process that runs the skill."""
+    """The filesystem identifiers :func:`build_preloaded_skills_prompt` would report missing in
+    THIS process (unknown, ambiguous, wrong platform, or operator-disabled), found by the same
+    lookup ``skill_view`` runs but without loading: no ``deps`` install, no read mark, no Curator
+    usage bump, no message build. It reads this process's config, so a caller asking about another
+    profile runs it in a fresh process under that profile's home
+    (``hermes_cli/kanban_skill_preflight.py``). Unlike the preload it does not apply the
+    safe-worker gate, which would report every skill missing."""
+    from agent.skill_utils import normalize_skill_lookup_name
+    from tools.skills_tool import viewable_skill_name
     disabled = _disabled_skill_names()
     missing: list[str] = []
     for identifier in dict.fromkeys((raw or "").strip() for raw in skill_identifiers):
         if not identifier:
             continue
-        loaded = _load_skill_payload(identifier)
-        if not loaded or _skill_is_disabled(loaded[2], identifier, disabled):
+        name = viewable_skill_name(normalize_skill_lookup_name(identifier))
+        if name is None or _skill_is_disabled(name, identifier, disabled):
             missing.append(identifier)
     return missing
 
