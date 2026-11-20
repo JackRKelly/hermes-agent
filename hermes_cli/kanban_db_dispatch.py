@@ -2045,46 +2045,6 @@ def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
         return "unknown"
 
 
-# Disk guard: on 2026-11-19 a crew filled a 926 GiB Data volume; every spawn then
-# crashed with ENOSPC and each retry wrote more (worktree add, pnpm install). Free
-# space below ``kanban.disk_critical_gb`` (default 40) spawns nothing; below
-# ``kanban.disk_elevated_gb`` (default 120) at most one new worker per tick.
-# Fails open: an unreadable volume or bad config imposes no restriction.
-DISK_CRITICAL_GB_DEFAULT = 40.0
-DISK_ELEVATED_GB_DEFAULT = 120.0
-
-
-def _disk_free_gb(path: Optional[str] = None) -> Optional[float]:
-    try:
-        if path is None:
-            from hermes_constants import get_hermes_home
-            path = str(get_hermes_home())
-        st = os.statvfs(path)
-        return st.f_bavail * st.f_frsize / (1024 ** 3)
-    except Exception:
-        return None
-
-
-def _disk_pressure_level(free_gb: Optional[float] = None) -> str:
-    """Classify free space on the Hermes volume: ok/elevated/critical/unknown."""
-    if free_gb is None:
-        free_gb = _disk_free_gb()
-    if free_gb is None:
-        return "unknown"
-    try:
-        from hermes_cli.config import load_config_readonly
-        kcfg = (load_config_readonly() or {}).get("kanban", {}) or {}
-        critical = float(kcfg.get("disk_critical_gb", DISK_CRITICAL_GB_DEFAULT))
-        elevated = float(kcfg.get("disk_elevated_gb", DISK_ELEVATED_GB_DEFAULT))
-    except Exception:
-        critical, elevated = DISK_CRITICAL_GB_DEFAULT, DISK_ELEVATED_GB_DEFAULT
-    if free_gb < critical:
-        return "critical"
-    if free_gb < elevated:
-        return "elevated"
-    return "ok"
-
-
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -2402,23 +2362,6 @@ def _tick_spawn_budget(
         if spawn_budget is None or spawn_budget > 1:
             _kb._log.warning(
                 "kanban dispatch: system memory pressure is elevated; "
-                "limiting to at most 1 new worker this tick"
-            )
-            spawn_budget = 1
-
-    disk = _disk_pressure_level()
-    if disk == "critical":
-        result.memory_pressure = "disk-critical"
-        _kb._log.warning(
-            "kanban dispatch: disk free space is critical; "
-            "spawning no new workers this tick (deferred, not dropped)"
-        )
-        return False, None
-    if disk == "elevated":
-        result.memory_pressure = result.memory_pressure or "disk-elevated"
-        if spawn_budget is None or spawn_budget > 1:
-            _kb._log.warning(
-                "kanban dispatch: disk free space is low; "
                 "limiting to at most 1 new worker this tick"
             )
             spawn_budget = 1
