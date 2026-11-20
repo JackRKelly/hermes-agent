@@ -1120,7 +1120,7 @@ def _handle_create(args: dict, **kw) -> str:
         _parse_bool_arg(args, "triage"), _coerce_str_list(args.get("skills"), "skills", "skill names"),
         _parse_bool_arg(args, "goal_mode"))
     from hermes_cli.kanban_skill_preflight import pinned_skills_error
-    if skill_error := pinned_skills_error(str(assignee), skills):
+    if skill_error := pinned_skills_error(str(assignee), skills, workspace_kind, workspace_path):
         raise _Reject(skill_error)
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
