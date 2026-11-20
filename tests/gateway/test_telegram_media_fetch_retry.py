@@ -10,16 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import anyio
 import httpx
 import pytest
-from telegram import Bot, PhotoSize
-from telegram.error import BadRequest, NetworkError
-from telegram.request import HTTPXRequest
+from telegram.error import BadRequest, NetworkError  # tests/gateway/conftest.py mirrors PTB's hierarchy
 
 from plugins.platforms.telegram import telegram_media_fetch as fetch_mod
 from plugins.platforms.telegram.telegram_media_fetch import fetch_telegram_file
 from plugins.platforms.telegram.telegram_network import describe_cause_chain
 from tests.gateway.test_telegram_documents import _make_file_obj, _make_message, _make_update
-
-TOKEN = "123456:TEST-token"
 
 
 def _ptb_connect_error() -> NetworkError:
@@ -58,38 +54,30 @@ def clock(monkeypatch):
     return fake
 
 
-def _bot_over(handler) -> Bot:
-    """A real PTB Bot whose HTTP goes through ``handler`` (PTB request stack and httpx untouched)."""
-    request = HTTPXRequest(httpx_kwargs={"transport": httpx.MockTransport(handler)})
-    return Bot(TOKEN, request=request)
+@pytest.mark.asyncio
+async def test_get_file_connect_error_is_retried_with_backoff(clock):
+    source = MagicMock()
+    source.get_file = AsyncMock(side_effect=[_ptb_connect_error(), _ptb_connect_error(), _make_file_obj(b"image")])
+
+    _, data = await fetch_telegram_file(source, "photo")
+
+    assert data == b"image"
+    assert source.get_file.await_count == 3
+    assert clock.sleeps == list(fetch_mod.FOREGROUND_RETRY_DELAYS_S[:2])
 
 
 @pytest.mark.asyncio
-async def test_get_file_connect_error_is_retried_through_the_real_ptb_stack(clock):
-    get_file_calls = 0
+async def test_a_failed_download_is_retried_too(clock):
+    """The second leg (file download) fails the same way and gets a fresh getFile on retry."""
+    flaky = _make_file_obj(b"image")
+    flaky.download_as_bytearray = AsyncMock(side_effect=[_ptb_connect_error(), bytearray(b"image")])
+    source = MagicMock()
+    source.get_file = AsyncMock(return_value=flaky)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal get_file_calls
-        if request.url.path.endswith("/getFile"):
-            get_file_calls += 1
-            if get_file_calls <= 2:
-                raise httpx.ConnectError("", request=request)
-            return httpx.Response(200, json={"ok": True, "result": {
-                "file_id": "f1", "file_unique_id": "u1", "file_size": 5, "file_path": "photos/file_1.jpg"}})
-        if request.url.path.endswith("/photos/file_1.jpg"):
-            return httpx.Response(200, content=b"image")
-        return httpx.Response(404, json={"ok": False, "description": "unexpected"})
-
-    bot = _bot_over(handler)
-    photo = PhotoSize("f1", "u1", width=1, height=1, file_size=5)
-    photo.set_bot(bot)
-
-    file_obj, data = await fetch_telegram_file(photo, "photo")
+    _, data = await fetch_telegram_file(source, "photo")
 
     assert data == b"image"
-    assert file_obj.file_path.endswith("photos/file_1.jpg")
-    assert get_file_calls == 3
-    assert clock.sleeps == list(fetch_mod.FOREGROUND_RETRY_DELAYS_S[:2])
+    assert source.get_file.await_count == 2
 
 
 @pytest.mark.asyncio
