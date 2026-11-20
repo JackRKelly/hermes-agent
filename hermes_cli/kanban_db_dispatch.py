@@ -21,7 +21,6 @@ from dataclasses import field
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Iterable
 from typing import Iterator
 from typing import Mapping
 from typing import Optional
@@ -150,35 +149,7 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
-
-
-def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
-    """One line naming why the tick(s) held ready work back, or ``""``.
-
-    ``active_pr=1, recent_success=2, rate_limited=1, skipped_locked=1,
-    memory_pressure=critical`` — the respawn-guard reasons counted per task
-    plus the tick-level holds. Feeds the "dispatcher stuck" warnings of the
-    CLI daemon and the embedded gateway dispatcher, which otherwise report a
-    bare zero-spawn count while ``hermes kanban tail`` is the only place the
-    guard reason is written (#111910).
-    """
-    counts: dict[str, int] = {}
-    pressure: Optional[str] = None
-    for res in results:
-        if res is None:
-            continue
-        for _task_id, reason in res.respawn_guarded:
-            counts[reason] = counts.get(reason, 0) + 1
-        if res.rate_limited:
-            counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
-        if res.skipped_locked:
-            counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
-        if res.memory_pressure:
-            pressure = res.memory_pressure
-    parts = [f"{k}={v}" for k, v in sorted(counts.items())]
-    if pressure:
-        parts.append(f"memory_pressure={pressure}")
-    return ", ".join(parts)
+    disk_guard: Optional[str] = None  # kanban_disk_guard state (None = off); holds are ``disk_low``
 
 
 # Bounded registry of recently-reaped worker exits, filled by the reap loop in
@@ -736,6 +707,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "sigkill": killed, "retry_status": retry_status},
+                infrastructure=_kbdg.dead_worker_is_infrastructure(conn, tid, error),
             )
     return timed_out
 
@@ -1298,6 +1270,10 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
             )
+        elif _kbdg.dead_worker_is_infrastructure(conn, tid, error_text):
+            # Died on (or while the guard saw) a full disk: booked, never counted, never systemic.
+            tripped = _record_task_failure(conn, tid, error=error_text, outcome="crashed",
+                                           release_claim=False, end_run=False, infrastructure=True)
         else:
             is_systemic = not dead.owner_wide and fp_counts[_error_fingerprint(error_text)] >= 3
             extra = {"pid": pid, "claimer": claimer}
@@ -1664,7 +1640,8 @@ def check_respawn_guard(
         "ORDER BY ended_at DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    if latest_run is not None and latest_run["outcome"] == "spawn_failed":
+    # A crash or timeout the disk guard booked as infrastructure is spaced the same way.
+    if latest_run is not None and latest_run["outcome"] in ("spawn_failed", "crashed", "timed_out"):
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = _kb._to_epoch(latest_run["ended_at"])
             if ended_at is not None and (now - ended_at) < rl_cooldown:
@@ -2061,6 +2038,7 @@ def dispatch_once(
     reconcile_orphans: bool = True,
     max_in_progress_by_profile: Optional[Mapping[str, int]] = None,
     fast_lane: Optional[_kbcaps.FastLaneSettings] = None,
+    disk_guard: Optional[_kbdg.DiskGuardSettings] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2086,6 +2064,7 @@ def dispatch_once(
             reconcile_orphans=reconcile_orphans,
             max_in_progress_by_profile=max_in_progress_by_profile,
             fast_lane=fast_lane,
+            disk_guard=disk_guard,
         )
 
     try:
@@ -2137,10 +2116,12 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[_kcaps.ProfileCapPolicy],
     per_profile_running: dict[str, int],
+    disk: Optional[_kbdg.DiskSnapshot] = None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
-    skip is recorded on ``result``.
+    skip is recorded on ``result``. ``disk`` is the tick's disk-guard reading
+    (``None`` = guard off).
     """
     task_id = row["id"]
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
@@ -2166,6 +2147,8 @@ def _dispatch_lane_task(
         return False
     if _kbcaps.held_for_profile(conn, task_id, assignee, result, dry_run=dry_run,
                                 per_profile_cap=per_profile_cap, per_profile_running=per_profile_running):
+        return False
+    if _kbdg.hold_card(conn, task_id, assignee, result, disk, dry_run=dry_run):
         return False
     guard_reason = check_respawn_guard(conn, task_id, lane=lane)
     if guard_reason is not None:
@@ -2209,6 +2192,7 @@ def _dispatch_lane_task(
         if _record_task_failure(
             conn, claimed.id, f"workspace: {exc}",
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+            infrastructure=_kbdg.spawn_failure_is_infrastructure(disk, exc),
         ):
             result.auto_blocked.append(claimed.id)
         return False
@@ -2235,9 +2219,9 @@ def _dispatch_lane_task(
     except Exception as exc:
         from tools.process_registry import RestartSafeScopeUnavailable
 
-        # The host refused the spawn (no restart-safe scope): nothing about the
-        # card ran, so it must not spend the card's retry budget (#114720).
-        infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
+        # The host refused the spawn (no restart-safe scope, #114720) or its disk
+        # is full: nothing about the card ran, so it must not spend the card's retry budget.
+        infrastructure = isinstance(exc, RestartSafeScopeUnavailable) or _kbdg.spawn_failure_is_infrastructure(disk, exc)
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
@@ -2446,18 +2430,25 @@ def _dispatch_once_locked(
     reconcile_orphans: bool = True,
     max_in_progress_by_profile: Optional[Mapping[str, int]] = None,
     fast_lane: Optional[_kbcaps.FastLaneSettings] = None,
+    disk_guard: Optional[_kbdg.DiskGuardSettings] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`; ``fast_lane`` cards spawn first, past the caps
-    (:func:`hermes_cli.kanban_db_dispatch_caps.run_fast_lane`)."""
+    (:func:`hermes_cli.kanban_db_dispatch_caps.run_fast_lane`). ``disk_guard``
+    holds spawns on a nearly full disk (:mod:`hermes_cli.kanban_disk_guard`)."""
     result = DispatchResult()
+    # Measured first, so the crash/timeout accounting below sees this tick's disk state.
+    disk = _kbdg.begin_tick(conn, disk_guard, dry_run=dry_run)
+    result.disk_guard = disk.state if disk is not None else None
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    if _kbdg.hold_all_lanes(conn, result, disk, dry_run=dry_run):
+        return result
     # Per-profile cap (#21582): no single profile's local model / API quota /
     # browser pool is melted by a fan-out. Deferred tasks go to
     # skipped_per_profile_capped, not skipped_unassigned. Counted BEFORE the
@@ -2468,7 +2459,7 @@ def _dispatch_once_locked(
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
-        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running, disk=disk,
     )
     fast = _kbcaps.run_fast_lane(conn, result, fast_lane, lane_kwargs)
     may_spawn, spawn_budget = _tick_spawn_budget(
@@ -2980,6 +2971,7 @@ def run_daemon(
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
+                    disk_guard=_kbdg.configured_disk_guard(),
                 )
             if on_tick is not None:
                 with contextlib.suppress(Exception):
@@ -3002,3 +2994,4 @@ from hermes_cli import kanban_db_idle as _kbi
 from hermes_cli import kanban_db_provider_breaker as _kbpb
 from hermes_cli import kanban_db_respawn_pr as _kbpr
 from hermes_cli import kanban_db_workspace as _kbw
+from hermes_cli import kanban_disk_guard as _kbdg

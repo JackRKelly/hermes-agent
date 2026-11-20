@@ -1,4 +1,4 @@
-# health: allow FILE_LINES -- kanban provider_breaker/idle_reclaim defaults: 3 data lines in the pure-data DEFAULT_CONFIG (no function to move); the duplicated cap comments stay
+# health: allow FILE_LINES -- kanban provider_breaker/idle_reclaim and disk_guard defaults: data lines in the pure-data DEFAULT_CONFIG (no function to move); the duplicated cap comments stay
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
@@ -1916,6 +1916,10 @@ DEFAULT_CONFIG = {
         # max_in_progress / max_spawn / the per-profile cap, at most max_running at once on the
         # board. Keyed on creator, never priority. Memory pressure still applies. [] = off.
         "fast_lane": {"created_by": [], "max_running": 2},
+        # Disk guard (GB free): hold heavy cards below heavy_min, every card below all_min; ENOSPC
+        # never counts against a card. See the kanban docs, "Disk guard".
+        "disk_guard": {"enabled": True, "heavy_min_free_gb": 40, "all_min_free_gb": 20, "resume_margin_gb": 5,
+                       "heavy_assignees": ["crew-pilot-*-builder"], "extra_paths": []},
         # Provider breaker and opt-in idle reclaim (0 = off): see the kanban docs, "Provider breaker".
         "provider_breaker": {"failures": 3, "window_seconds": 300, "probe_seconds": 90, "max_probe_wait_seconds": 1800},
         "idle_reclaim_minutes": 0, "idle_reclaim_grace_minutes": 5,
