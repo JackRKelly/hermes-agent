@@ -26,18 +26,20 @@ def describe_cause_chain(error: BaseException) -> str:
     ``EndOfStream`` / ``BrokenResourceError`` / ``SSLError`` = TLS). Logging the chain is what lets a
     day of flaps say which layer fails.
     """
-    parts: list[str] = []
-    current: BaseException | None = error
-    while current is not None and len(parts) < 6:  # bounded: a cyclic chain must not loop
-        text = str(current)
-        parts.append(f"{type(current).__name__}({text!r})" if text else type(current).__name__)
-        current = current.__cause__ or current.__context__
-    chain = " <- ".join(parts)
+    # Runs inside the transport's error handler: any failure here (a raising ``__str__``, the
+    # redactor) must fall back to the type name, never replace the transport error being handled.
     try:
         from agent.redact import redact_sensitive_text
-    except ImportError:
+
+        parts: list[str] = []
+        current: BaseException | None = error
+        while current is not None and len(parts) < 6:  # bounded: a cyclic chain must not loop
+            text = str(current)
+            parts.append(f"{type(current).__name__}({text!r})" if text else type(current).__name__)
+            current = current.__cause__ or current.__context__
+        return redact_sensitive_text(" <- ".join(parts), force=True)
+    except Exception:  # health: allow BLE001 -- runs inside the transport's error handler; must never replace the error it describes
         return type(error).__name__
-    return redact_sensitive_text(chain, force=True)
 
 
 def _describe_transport_error(error: Exception) -> str:

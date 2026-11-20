@@ -6343,21 +6343,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramMediaRetryMixin, Telegra
         attempted and failed — never a silent empty turn. No new event fields (the structured-event refactor
         is out of scope per #23045).
         """
-        self._defer_media_failure(exc)  # a transient download failure retries in the background first
-        # Inbound media fails before handle_message binds the routed profile.
+        # A transient download failure retries in the background first; the same reply is its
+        # notice if a disconnect ends that retry early.
+        self._defer_media_failure(exc, lambda: self._reply_media_failure(msg, event, kind, exc, display_name))
+        notice, named = await self._reply_media_failure(msg, event, kind, exc, display_name)
         with self._media_delivery_scope(event.source):
-            named = t("platform.telegram.media.named_suffix", name=display_name) if display_name else ""
-            # ``kind`` is the English label the agent-visible note below keeps; the chat reply is localized.
-            notice = self.warning_text(t(
-                "platform.telegram.media.download_failed",
-                kind=t(_MEDIA_KIND_KEYS[kind]) if kind in _MEDIA_KIND_KEYS else kind,
-                name=named, error=exc.__class__.__name__))
-            if notice:
-                try:
-                    self._accept_update()
-                    await msg.reply_text(notice)
-                except Exception as reply_err:
-                    logger.warning("[Telegram] Failed to notify user about %s cache failure: %s", kind, reply_err, exc_info=True)
             # The agent-visible note is execution evidence, not a channel diagnostic; it stays in both modes.
             event.text = self._append_observed_note(
                 event.text,

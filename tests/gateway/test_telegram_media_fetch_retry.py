@@ -158,7 +158,7 @@ async def test_photo_still_failing_is_handed_to_the_session_by_the_background_re
 
 @pytest.mark.asyncio
 async def test_user_is_told_only_after_the_background_window_closes(adapter, clock):
-    def always_down():
+    def always_down(**_timeouts):
         raise _ptb_connect_error()
 
     get_file = AsyncMock(side_effect=always_down)
@@ -179,12 +179,15 @@ async def test_user_is_told_only_after_the_background_window_closes(adapter, clo
 
 
 @pytest.mark.asyncio
-async def test_disconnect_cancels_a_pending_background_retry(adapter, monkeypatch):
+@pytest.mark.parametrize("task_started", [False, True], ids=["cancelled-before-first-step", "waiting-between-passes"])
+async def test_disconnect_cancels_a_pending_background_retry(adapter, monkeypatch, task_started):
     import asyncio
 
     gate = asyncio.Event()
+    waiting = asyncio.Event()
 
     async def blocked_sleep(_delay):
+        waiting.set()
         await gate.wait()
 
     monkeypatch.setattr(fetch_mod, "_sleep", blocked_sleep)
@@ -193,8 +196,138 @@ async def test_disconnect_cancels_a_pending_background_retry(adapter, monkeypatc
 
     await adapter._handle_media_message(_make_update(msg), SimpleNamespace())
     (task,) = adapter._media_retry_tasks_set()
+    if task_started:
+        await asyncio.wait_for(waiting.wait(), 5)
 
     await adapter._cancel_media_retries()
 
     assert task.cancelled()
-    adapter.handle_message.assert_not_awaited()
+    adapter.handle_message.assert_not_awaited()  # the gateway is going down: no new turn
+    # ...but the message is not dropped silently: the user is told the photo did not arrive.
+    msg.reply_text.assert_awaited_once()
+    assert "photo" in msg.reply_text.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_notice_is_bounded_when_the_network_is_down(adapter, monkeypatch):
+    import asyncio
+
+    gate = asyncio.Event()
+
+    async def blocked_sleep(_delay):
+        await gate.wait()
+
+    async def reply_hangs(*_a, **_kw):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fetch_mod, "_sleep", blocked_sleep)
+    monkeypatch.setattr(fetch_mod, "FOREGROUND_RETRY_DELAYS_S", ())
+    monkeypatch.setattr(fetch_mod, "CANCEL_NOTICE_TIMEOUT_S", 0.05)
+    msg = _photo_message(AsyncMock(side_effect=_ptb_connect_error()))
+    msg.reply_text = AsyncMock(side_effect=reply_hangs)
+    await adapter._handle_media_message(_make_update(msg), SimpleNamespace())
+    (task,) = adapter._media_retry_tasks_set()
+
+    await asyncio.wait_for(adapter._cancel_media_retries(), 5)
+
+    assert task.cancelled()
+    msg.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stalled_connection_stays_inside_the_foreground_budget(clock):
+    """A server that accepts and never answers: every call runs to its timeout. The whole fetch
+    must still end within the budget (the reviewer's real-PTB repro took 100 s before the cap)."""
+    from telegram.error import TimedOut
+
+    timeouts: list[dict] = []
+
+    async def stalls(**kw):
+        timeouts.append(kw)
+        clock.now += kw["read_timeout"]
+        raise TimedOut("Timed out")
+
+    source = MagicMock()
+    source.get_file = AsyncMock(side_effect=stalls)
+
+    with pytest.raises(TimedOut) as raised:
+        await fetch_telegram_file(source, "photo")
+
+    assert clock.now <= fetch_mod.FOREGROUND_BUDGET_S
+    assert all(kw["read_timeout"] <= fetch_mod.FOREGROUND_CALL_TIMEOUT_S for kw in timeouts)
+    assert getattr(raised.value, fetch_mod._GAVE_UP_ATTR)  # handed to the background stage
+
+
+@pytest.mark.asyncio
+async def test_the_last_try_gets_only_what_is_left_of_the_budget(clock, monkeypatch):
+    from telegram.error import TimedOut
+
+    monkeypatch.setattr(fetch_mod, "FOREGROUND_BUDGET_S", 25.0)
+    calls: list[dict] = []
+
+    async def fast_fail_then_stall(**kw):
+        calls.append(kw)
+        if len(calls) < 4:
+            raise _ptb_connect_error()
+        clock.now += kw["read_timeout"]
+        raise TimedOut("Timed out")
+
+    source = MagicMock()
+    source.get_file = AsyncMock(side_effect=fast_fail_then_stall)
+
+    with pytest.raises(TimedOut):
+        await fetch_telegram_file(source, "photo")
+
+    assert len(calls) == 4
+    assert calls[-1]["read_timeout"] == pytest.approx(5.0)  # 25 s budget, 20 s already spent
+    assert clock.now <= 25.0
+
+
+@pytest.mark.parametrize(("make", "retryable"), [
+    (lambda e: _ptb_connect_error(), True),
+    (lambda e: e.TimedOut("Timed out"), True),
+    (lambda e: e.NetworkError("Internal Server Error (500)"), True),
+    (lambda e: e.NetworkError("Bad Gateway"), True),  # Telegram's description for a 502
+    (lambda e: e.NetworkError("Request Entity Too Large (413)"), False),
+    (lambda e: e.NetworkError("Unknown error in HTTP implementation: ValueError()"), False),
+    (lambda e: e.BadRequest("Wrong file_id or the file is temporarily unavailable"), False),
+    (lambda e: e.Forbidden("Forbidden: bot was blocked by the user"), False),
+])
+def test_only_transient_errors_are_retryable(make, retryable):
+    import telegram.error as ptb_error
+
+    assert fetch_mod.is_retryable_download_error(make(ptb_error)) is retryable
+
+
+def test_cause_chain_falls_back_to_the_type_name_when_str_raises():
+    class Unprintable(Exception):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    assert describe_cause_chain(Unprintable()) == "Unprintable"
+
+
+@pytest.mark.asyncio
+async def test_a_bad_file_id_tells_the_user_at_once(adapter, clock):
+    msg = _photo_message(AsyncMock(side_effect=BadRequest("Wrong file_id")))
+
+    await adapter._handle_media_message(_make_update(msg), SimpleNamespace())
+
+    assert adapter._media_retry_tasks_set() == set()
+    assert clock.sleeps == []
+    msg.reply_text.assert_awaited_once()
+    adapter.handle_message.assert_awaited_once()
+    assert "could not be downloaded" in adapter.handle_message.await_args.args[0].text
+
+
+@pytest.mark.asyncio
+async def test_past_the_pending_cap_a_failure_is_reported_at_once(adapter, clock):
+    busy = adapter._media_retry_tasks_set()
+    busy.update(object() for _ in range(fetch_mod.BACKGROUND_MAX_PENDING))  # only the count matters
+    msg = _photo_message(AsyncMock(side_effect=_ptb_connect_error()))
+
+    await adapter._handle_media_message(_make_update(msg), SimpleNamespace())
+
+    assert len(adapter._media_retry_tasks_set()) == fetch_mod.BACKGROUND_MAX_PENDING  # no new task
+    msg.reply_text.assert_awaited_once()
+    adapter.handle_message.assert_awaited_once()
