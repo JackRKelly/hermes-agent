@@ -18,14 +18,33 @@ logger = logging.getLogger(__name__)
 _TELEGRAM_API_HOST = "api.telegram.org"
 
 
-def _describe_transport_error(error: Exception) -> str:
-    """Return a non-empty, secret-safe exception representation for diagnostics."""
+def describe_cause_chain(error: BaseException) -> str:
+    """Secret-safe ``ConnectError <- EndOfStream`` chain for diagnostics.
+
+    httpx raises ``ConnectError('')`` for both a refused/unroutable TCP connect and a TLS handshake
+    the peer dropped; only the innermost cause tells them apart (``OSError`` with its errno = TCP,
+    ``EndOfStream`` / ``BrokenResourceError`` / ``SSLError`` = TLS). Logging the chain is what lets a
+    day of flaps say which layer fails.
+    """
+    # Runs inside the transport's error handler: any failure here (a raising ``__str__``, the
+    # redactor) must fall back to the type name, never replace the transport error being handled.
     try:
         from agent.redact import redact_sensitive_text
 
-        return redact_sensitive_text(repr(error), force=True)
-    except Exception:
+        parts: list[str] = []
+        current: BaseException | None = error
+        while current is not None and len(parts) < 6:  # bounded: a cyclic chain must not loop
+            text = str(current)
+            parts.append(f"{type(current).__name__}({text!r})" if text else type(current).__name__)
+            current = current.__cause__ or current.__context__
+        return redact_sensitive_text(" <- ".join(parts), force=True)
+    except Exception:  # health: allow BLE001 -- runs inside the transport's error handler; must never replace the error it describes
         return type(error).__name__
+
+
+def _describe_transport_error(error: Exception) -> str:
+    """Return a non-empty, secret-safe exception representation for diagnostics."""
+    return describe_cause_chain(error)
 
 # TCP keepalive so a half-open/CLOSE-WAIT long-poll errors out instead of blocking getUpdates forever
 # (Windows leaves SO_KEEPALIVE off). Idle/interval knobs are best-effort per Python/OS combo.
