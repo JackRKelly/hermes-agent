@@ -1552,14 +1552,80 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
         )
 
 
+def _ended_run_worker_alive(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when an ENDED run of ``task_id`` still has its host-local worker alive.
+
+    A run can end while its worker keeps going: a transition made from outside the worker (the
+    autopilot's rejection cap blocks a card it read as ``ready`` just as the dispatcher claimed it,
+    the block-loop breaker routes it to triage) clears the claim but signals nothing, and
+    :func:`reap_terminal_workers` ends that worker only after ``TERMINAL_WORKER_REAP_GRACE_SECONDS``.
+    A new run claimed in between would be a second writer on the same worktree and branch
+    (t_efcda9e3, Nov 19).
+
+    Two processes per run are checked, because either can still write:
+      * the submitter (``task_runs.worker_pid``), with exactly the reaper's filter;
+      * the managed interpreter the owner bound to the run (its ``worker_bound`` event), which is
+        the process that actually edits the worktree. The reaper clears the submitter's row in the
+        same step it kills it, but the interpreter notices that death only on its watcher's next
+        tick, so a guard on the submitter alone let the same dispatch tick claim the card beside a
+        still-live interpreter. The interpreter's exit is bounded: its watcher ends it (and its
+        process group) once its submitter is gone, or once its run has been over for the reaper's
+        grace when no submitter was ever recorded.
+
+    Each pid is judged as the reaper judges one: issued by this host (claim lock prefix), never this
+    process, and alive with a matching fingerprint (a recycled pid is not our worker). An
+    UNVERIFIED fingerprint proves nothing and nothing signals it, so holding a card on it could hold
+    the card forever: it never holds.
+    """
+    host_prefix = _kb._host_prefix()
+    candidates = [
+        (row["worker_pid"], row["worker_started_at"], row["claim_lock"])
+        for row in conn.execute(
+            "SELECT worker_pid, worker_started_at, claim_lock FROM task_runs "
+            "WHERE task_id = ? AND ended_at IS NOT NULL "
+            "AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL",
+            (task_id,),
+        )
+    ]
+    for row in conn.execute(
+        "SELECT e.payload FROM task_events e JOIN task_runs r ON r.id = e.run_id "
+        "WHERE e.task_id = ? AND e.kind = 'worker_bound' AND r.ended_at IS NOT NULL",
+        (task_id,),
+    ):
+        bound = _kb._json_dict(row["payload"])
+        if bound.get("started_at"):
+            candidates.append((bound.get("pid"), bound["started_at"], bound.get("claim_lock")))
+    return any(
+        _host_local_verified_worker_alive(pid, fingerprint, claim_lock, host_prefix)
+        for pid, fingerprint, claim_lock in candidates
+    )
+
+
+def _host_local_verified_worker_alive(pid, fingerprint, claim_lock, host_prefix: str) -> bool:
+    """The reaper's test for a worker it may act on (see ``_reap_terminal_worker_row``), as a
+    liveness answer: a pid this host issued, not this process, fingerprint-verified and alive."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    return (
+        pid > 0
+        and pid != os.getpid()
+        and str(claim_lock or "").startswith(host_prefix)
+        and fingerprint != UNVERIFIED_WORKER_FINGERPRINT
+        and _worker_alive(pid, fingerprint)
+    )
+
+
 def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
 ) -> Optional[str]:
     """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
 
     Called per ready/review row before any claim attempt. Priority order:
-    ``"infrastructure_cooldown"`` (latest run is a ``spawn_failed`` the host
-    refused — no restart-safe scope — within the cooldown; never counted),
+    ``"previous_worker_alive"`` (an ended run's worker still runs on this host,
+    :func:`_ended_run_worker_alive`; both lanes), ``"infrastructure_cooldown"``
+    (latest run is a ``spawn_failed`` the host refused — no restart-safe scope — within the cooldown; never counted),
     ``"rate_limit_cooldown"`` (latest run ``rate_limited`` within the cooldown;
     checked BEFORE ``blocker_auth`` because the requeue stamps a quota-flavored
     ``last_failure_error`` that would otherwise park the task forever — that
@@ -1579,6 +1645,10 @@ def check_respawn_guard(
     ).fetchone()
     if row is None:
         return None
+
+    # 0. One worker per card: never start a run beside a worker an earlier run left alive.
+    if _ended_run_worker_alive(conn, task_id):
+        return "previous_worker_alive"
 
     now = int(time.time())
 
