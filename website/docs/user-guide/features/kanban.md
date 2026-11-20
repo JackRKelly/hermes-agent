@@ -1085,6 +1085,29 @@ To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` 
 
 A kanban worker whose quota error carries a Retry-After or reset more than 60 s away ends its retries and exits 75 at once, freeing its slot; 60 s or less still retries in place.
 
+### Disk guard
+
+A full disk fails every spawn for a reason that is not the card's: the worker log, the git worktree and the board's own writes all hit `No space left on device`, and without a guard two such failures trip the breaker and park the card `gave_up`. Each tick the dispatcher reads free space (`statvfs`, `f_bavail * f_frsize`) on the kanban root, every board's `default_workdir` and `kanban.disk_guard.extra_paths`, once per volume, and uses the lowest value (cached for 10 s). GB means 10^9 bytes.
+
+- **`heavy_paused`** (below `heavy_min_free_gb`): heavy cards are held, everything else runs. A card is heavy when its assignee matches a `heavy_assignees` glob, or when it is a `worktree` card whose worktree does not exist yet (a new tree costs gigabytes). A card whose worktree already exists is not heavy.
+- **`all_paused`** (below `all_min_free_gb`): nothing is claimed on any lane; the reclaim and liveness passes still run.
+- A state clears only once free space is back at its line plus `resume_margin_gb`, so a burst near a line does not flap.
+
+A held card stays `ready`, shows as `respawn_guarded` with reason `disk_low` (`hermes kanban dispatch --dry-run`), and gets one `respawn_guarded{reason: disk_low, free_gb, state}` event per low-disk episode, never one per tick. Every state change is written atomically to `<kanban root>/state/disk-guard.json` (`state`, `free_bytes`, `threshold_gb`, `since`, `previous`) and appended to `disk-guard.log.jsonl` beside it; a write the full disk refuses is logged and retried, never fatal. The dispatcher sends no message; an owner watch can read that file.
+
+While the guard is on, a disk-full failure (`errno.ENOSPC`, `No space left on device`, `database or disk is full`, `Errno 28`, or `unable to create/write file` from `git worktree add`; not a plain `disk I/O error`) on the workspace, spawn, crash or timeout path is booked as infrastructure: the run is recorded, `consecutive_failures` does not move, the breaker never trips and `infrastructure_cooldown` spaces the retries. A worker that dies while the guard state is not `ok` counts the same way. When the disk is `ok` again (and once when the dispatcher starts with it `ok`), cards the breaker already parked for a disk-full error within the last 7 days are unblocked once (at most 100 per pass) with an `unblocked{reason: disk_recovered}` event. A card someone touched since (a block, unblock, status change or a comment by a person) or parked on purpose (`[needs-jack`, `[awaiting-approval`, `[hold:`, `[captain:`, or a worker's `needs_input` block) is left alone.
+
+`python -m hermes_cli.kanban_disk_guard` prints the state the guard would report right now, without writing anything.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `kanban.disk_guard.enabled` | `true` | `false` turns the guard off; dispatch behaves as before |
+| `kanban.disk_guard.heavy_min_free_gb` | 40 | below this, heavy cards are held |
+| `kanban.disk_guard.all_min_free_gb` | 20 | below this, every card is held |
+| `kanban.disk_guard.resume_margin_gb` | 5 | a state clears at its line plus this |
+| `kanban.disk_guard.heavy_assignees` | `["crew-pilot-*-builder"]` | assignee globs whose cards are always heavy |
+| `kanban.disk_guard.extra_paths` | `[]` | more paths to measure (e.g. a repo on another volume) |
+
 ### Drag-to-delete and bulk delete (dashboard)
 
 The dashboard exposes a **trash drop zone** on the kanban page — drag any card into it to delete the task (cascades through `task_events`, child links, and subscriptions). A confirmation prompt protects against accidents. Bulk delete is also reachable via `DELETE /api/plugins/kanban/tasks` with a JSON body `{"ids": ["t_abc", "t_def", ...]}`.

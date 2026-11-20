@@ -20,6 +20,7 @@ from hermes_cli.kanban_caps import CapsReloader, KanbanCaps, parse_caps, write_l
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db_dispatch_caps import FastLaneSettings
+    from hermes_cli.kanban_disk_guard import DiskGuardSettings
 
 
 def _kbc():
@@ -52,6 +53,7 @@ class _DispatcherSettings:
     max_in_progress_per_profile: Optional[int]
     max_in_progress_by_profile: dict[str, int] = field(default_factory=dict)
     fast_lane: Optional[FastLaneSettings] = None  # None = no fast lane
+    disk_guard: Optional[DiskGuardSettings] = None  # None = kanban.disk_guard.enabled is false
     # The caps as configured (total unset = memory-derived default): the hot-reload baseline.
     configured_caps: KanbanCaps = field(default_factory=KanbanCaps)
 
@@ -136,6 +138,13 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         logger.info("kanban dispatcher: fast_lane created_by=%s max_running=%d",
                     list(fast_lane.created_by), fast_lane.max_running)
 
+    # Holds spawns while the disk is nearly full; on unless kanban.disk_guard.enabled is false.
+    from hermes_cli.kanban_disk_guard import parse_disk_guard
+    disk_guard = parse_disk_guard(kanban_cfg.get("disk_guard"))
+    if disk_guard is not None:
+        logger.info("kanban dispatcher: disk_guard heavy<%sGB all<%sGB margin=%sGB",
+                    disk_guard.heavy_min_free_gb, disk_guard.all_min_free_gb, disk_guard.resume_margin_gb)
+
     return _DispatcherSettings(
         interval=interval,
         max_spawn=max_spawn,
@@ -151,6 +160,7 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         max_in_progress_per_profile=caps.per_profile,
         max_in_progress_by_profile=dict(caps.by_profile),
         fast_lane=fast_lane,
+        disk_guard=disk_guard,
         configured_caps=caps,
     )
 

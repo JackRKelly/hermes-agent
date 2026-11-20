@@ -17,6 +17,8 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_db_dispatch_caps import parse_fast_lane
+from hermes_cli.kanban_db_health import describe_suppression
+from hermes_cli.kanban_disk_guard import parse_disk_guard
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
 
@@ -83,8 +85,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
         )
         fast_lane = parse_fast_lane(_kanban_cfg.get("fast_lane"))
+        disk_guard = parse_disk_guard(_kanban_cfg.get("disk_guard"))
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = fast_lane = None
+        disk_guard = parse_disk_guard(None)  # unreadable config: guarded with the defaults
         max_in_progress_by_profile = None
         max_spawn = getattr(args, "max", None)
     with kbc.connect_closing() as conn:
@@ -98,6 +102,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             max_in_progress_per_profile=max_in_progress_per_profile,
             max_in_progress_by_profile=max_in_progress_by_profile,
             fast_lane=fast_lane,
+            disk_guard=disk_guard,
         )
     if getattr(args, "json", False):
         _print_json({
@@ -234,7 +239,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if health_state["bad_ticks"] >= HEALTH_WINDOW:
             now = int(time.time())
             if now - health_state["last_warn_at"] >= 300:
-                held = kbd.describe_suppression([res])
+                held = describe_suppression([res])
                 held = f" Last tick held back: {held}." if held else ""
                 print(
                     f"[{_fmt_ts(now)}] WARN dispatcher stuck: ready queue non-empty for "
