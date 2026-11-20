@@ -161,17 +161,20 @@ _INTERRUPTED = object()
 ORPHAN_GRACE_SECONDS = 10
 
 
-def _die_with_owner():
-    """Then end this worker and, on POSIX, every descendant still in its process group: the owner
+def exit_with_own_group():
+    """End this worker now and, on POSIX, every descendant still in its process group: the owner
     spawns it as a group leader (``start_new_session``). Tools that open their own session (the
     terminal tool, background processes meant to outlive the turn) are not in it. Never a group
     this process does not lead."""
-    def kill():
-        if os.name != 'nt' and os.getpgrp() == os.getpid():
-            import signal
-            os.killpg(os.getpid(), signal.SIGKILL)  # windows-footgun: ok — POSIX only
-        os._exit(1)
-    threading.Timer(ORPHAN_GRACE_SECONDS, kill).start()
+    if os.name != 'nt' and os.getpgrp() == os.getpid():
+        import signal
+        os.killpg(os.getpid(), signal.SIGKILL)  # windows-footgun: ok — POSIX only
+    os._exit(1)
+
+
+def _die_with_owner():
+    """Then end this worker and its group (:func:`exit_with_own_group`) after the grace."""
+    threading.Timer(ORPHAN_GRACE_SECONDS, exit_with_own_group).start()
 
 
 class WorkerControls:

@@ -209,19 +209,43 @@ def _watch_submitter(db, run_id):
     """The dispatcher's spawned worker is this attempt's handle: killing it (an operator, a
     timeout, an OOM kill) must end the attempt, as it did when the worker ran the agent itself.
     Exiting hard leaves no ``worker_result``, so the dead-worker sweep books this run's crash.
-    The run row is re-read each tick: the dispatcher records the pid only after its spawn returns."""
+    The run row is re-read each tick: the dispatcher records the pid only after its spawn returns.
+
+    The first pid seen is latched for the rest of the attempt. A run's ``worker_pid`` is written once
+    (``_set_worker_pid`` only fills a NULL) and is cleared only as evidence cleanup, by
+    ``reap_terminal_workers`` in the same step that kills the submitter. Re-reading the row alone made
+    that kill invisible: a NULL read looks like "no submitter yet", so this interpreter kept working
+    after its run was blocked from outside and its submitter reaped, beside the next run on the same
+    worktree (t_efcda9e3, Nov 19).
+
+    A run can also end from outside before its submitter's pid ever reached the row
+    (``_set_worker_pid`` writes only while the card is ``running``). Then there is nothing to latch
+    and no reaper can find this interpreter, so it ends itself once its run has been over for the
+    reaper's own grace, the same bound the reaper gives a worker finishing after its own transition.
+
+    Exiting takes the process group down with it (:func:`agent.managed_worker.exit_with_own_group`),
+    so tool children of an attempt that was ended from outside do not keep writing either."""
     import os
-    from hermes_cli.kanban_db_dispatch import _worker_alive
+    import time
+    from agent.managed_worker import exit_with_own_group
+    from hermes_cli.kanban_db_dispatch import TERMINAL_WORKER_REAP_GRACE_SECONDS, _worker_alive
 
     def watch():
+        submitter = None  # (pid, fingerprint) latched from the first read that names it
         with closing(sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
             while not _TURNS_DONE.wait(1.0):
                 try:
-                    row = conn.execute('SELECT worker_pid, worker_started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+                    row = conn.execute('SELECT worker_pid, worker_started_at, ended_at FROM task_runs WHERE id=?',
+                                       (run_id,)).fetchone()
                 except sqlite3.Error:
-                    continue
-                if row and row[0] and row[0] != os.getpid() and not _worker_alive(row[0], row[1]):
-                    os._exit(1)
+                    row = None  # a busy read changes nothing: a latched submitter is still checked
+                if submitter is None and row and row[0] and row[0] != os.getpid():
+                    submitter = (row[0], row[1])
+                if submitter is not None and not _worker_alive(*submitter):
+                    exit_with_own_group()
+                if (submitter is None and row and not row[0] and row[2]
+                        and time.time() - row[2] > TERMINAL_WORKER_REAP_GRACE_SECONDS):
+                    exit_with_own_group()
     threading.Thread(target=watch, name='kanban-submitter-watch', daemon=True).start()
 
 
