@@ -2901,6 +2901,7 @@ def run_daemon(
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
+                    disk_guard=_kbdg.configured_disk_guard(),
                 )
             if on_tick is not None:
                 with contextlib.suppress(Exception):

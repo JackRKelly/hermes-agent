@@ -77,11 +77,22 @@ LOG_FILE: Final = "disk-guard.log.jsonl"
 # ``Errno 28`` is ENOSPC as Python prints it; SQLite reports SQLITE_FULL as "database or disk is
 # full". A plain "disk I/O error" (SQLITE_IOERR) is deliberately absent: that is a failing disk or
 # a bad file, which a retry once space returns would not heal.
+# Hermes's own "couldn't save this conversation to disk ... The disk is probably full" is absent on
+# purpose too: it is the copy for the whole ``disk`` persistence bucket
+# (``hermes_state_errors.classify_persistence_error``), which also holds a read-only state.db and
+# "disk I/O error". Matching it would retry such a card forever instead of parking it; a worker
+# that dies with it during a real outage is infrastructure anyway, by the guard state.
 _DISK_FULL_RE: Final = re.compile(r"No space left on device|database or disk is full|\bErrno 28\b", re.IGNORECASE)
-# git's own wording when it cannot write a checkout file; on its own it is ambiguous (permissions),
-# so it counts only inside a ``git worktree add`` failure, where the stored error is capped at 500
-# chars and often loses the trailing "No space left on device".
-_GIT_WRITE_RE: Final = re.compile(r"unable to (?:create|write) file", re.IGNORECASE)
+# git's own wordings when it cannot write a checkout file or a ref. Each is ambiguous on its own
+# (permissions, a stale lock), so they count only inside a ``git worktree add`` failure, where the
+# stored error is capped at 500 chars and often loses the trailing "No space left on device".
+# The ref forms are the ones git prints once the disk is too full to say why (seen on the board,
+# Nov 19-20: "cannot update ref ...: couldn't write '....lock'" and "couldn't set 'refs/heads/...'").
+# A bare "cannot lock ref" is deliberately absent: it also covers ref races ("reference already
+# exists", "is at X but expected Y"), which a retry once space returns would not heal.
+_GIT_WRITE_RE: Final = re.compile(
+    r"unable to (?:create|write) file|couldn't write '[^']*\.lock'|couldn't set 'refs/",
+    re.IGNORECASE)
 
 
 def _text_is_disk_full(text: str) -> bool:
@@ -95,8 +106,10 @@ def is_disk_full_error(exc_or_text: BaseException | str | None) -> bool:
 
     An exception matches on ``errno.ENOSPC`` anywhere in its ``__cause__``/``__context__`` chain,
     or on its text; a string matches on the text: "No space left on device", "database or disk is
-    full", "Errno 28", or git's "unable to create/write file" inside a ``git worktree add``
-    failure. "disk I/O error" alone is not a full disk.
+    full", "Errno 28", or, inside a ``git worktree add`` failure, git's "unable to create/write
+    file", "couldn't write '<ref>.lock'" or "couldn't set 'refs/...'". Not a full disk: a plain
+    "disk I/O error", a bare "cannot lock ref" (a ref race), or Hermes's "couldn't save this
+    conversation to disk" (also said for a read-only state.db).
     """
     if exc_or_text is None:
         return False
@@ -179,6 +192,23 @@ def parse_disk_guard(raw: Any) -> Optional[DiskGuardSettings]:
         heavy_assignees=_str_tuple(cfg.get("heavy_assignees"), base.heavy_assignees),
         extra_paths=_str_tuple(cfg.get("extra_paths"), base.extra_paths),
     )
+
+
+def configured_disk_guard() -> Optional[DiskGuardSettings]:
+    """``kanban.disk_guard`` from the current config, for dispatch entry points that do not
+    already hold the kanban config (the standalone daemon, the dashboard's dispatch nudge).
+
+    An unreadable config means the defaults, enabled, like :func:`parse_disk_guard` on a missing
+    section: every entry point that spawns must be guarded the same way.
+    """
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = ((load_config_readonly() or {}).get("kanban") or {}).get("disk_guard")
+    except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- logged; guarded with defaults
+        _log.warning("kanban disk guard: config unreadable (%s); using the defaults", exc)
+        raw = None
+    return parse_disk_guard(raw)
 
 
 # --- measurement and state -----------------------------------------------------------------------
@@ -314,17 +344,21 @@ class DiskGuard:
                 return self._snapshot(settings)
             free = self.measure(paths_fn())
             if free is None:
-                # Nothing measurable (every path vanished or statvfs refused): keep the last
-                # state rather than guess either way.
-                _log.warning("kanban disk guard: no path could be measured; keeping state %s", self.state)
+                # Nothing measurable (every path vanished or statvfs refused). Fail open: a broken
+                # probe must never hold the whole board. The recorded state is kept, so the next
+                # real reading still leaves a paused state through its hysteresis.
+                _log.warning("kanban disk guard: no path could be measured; dispatching as ok "
+                             "(recorded state %s)", self.state)
                 if persist:
                     self._read_at = now  # one warning per cache window, not one per call
+                    self.free_bytes = None
                 return self._snapshot(settings)
             new_state = classify(free, self.state, settings)
             if not persist:
                 return DiskSnapshot(new_state, free, self.episode_since or (int(now) if new_state != OK else None),
                                     settings)
-            first_reading = self._read_at is None
+            # No measured reading yet in this process (or since a stretch with none).
+            first_reading = self.free_bytes is None
             self._read_at = now
             self.free_bytes = free
             if new_state != self.state:
@@ -338,6 +372,8 @@ class DiskGuard:
             return self._snapshot(settings)
 
     def _snapshot(self, settings: DiskGuardSettings) -> DiskSnapshot:
+        if self.free_bytes is None:  # unmeasured: fail open (see :meth:`evaluate`)
+            return DiskSnapshot(OK, None, None, settings)
         return DiskSnapshot(self.state, self.free_bytes, self.episode_since, settings)
 
     def _transition(self, new_state: GuardState, free: int, now: int, settings: DiskGuardSettings) -> None:
@@ -440,7 +476,8 @@ def begin_tick(conn: sqlite3.Connection, settings: Optional[DiskGuardSettings], 
         guard = guard_for_root(kb.kanban_home())
     snapshot = guard.evaluate(settings, lambda: _measured_paths(guard.root, settings), persist=not dry_run)
     _ACTIVE = snapshot
-    if snapshot.state == OK and not dry_run:
+    # Recovery needs a real ``ok`` reading: a fail-open tick (nothing measured) proves nothing.
+    if snapshot.state == OK and snapshot.free_bytes is not None and not dry_run:
         board_key = _db_key(conn)
         if guard.recovered_epoch.get(board_key) != guard.ok_epoch:
             guard.recovered_epoch[board_key] = guard.ok_epoch

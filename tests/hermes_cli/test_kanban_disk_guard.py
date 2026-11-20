@@ -255,6 +255,42 @@ def test_one_disk_low_event_per_episode(kanban_home, disk, spawn_fn):
         assert len(_events(conn, tid, "respawn_guarded")) == 2
 
 
+def test_unmeasurable_disk_fails_open_and_keeps_hysteresis(kanban_home, disk, spawns, spawn_fn, monkeypatch):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="build", assignee=BUILDER)
+        _set_free(disk, 30)
+        assert kbd.dispatch_once(conn, spawn_fn=spawn_fn, disk_guard=SETTINGS).disk_guard == "heavy_paused"
+        assert spawns == []
+
+        def refused(path):
+            raise OSError(errno.EIO, "statvfs refused")
+        monkeypatch.setattr(disk.guard, "statvfs", refused)
+        disk.guard._read_at = None
+        res = kbd.dispatch_once(conn, spawn_fn=spawn_fn, disk_guard=SETTINGS)
+        assert res.disk_guard == "ok" and spawns == [tid]  # a broken probe never holds the board
+        assert disk.guard.state == "heavy_paused"           # ...but the recorded state stands
+        # Measurable again inside the resume margin: still held, the hysteresis survived.
+        monkeypatch.setattr(disk.guard, "statvfs", disk.statvfs)
+        _set_free(disk, 42)
+        assert disk.guard.evaluate(SETTINGS, lambda: [str(kb.kanban_home())]).state == "heavy_paused"
+
+
+def test_standalone_daemon_is_guarded(kanban_home, disk, spawns, monkeypatch):
+    import threading
+    monkeypatch.setattr(kbd, "_default_spawn", lambda task, workspace, board=None: spawns.append(task.id))
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="review", assignee=REVIEWER)
+    _set_free(disk, 10)
+    stop, ticks = threading.Event(), []
+
+    def on_tick(res):
+        ticks.append(res)
+        stop.set()
+    kbd.run_daemon(interval=0.01, stop_event=stop, on_tick=on_tick)
+    assert ticks[0].disk_guard == "all_paused"
+    assert (tid, "disk_low") in ticks[0].respawn_guarded and spawns == []
+
+
 def test_guard_disabled_dispatches_as_before(kanban_home, disk, spawns, spawn_fn):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="build", assignee=BUILDER)
@@ -265,19 +301,78 @@ def test_guard_disabled_dispatches_as_before(kanban_home, disk, spawns, spawn_fn
 
 # --- ENOSPC is infrastructure --------------------------------------------------------------------
 
-@pytest.mark.parametrize("value, expected", [
-    (OSError(errno.ENOSPC, "No space left on device"), True),
-    ("[Errno 28] No space left on device: '/x/kanban/logs/t.log'", True),
-    ("sqlite3.OperationalError: database or disk is full", True),
-    ("git worktree add failed for /x on branch b: error: unable to create file a.ts", True),
-    ("git worktree add failed for /x on branch b: error: unable to write file a.ts", True),
-    ("error: unable to create file a.ts: Permission denied", False),  # no worktree add: ambiguous
-    ("sqlite3.OperationalError: disk I/O error", False),
-    ("boom", False),
-    (None, False),
-])
-def test_is_disk_full_error(value, expected):
-    assert kbdg.is_disk_full_error(value) is expected
+# Stored run errors from the live board during the Nov 19-20 outage, verbatim (read-only query of
+# ``task_runs.error`` / ``task_events.payload``), then the near misses that must stay card failures.
+_WT = "workspace: git worktree add failed for /Users/jack/Code/Cybership/v2/.worktrees/{b} on branch crew/{b}: "
+INCIDENT_DISK_FULL = [
+    pytest.param(  # t_c010604c: the ref lock file, with the reason
+        _WT.format(b="test-team-billing-restore")
+        + "Preparing worktree (new branch 'crew/test-team-billing-restore')\nfatal: cannot lock ref "
+        "'refs/heads/crew/test-team-billing-restore': Unable to create '/Users/jack/Code/Cybership/v2/.git/"
+        "refs/heads/crew/test-team-billing-restore.lock': No space left on device", id="t_c010604c-lock-ref"),
+    pytest.param(  # t_053e0026: the worker log
+        "[Errno 28] No space left on device: '/Users/jack/.hermes/kanban/logs/t_053e0026.log'", id="t_053e0026-errno"),
+    pytest.param(  # t_37089d95: the scratch workspace
+        "workspace: [Errno 28] No space left on device: '/Users/jack/.hermes/kanban/workspaces/t_37089d95'",
+        id="t_37089d95-workspace"),
+    pytest.param(  # git checkout files, ENOSPC in its stderr
+        _WT.format(b="bukuship-manifest-no-retry")
+        + "Preparing worktree (new branch 'crew/bukuship-manifest-no-retry')\nerror: unable to create file "
+        ".gitignore: No space left on device\nfatal: cannot create directory at '.greptile': No space left on "
+        "device", id="worktree-create-file"),
+    pytest.param(  # the 500-char cap cut the reason off
+        _WT.format(b="returns-warehouse-access")
+        + "Preparing worktree (new branch 'crew/returns-warehouse-access')\nerror: unable to write file "
+        "apps/posts/linkedin-posts/20260624t020000z-001-flexible/post.md", id="worktree-write-file-truncated"),
+    pytest.param(  # t_3615c4c7: git's second attempt no longer said why
+        _WT.format(b="runner-mirror-followups")
+        + "Preparing worktree (new branch 'crew/runner-mirror-followups')\nfatal: cannot update ref "
+        "'refs/heads/crew/runner-mirror-followups': couldn't write '/Users/jack/Code/Cybership/v2/.git/refs/"
+        "heads/crew/runner-mirror-followups.lock'", id="t_3615c4c7-couldnt-write-lock"),
+    pytest.param(  # t_f21fd58f
+        _WT.format(b="ci-tune-postgres-wait")
+        + "Preparing worktree (new branch 'crew/ci-tune-postgres-wait')\nfatal: couldn't set "
+        "'refs/heads/crew/ci-tune-postgres-wait'", id="t_f21fd58f-couldnt-set-ref"),
+    pytest.param("sqlite3.OperationalError: database or disk is full", id="sqlite-full"),
+    pytest.param(OSError(errno.ENOSPC, "No space left on device"), id="oserror-enospc"),
+]
+NOT_DISK_FULL = [
+    pytest.param(  # t_23f6977e: a branch already checked out elsewhere
+        "workspace: git worktree add failed for /Users/jack/Code/Cybership/assistant/.worktrees/linkedin-render-cap"
+        " on branch crew/linkedin-render-cap: Preparing worktree (checking out 'crew/linkedin-render-cap')\nfatal: "
+        "'crew/linkedin-render-cap' is already used by worktree at '/Users/jack/Code/Cybership/assistant/.worktrees/"
+        "linkedin-render'", id="t_23f6977e-branch-in-use"),
+    pytest.param(  # ref races: a bare "cannot lock ref" is not a full disk
+        _WT.format(b="x") + "fatal: cannot lock ref 'refs/heads/crew/x': reference already exists",
+        id="lock-ref-exists"),
+    pytest.param(_WT.format(b="x") + "fatal: cannot lock ref 'refs/heads/crew/x': is at 1a2b3c but expected 4d5e6f",
+                 id="lock-ref-moved"),
+    pytest.param(  # Hermes's persistence copy: also said for a read-only state.db (guard state covers outages)
+        "pid 29179 exited with code 1 [managed worker lost: managed_worker_failed] Worker's last output: \"Session: "
+        "local-0801 \u26a0\ufe0f No reply: Hermes couldn't save this conversation to disk, so it stopped rather than "
+        "lose your messages. The disk is probably full: free some space (or fix the permissions on "
+        "~/.hermes/profiles/crew-pilot-claude-reviewer/state.db), then send your message again.\"",
+        id="t_ccae35ed-hermes-couldnt-save"),
+    pytest.param(  # t_* "Kanban execution unknown": the owner refused, not the disk
+        "pid 23250 exited with code 1 [managed worker lost: managed_worker_failed] Worker's last output: 'Session: "
+        "local-4f76 Kanban owner refused: Kanban execution unknown; retained by owner'", id="owner-refused"),
+    pytest.param("error: unable to create file a.ts: Permission denied", id="create-file-outside-worktree-add"),
+    pytest.param("fatal: couldn't write '/r/.git/refs/heads/x.lock'", id="couldnt-write-outside-worktree-add"),
+    pytest.param("sqlite3.OperationalError: disk I/O error", id="sqlite-ioerr"),
+    pytest.param(OSError(errno.EACCES, "Permission denied"), id="oserror-eacces"),
+    pytest.param("boom", id="other"),
+    pytest.param(None, id="none"),
+]
+
+
+@pytest.mark.parametrize("value", INCIDENT_DISK_FULL)
+def test_is_disk_full_error_matches_incident_errors(value):
+    assert kbdg.is_disk_full_error(value) is True
+
+
+@pytest.mark.parametrize("value", NOT_DISK_FULL)
+def test_is_disk_full_error_rejects_other_failures(value):
+    assert kbdg.is_disk_full_error(value) is False
 
 
 def test_is_disk_full_error_follows_the_cause_chain():
@@ -313,9 +408,16 @@ def test_enospc_spawn_failure_never_counts_or_gives_up(kanban_home, disk):
         assert len(failed) == 4 and all(e.get("infrastructure") for e in failed)
 
 
-def test_enospc_workspace_failure_never_counts_or_gives_up(kanban_home, disk, monkeypatch):
+@pytest.mark.parametrize("git_stderr", [
+    "error: unable to create file x",
+    # git's ref-write wordings once the disk is too full to say why (t_3615c4c7, t_f21fd58f)
+    "fatal: cannot update ref 'refs/heads/crew/b': couldn't write '/r/.git/refs/heads/crew/b.lock'",
+    "fatal: couldn't set 'refs/heads/crew/b'",
+])
+def test_enospc_workspace_failure_never_counts_or_gives_up(kanban_home, disk, monkeypatch, git_stderr):
     def full_tree(task, board=None):
-        raise RuntimeError(f"git worktree add failed for /wt/{task.id} on branch b: error: unable to create file x")
+        raise RuntimeError(f"git worktree add failed for /wt/{task.id} on branch b: Preparing worktree "
+                           f"(new branch 'crew/b')\n{git_stderr}")
     monkeypatch.setattr(kbd._kbw, "_resolve_worktree_workspace", full_tree)
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="tree", assignee=REVIEWER, workspace_kind="worktree")
@@ -355,6 +457,10 @@ def _crash_once(conn, tid: str, log_text: str) -> None:
 @pytest.mark.parametrize("free_gb, log_text", [
     (100, "Traceback ...\nOSError: [Errno 28] No space left on device\n"),  # output shows a full disk
     (30, "Traceback ...\nRuntimeError: something odd\n"),                    # died while the disk was low
+    # Hermes's own refusal is not classified as a full disk (also said for a read-only state.db),
+    # but a worker that dies with it during an outage is infrastructure by the guard state.
+    (10, "No reply: Hermes couldn't save this conversation to disk, so it stopped rather than lose your "
+         "messages. The disk is probably full\n"),
 ])
 def test_crash_on_full_disk_never_counts_or_gives_up(kanban_home, disk, monkeypatch, free_gb, log_text):
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
@@ -415,6 +521,28 @@ def test_recovery_unblocks_disk_gave_up_cards_once(kanban_home, disk, monkeypatc
             assert _task(conn, tid)[0] == "blocked"
         # Once: a second pass finds nothing new, and a re-block by someone stays put.
         assert kbdg.recover_disk_gave_up(conn) == []
+
+
+def test_recovery_unblocks_a_card_parked_on_a_git_ref_write(kanban_home, disk, monkeypatch):
+    """t_f21fd58f's shape: the first spawn said "No space left on device", the second (the one the
+    breaker parked it for) only "couldn't set 'refs/heads/...'"."""
+    attempts = iter([
+        "fatal: cannot lock ref 'refs/heads/crew/b': Unable to create '/r/.git/refs/heads/crew/b.lock': "
+        "No space left on device",
+        "fatal: couldn't set 'refs/heads/crew/b'",
+    ])
+
+    def full_tree(task, board=None):
+        raise RuntimeError(f"git worktree add failed for /wt/{task.id} on branch crew/b: Preparing worktree "
+                           f"(new branch 'crew/b')\n{next(attempts)}")
+    monkeypatch.setattr(kbd._kbw, "_resolve_worktree_workspace", full_tree)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="tree", assignee=REVIEWER, workspace_kind="worktree")
+        _fail_spawn(lambda *a, **k: None, conn, tid, 2, guard=None, disk=disk)  # the pre-guard breaker
+        assert _task(conn, tid)[0] == "blocked"
+        assert "couldn't set" in _events(conn, tid, "gave_up")[-1]["error"]
+        assert kbdg.recover_disk_gave_up(conn) == [tid]
+        assert tuple(_task(conn, tid)) == ("ready", 0)
 
 
 def test_recovery_runs_once_per_ok_epoch_from_the_tick(kanban_home, disk, spawn_fn):

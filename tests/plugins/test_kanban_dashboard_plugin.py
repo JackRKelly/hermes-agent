@@ -483,6 +483,22 @@ def test_dispatch_dry_run(client):
     # DispatchResult is serialized as a dataclass dict.
     assert isinstance(body, dict)
 
+
+def test_dispatch_nudge_is_disk_guarded(client, monkeypatch):
+    """The dashboard's nudge spawns like the gateway tick, so a nearly full disk holds it too."""
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban_disk_guard as kbdg
+    def full(path):  # 5 GB free: all_paused
+        return SimpleNamespace(f_bavail=5 * kbdg.GB, f_frsize=1)
+    monkeypatch.setattr(kbdg, "_GUARDS", {str(kb.kanban_home()): kbdg.DiskGuard(
+        root=kb.kanban_home(), statvfs=full, device_of=lambda p: 1)})
+    tid = client.post("/api/plugins/kanban/tasks",
+                      json={"title": "work", "assignee": "researcher"}).json()["task"]["id"]
+    body = client.post("/api/plugins/kanban/dispatch?max=4").json()
+    assert body["disk_guard"] == "all_paused"
+    assert [tid, "disk_low"] in body["respawn_guarded"] and body["spawned"] == []
+
 # ---------------------------------------------------------------------------
 # Triage column (new v1 status)
 # ---------------------------------------------------------------------------
