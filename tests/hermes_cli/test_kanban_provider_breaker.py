@@ -17,6 +17,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_health as kbh
 from hermes_cli import kanban_db_provider_breaker as kbpb
 
 CLAUDE = "claude-sub"
@@ -87,7 +88,7 @@ def test_three_quota_exits_trip_breaker_pause_provider_and_spare_other_provider(
     paused = {tid for tid, reason in res.respawn_guarded if reason == "provider_paused"}
     assert fourth in paused and set(cards) <= paused
     assert [s[0] for s in res.spawned] == [other]
-    assert "provider_paused=" in kbd.describe_suppression([res])
+    assert "provider_paused=" in kbh.describe_suppression([res])
     # Requeued, never counted as failures.
     assert all(kb.get_task(conn, t).consecutive_failures == 0 for t in cards)
 

@@ -3554,9 +3554,11 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. ``reason`` is
+    recorded on the ``unblocked`` event when a machine path unblocks (e.g. the disk
+    guard's ``disk_recovered``)."""
     now = int(time.time())
     with write_txn(conn):
         resume_status = unblock_resume_status(conn, task_id)
@@ -3583,14 +3585,9 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
-        )
+        payload: dict[str, Any] = ({"status": new_status, "resume_status": resume_status}
+                                   if new_status != "ready" or resume_status != "ready" else {})
+        _append_event(conn, task_id, "unblocked", ({**payload, "reason": reason} if reason else payload) or None)
         return True
 
 
