@@ -477,6 +477,8 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
     except Exception:
         return
     monkeypatch.setattr(_kbd_mod, "_system_memory_sample", dict, raising=False)
+    # Same for the disk guard: the host's real free space must not gate test dispatch.
+    monkeypatch.setattr(_kbd_mod, "_disk_free_gb", lambda path=None: None, raising=False)
 
 
 @pytest.fixture(autouse=True)
