@@ -356,6 +356,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
         due_at = kb_due.parse_due(getattr(args, "due", None))
     except ValueError as exc:
         return _err(f"kanban: --due: {exc}", 2)
+    from hermes_cli.kanban_skill_preflight import pinned_skills_error
+    if skill_error := pinned_skills_error(args.assignee, getattr(args, "skills", None), ws_kind, ws_path):
+        return _err(f"kanban: --skill: {skill_error}", 2)
     max_retries = getattr(args, "max_retries", None)
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "

@@ -594,6 +594,13 @@ def _current_project_root(trusted: bool) -> Optional[Path]:
     return root if root is not None and is_project_root_trusted(root) == trusted else None
 
 
+def project_skills_may_load() -> bool:
+    """True when this config could load a project skill from SOME cwd: discovery is on and
+    ``skills.trusted_project_dirs`` names at least one root. False means the project tier is empty
+    wherever the session runs, so a lookup's answer does not depend on its cwd."""
+    return _skills_cfg_get("project_discovery") is not False and bool(_project_trusted_dirs_from_config())
+
+
 def get_project_skills_dirs() -> list[Path]:
     """Trusted project-local skill dirs for the current cwd (may be empty)."""
     root = _current_project_root(trusted=True)

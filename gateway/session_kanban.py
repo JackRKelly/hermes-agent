@@ -393,11 +393,33 @@ def worker_exit_code(path, params):
 KANBAN_TURN_AUTHOR = {'id': 'kanban:dispatcher', 'name': 'Kanban dispatcher', 'is_bot': True}
 
 
+def _park_unavailable_skills(context, missing):
+    """Park the card ``capability`` when none of its pinned skills load for this profile, and settle
+    the turn without running the model.
+
+    Raising here (the old ``kanban_skills_unavailable``) left the owner's admission ``unknown``, so the
+    submitter reported "execution unknown" and the dispatcher booked a crash per attempt: the failure
+    is the same on every run, so each unblock burned the retry budget and gave up again. The block is
+    fenced to this exact run (``expected_run_id``) like the goal loop's own block, and the settled
+    result carries the reason as the attempt's output (the submitter prints it into the worker log).
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    from agent.safe_worker_policy import safe_worker_enabled
+    from hermes_cli.kanban_skill_preflight import missing_skills_block_reason
+    # A safe-mode worker loads no skill on purpose, so its park must not say "not installed".
+    reason = missing_skills_block_reason(missing, context['profile'], safe_mode=safe_worker_enabled())
+    with connect_closing(Path(context['db'])) as conn:
+        kb.block_task(conn, context['task_id'], reason=reason, kind='capability',
+                      expected_run_id=context['run_id'])
+    return {'final_response': reason, 'completed': True, 'api_calls': 0}
+
+
 def _run_task_turns(agent, frame, history, context):
     from agent.skill_commands import build_preloaded_skills_prompt
     skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
     if missing and not loaded:
-        raise ValueError('kanban_skills_unavailable')
+        return _park_unavailable_skills(context, missing)
     prompt = '\n\n'.join(p for p in (skills, context['context'], frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
 

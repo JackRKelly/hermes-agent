@@ -910,6 +910,13 @@ def _disabled_skill_names(platform: str | None = None) -> set:
         return set()
 
 
+def _skill_is_disabled(skill_name: str, identifier: str, disabled_names: set | None) -> bool:
+    """True when the loaded skill (canonical *skill_name*, typed *identifier*) is operator-disabled."""
+    return bool(disabled_names) and (
+        skill_name in disabled_names or identifier in disabled_names
+        or (":" in skill_name and skill_name.split(":", 1)[1] in disabled_names))
+
+
 def _load_skill_blocks(
     identifiers: list[str], load, activation_note, task_id: str | None, *,
     missing_label=lambda ident: ident, disabled_names: set | None = None, disabled_as_missing: bool = False,
@@ -935,8 +942,7 @@ def _load_skill_blocks(
             missing.append(missing_label(identifier))
             continue
         skill_name = loaded[2]
-        if disabled_names and (skill_name in disabled_names or identifier in disabled_names
-                               or (":" in skill_name and skill_name.split(":", 1)[1] in disabled_names)):
+        if _skill_is_disabled(skill_name, identifier, disabled_names):
             if disabled_as_missing:
                 missing.append(identifier)
             else:
@@ -978,6 +984,27 @@ def build_preloaded_skills_prompt(
         disabled_as_missing=True, already_loaded=excluded_loaded_names,
     )
     return "\n\n".join(prompt_parts), loaded_names, missing
+
+
+def unresolved_preloaded_skills(skill_identifiers: list[str]) -> list[str]:
+    """The filesystem identifiers :func:`build_preloaded_skills_prompt` would report missing in
+    THIS process (unknown, ambiguous, wrong platform, or operator-disabled), found by the same
+    lookup ``skill_view`` runs but without loading: no ``deps`` install, no read mark, no Curator
+    usage bump, no message build. It reads this process's config, so a caller asking about another
+    profile runs it in a fresh process under that profile's home
+    (``hermes_cli/kanban_skill_preflight.py``). Unlike the preload it does not apply the
+    safe-worker gate, which would report every skill missing."""
+    from agent.skill_utils import normalize_skill_lookup_name
+    from tools.skills_tool import viewable_skill_name
+    disabled = _disabled_skill_names()
+    missing: list[str] = []
+    for identifier in dict.fromkeys((raw or "").strip() for raw in skill_identifiers):
+        if not identifier:
+            continue
+        name = viewable_skill_name(normalize_skill_lookup_name(identifier))
+        if name is None or _skill_is_disabled(name, identifier, disabled):
+            missing.append(identifier)
+    return missing
 
 
 def resolve_auto_load_skills(user_config: dict | None = None) -> list[str]:

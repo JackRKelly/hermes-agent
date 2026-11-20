@@ -11,7 +11,7 @@ import os
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
@@ -610,6 +610,61 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
         logger.warning("Skill security warning for '%s': %s", name, "; ".join(warnings))
 
 
+class _ViewableSkill(NamedTuple):
+    """A filesystem skill :func:`skill_view` can serve, as its lookup half found it."""
+    skill_dir: Optional[Path]
+    skill_md: Path
+    content: str
+    frontmatter: dict
+    active_skills_dir: Path
+
+
+def _locate_viewable_skill(name: str, local_category_name: str | None) -> "str | _ViewableSkill":
+    """The lookup half of :func:`skill_view` for a filesystem (non-plugin) name: the failure JSON
+    ``skill_view`` returns (unknown, ambiguous, unreadable, wrong platform, disabled), else the
+    found skill. Reads and logs only: the activation effects (``deps`` installs, read marks,
+    preprocessing) stay in ``skill_view``, so :func:`viewable_skill_name` can answer "would it
+    load?" without them."""
+    roots, active_skills_dir = skill_search_dirs()
+    all_dirs = [d for _t, d in roots]
+    error, skill_dir, skill_md = locate_skill(name, local_category_name, roots)
+    if error is not None:
+        return error
+    try:  # read once — reused for platform check and main content
+        content = _read_skill_text(skill_md)
+    except Exception as e:
+        return _fail(f"Failed to read skill '{name}': {e}")
+    _log_security_warnings(name, skill_md, content, all_dirs, active_skills_dir)
+    frontmatter = _safe_frontmatter(content=content)
+    if not skill_matches_platform(frontmatter):
+        return _fail(f"Skill '{name}' is not supported on this platform.",
+                     readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
+    resolved_name = frontmatter.get("name", skill_md.parent.name)
+    # Disabled by declared name, or by the exact path that IS this copy's load name (a same-tier
+    # duplicate's row) — whatever alias reached it; an unrelated copy at that path elsewhere is not.
+    rel = _owned_relative(skill_dir, skill_md, all_dirs)
+    if _is_skill_disabled(resolved_name, rel) and (_is_skill_disabled(resolved_name) or any(
+            e["path"] == skill_md and e["load_name"] == rel for e in _skill_catalog(skip_disabled=True, include_hidden=True))):
+        return _fail(f"Skill '{resolved_name}' is disabled. Enable it with `hermes skills` or inspect the files directly on disk.")
+    return _ViewableSkill(skill_dir, skill_md, content, frontmatter, active_skills_dir)
+
+
+def viewable_skill_name(name: str) -> Optional[str]:
+    """The name :func:`skill_view` would report for the filesystem skill *name* under the current
+    home, or None when it would fail. No side effects beyond reading: no ``deps`` install, no
+    background-review read mark, no preprocessing. Plugin-qualified names (``plugin:skill``) answer
+    None: they resolve through the plugins of the process that runs them."""
+    if ":" in name or skill_lookup_path_error(name):
+        return None
+    try:
+        found = _locate_viewable_skill(name, None)
+    except Exception:
+        return None
+    if isinstance(found, str):
+        return None
+    return found.frontmatter.get("name", found.skill_md.stem if not found.skill_dir else found.skill_dir.name)
+
+
 def skill_view(
     name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
@@ -630,26 +685,10 @@ def skill_view(
         # since `bare` is not namespace-checked.
         if local_category_name and (lookup_error := skill_lookup_path_error(local_category_name)):
             return _fail(lookup_error, hint=_LOOKUP_HINT)
-        roots, active_skills_dir = skill_search_dirs()
-        all_dirs = [d for _t, d in roots]
-        error, skill_dir, skill_md = locate_skill(name, local_category_name, roots)
-        if error is not None:
-            return error
-        try:  # read once — reused for platform check and main content
-            content = _read_skill_text(skill_md)
-        except Exception as e:
-            return _fail(f"Failed to read skill '{name}': {e}")
-        _log_security_warnings(name, skill_md, content, all_dirs, active_skills_dir)
-        frontmatter = _safe_frontmatter(content=content)
-        if not skill_matches_platform(frontmatter):
-            return _fail(f"Skill '{name}' is not supported on this platform.", readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
-        resolved_name = frontmatter.get("name", skill_md.parent.name)
-        # Disabled by declared name, or by the exact path that IS this copy's load name (a same-tier
-        # duplicate's row) — whatever alias reached it; an unrelated copy at that path elsewhere is not.
-        rel = _owned_relative(skill_dir, skill_md, all_dirs)
-        if _is_skill_disabled(resolved_name, rel) and (_is_skill_disabled(resolved_name) or any(
-                e["path"] == skill_md and e["load_name"] == rel for e in _skill_catalog(skip_disabled=True, include_hidden=True))):
-            return _fail(f"Skill '{resolved_name}' is disabled. Enable it with `hermes skills` or inspect the files directly on disk.")
+        found = _locate_viewable_skill(name, local_category_name)
+        if isinstance(found, str):
+            return found
+        skill_dir, skill_md, content, frontmatter, active_skills_dir = found
         if file_path and skill_dir:
             return _serve_skill_file(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
