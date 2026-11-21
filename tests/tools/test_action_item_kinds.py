@@ -145,7 +145,7 @@ def test_hash16_is_over_the_stored_bytes_after_the_17_byte_prefix():
     (lambda e: e["payload"].pop("draft_id"), "payload"),
     (lambda e: e["payload"].__setitem__("subject", "changed"), "payload.content_hash"),
     (lambda e: e.__setitem__("deadline", "2026-11-11T17:00:00"), "deadline"),
-    (lambda e: e.__setitem__("then", "ready"), "then"),
+    (lambda e: e.__setitem__("then", "bogus"), "then"),
     (lambda e: e["links"][0].__setitem__("url", "https://evil.example/x"), "envelope.links[0].url"),
     (lambda e: e.__setitem__("ask", "two\nlines"), "envelope.ask"),
     (lambda e: e.__setitem__("schema", 2), "schema"),
@@ -155,6 +155,19 @@ def test_an_invalid_frozen_envelope_is_refused(mutate, field):
     mutate(env)
     with pytest.raises(SchemaError, match=field.replace(".", r"\.").replace("[", r"\[")):
         validate_envelope(env, HOSTS)
+
+
+@pytest.mark.parametrize("kind", ["send_email", "send_message"])
+def test_a_send_may_hand_its_card_back_ready_and_still_defaults_to_complete(kind):
+    """An awaiting-reply bump parks its send with ``then=ready`` so the card comes back for the next
+    bump after the approved send; a send parked without ``then`` still completes its card."""
+    payload = email_env()["payload"] if kind == "send_email" else message_payload("sms")
+    ready = build(kind, payload, then="ready")
+    assert ready["then"] == "ready" and " then=ready " in park_reason(ready)
+    validate_envelope(ready, HOSTS)
+    assert build(kind, payload)["then"] == "complete"
+    with pytest.raises(SchemaError, match="then"):
+        build(kind, payload, then="bogus")
 
 
 def test_send_message_phone_handles_must_be_e164():
