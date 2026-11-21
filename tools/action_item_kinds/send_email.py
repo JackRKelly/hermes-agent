@@ -105,7 +105,10 @@ SPEC = KindSpec(
     binding_fields=("account", "draft_id", "thread_id", "content_hash"),
     allowed_actions=("approve", "reject", "edit", "snooze", "later"),
     executor="send-email-handler", enrich=_enrich, live_check=_live_check, legacy_parse=_legacy,
-    check=_check, park_params=_park, default_then="complete", then_values=("complete",),
+    check=_check, park_params=_park, default_then="complete",
+    # ``ready`` hands the card back after the approved send (an awaiting-reply bump card needs its
+    # next run); the send itself still waits for Jack's verified approval either way.
+    then_values=("complete", "ready"),
     source_key=_source_key,
     default_links=lambda p: [{"label": "Gmail thread", "url": p.get("thread_url", "")}],
 )

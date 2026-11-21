@@ -288,7 +288,9 @@ SPEC = KindSpec(
     allowed_actions=("approve", "reject", "edit", "snooze", "later"),
     executor=None, enrich=_enrich, live_check=_live_check, legacy_parse=_legacy,
     check=_check, current_check=_check_slack_current, park_params=_park, default_then="complete",
-    then_values=("complete",),
+    # ``ready`` hands the card back after the approved send (an awaiting-reply bump card needs its
+    # next run); the send itself still waits for Jack's verified approval either way.
+    then_values=("complete", "ready"),
     source_key=lambda p: source_key(str(p.get("channel") or ""), str(p.get("account") or ""),
                                     str(p.get("conversation_id") or "")),
     default_links=default_links,
