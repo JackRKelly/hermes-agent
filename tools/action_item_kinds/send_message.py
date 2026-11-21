@@ -1,10 +1,15 @@
 """``send_message`` v1, FROZEN (design §3.2.1): byte-compatible with assistant ``scripts/action_item.py``.
 
-iMessage, SMS, Google Voice and Slack. The draft lives in the payload (``draft_text``); the tool
-computes ``content_hash`` and the default links. Per-channel forms the JSON Schema cannot express
-(account, conversation id, handle) are checked in ``_check``. On add and update, a Slack draft must
-come from a full read: ``_check_slack_current`` re-reads the thread and the channel and refuses when
-``last_messages`` misses any message since its earliest entry.
+iMessage, SMS, Google Voice, Slack and LinkedIn. The draft lives in the payload (``draft_text``);
+the tool computes ``content_hash`` and the default links. Per-channel forms the JSON Schema cannot
+express (account, conversation id, handle) are checked in ``_check``. On add and update, a Slack
+draft must come from a full read: ``_check_slack_current`` re-reads the thread and the channel and
+refuses when ``last_messages`` misses any message since its earliest entry.
+
+LinkedIn has no such add-time read here: the only reader is Jack's signed-in LinkedIn session in
+the Ego browser (``account`` is always ``"ego"``), which this process does not own. The freshness
+check before a LinkedIn send lives in the assistant readiness and send-executor path that drives
+that session; this module checks only the forms (thread id, profile-URL handles).
 """
 
 from __future__ import annotations
@@ -33,10 +38,25 @@ SLACK_TEAM_RE = re.compile(r"^[TE][A-Z0-9]{2,}$")
 # binds the destination. Before, a DM's top-level run was keyed by its first message's ts, and the approved reply
 # posted as a thread reply under that unrelated message (Disney Williams, Nov 21).
 SLACK_CONVERSATION_RE = re.compile(r"^([CDG][A-Z0-9]{2,})(?::([0-9]{9,11}\.[0-9]{6}))?$")
+# The LinkedIn conversation backend id: the ``<id>`` of ``/messaging/thread/<id>/`` (``2-ZjA3...==``).
+# No slash, so a pasted thread URL is refused instead of being stored as the id.
+LINKEDIN_CONVERSATION_RE = re.compile(r"^[A-Za-z0-9_=+\-]{8,200}$")
+# A LinkedIn profile URL: ``/in/<slug>/`` or the ``/in/ACoAA...`` member-urn form LinkedIn returns.
+LINKEDIN_PROFILE_RE = re.compile(r"^https://www\.linkedin\.com/in/[^/?#\s]+/?$")
+LINKEDIN_HOST_RE = re.compile(r"^https://www\.linkedin\.com(?=/)", re.IGNORECASE)
+LINKEDIN_ACCOUNT = "ego"
 
 
 def normal_handle(handle: str) -> str:
-    """Hash form of a recipient handle: an email lowercased; a Slack id and an E.164 phone as given."""
+    """Hash form of a recipient handle: an email lowercased; a Slack id and an E.164 phone as given.
+
+    A LinkedIn profile URL keeps its path's case (a slug or ``ACoAA...`` urn is case-sensitive);
+    only the scheme and host are lowercased and a trailing slash is dropped, so ``/in/ann/`` and
+    ``/in/ann`` hash alike. Checked first: no email, Slack id or phone starts with ``https://``, so
+    the hash of every pre-LinkedIn handle is unchanged."""
+    host = LINKEDIN_HOST_RE.match(handle)
+    if host:
+        return "https://www.linkedin.com" + handle[host.end():].rstrip("/")
     return handle.lower() if "@" in handle else handle
 
 
@@ -49,7 +69,9 @@ def content_hash(channel: str, conversation_id: str, recipients: Iterable[Any], 
 def source_key(channel: str, account: str, conversation_id: str) -> str:
     return {"imessage": f"imessage:{conversation_id}", "sms": f"sms:{conversation_id}",
             "google_voice": f"gvoice:{account}:{conversation_id}",
-            "slack": f"slack:{account}:{conversation_id}"}.get(channel, "")
+            "slack": f"slack:{account}:{conversation_id}",
+            # Must equal the assistant LinkedIn monitor's source_key (one account: no account part).
+            "linkedin": f"linkedin:{conversation_id}"}.get(channel, "")
 
 
 def slack_link(team: str, conversation_id: str) -> str:
@@ -67,6 +89,8 @@ def default_links(p: dict) -> list[dict]:
         return [{"label": "Slack thread" if ":" in conv else "Slack conversation", "url": slack_link(account, conv)}]
     if channel == "google_voice":
         return [{"label": "Google Voice thread", "url": f"https://mail.google.com/mail/u/{account}/#all/{conv}"}]
+    if channel == "linkedin":
+        return [{"label": "LinkedIn thread", "url": f"https://www.linkedin.com/messaging/thread/{conv}/"}]
     return []
 
 
@@ -87,11 +111,15 @@ def _enrich(agent: dict, sources: LiveSources) -> dict:
 
 
 def _check_handle(value: str, channel: str, where: str) -> None:
-    """Slack: a ``U``/``W`` user id. Otherwise an email or an E.164 phone: a national format is
-    refused, so verifiers never guess a country."""
+    """Slack: a ``U``/``W`` user id. LinkedIn: a profile URL. Otherwise an email or an E.164 phone:
+    a national format is refused, so verifiers never guess a country."""
     if channel == "slack":
         if not SLACK_USER_RE.match(value):
             raise SchemaError(f"{where}: a Slack user id (U... or W...) ({value!r})")
+    elif channel == "linkedin":
+        if not LINKEDIN_PROFILE_RE.match(value):
+            raise SchemaError(f"{where}: a LinkedIn profile URL like https://www.linkedin.com/in/<slug>/ "
+                              f"({value!r})")
     elif not (EMAIL_RE.match(value) or E164_RE.match(value)):
         raise SchemaError(f"{where}: an email or an E.164 phone like +15125550147 ({value!r})")
 
@@ -104,6 +132,9 @@ def _check_account(p: dict) -> None:
         raise SchemaError(f"payload.account: Jack's Slack team id for slack ({account!r})")
     if channel in ("imessage", "sms") and account != "this-mac":
         raise SchemaError('payload.account: must be "this-mac" for imessage/sms')
+    if channel == "linkedin" and account != LINKEDIN_ACCOUNT:
+        raise SchemaError(f'payload.account: must be "{LINKEDIN_ACCOUNT}" for linkedin '
+                          "(Jack's LinkedIn session in the Ego browser)")
 
 
 def _check(env: dict) -> None:
@@ -113,6 +144,10 @@ def _check(env: dict) -> None:
     if channel == "slack" and not SLACK_CONVERSATION_RE.match(p["conversation_id"]):
         raise SchemaError("payload.conversation_id: <channel_id> (a new message) or <channel_id>:<thread_ts> "
                           "(a reply in that thread) for slack")
+    if channel == "linkedin" and not LINKEDIN_CONVERSATION_RE.match(p["conversation_id"]):
+        raise SchemaError("payload.conversation_id: the LinkedIn thread id, the <id> of "
+                          "https://www.linkedin.com/messaging/thread/<id>/, not the URL "
+                          f"({p['conversation_id']!r})")
     if "team" in p["contact"] and channel != "slack":
         raise SchemaError("payload.contact: unknown keys ['team']")
     _check_handle(p["contact"]["handle"], channel, "payload.contact.handle")
