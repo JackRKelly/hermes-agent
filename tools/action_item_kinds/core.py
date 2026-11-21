@@ -30,9 +30,11 @@ ITEM_RE = re.compile(r"(?<!\S)item=([0-9a-f]{16})(?!\S)")
 # four hosts allowed an agent had to paste its URL into the summary instead of ``links[]``. The
 # assistant app's ``LINK_HOSTS`` (``scripts/action_item.py`` and the dashboard bundle) must list at
 # least these hosts, or its Links row drops them. The app lists are a superset: both also carry
-# ``cybershiptechnologies.slack.com``, which this set does not.
+# ``cybershiptechnologies.slack.com``, which this set does not. LinkedIn (Jack, Nov 20): the
+# ``send_message`` linkedin channel's default link is its ``www.linkedin.com`` thread; the host is
+# global, like every other one here (no list is scoped per kind).
 STATIC_LINK_HOSTS = frozenset({"github.com", "linear.app", "mail.google.com", "app.slack.com",
-                               "drive.google.com", "docs.google.com"})
+                               "drive.google.com", "docs.google.com", "www.linkedin.com"})
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 # An HTML tag (``<p>``, ``</div>``, ``<br/>``, ``<a href=...>``); ``<dave@x.com>`` is not one.
 HTML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)?/?>")
