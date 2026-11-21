@@ -87,7 +87,7 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
 
 
 def host_sources() -> LiveSources:
-    """The readers this host has: ``gh`` for GitHub, the profile's Slack user token for Slack."""
+    """The readers this host has: ``gh`` for GitHub, the profile's (else the shared) Slack user token."""
     from tools.action_item_kinds.github import GhSources
     from tools.action_item_kinds.slack import SlackSources
 
