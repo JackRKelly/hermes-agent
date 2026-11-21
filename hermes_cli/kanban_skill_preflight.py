@@ -26,6 +26,19 @@ missing ones as one JSON line after :data:`_RESULT_MARKER` (``null`` when it can
 """
 from __future__ import annotations
 
+# As the child (``python -m``) this module is spawned on the bare ``sys.executable``: in a PM install
+# that interpreter carries no dependencies until hermes_bootstrap selects the committed environment,
+# so it must run before any import that reaches a third-party package (``ruamel`` via the skills
+# lookup), as in ``agent/managed_worker.py``. Without it the child died on import and the check
+# failed open. Only as ``__main__``: the create paths import this module in-process, where the
+# bootstrap's TMPDIR/scratch exports must not fire in a library importer.
+if __name__ == "__main__":
+    try:
+        import hermes_bootstrap  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "hermes_bootstrap":
+            raise
+
 import json
 import logging
 import subprocess
@@ -89,7 +102,8 @@ def _resolve_in_child(home: str, names: list[str], workspace: str | None = None)
     for key in _UNBOUND_PLATFORM_ENV:
         env.pop(key, None)
     # Same interpreter and working directory the managed worker is spawned with
-    # (gateway/session_managed_worker.py), so the child imports this checkout's code.
+    # (gateway/session_managed_worker.py), so the child imports this checkout's code; like the
+    # worker, the child's entry imports hermes_bootstrap first to get its dependencies.
     source_root = Path(__file__).resolve().parents[1]
     try:
         proc = subprocess.run(

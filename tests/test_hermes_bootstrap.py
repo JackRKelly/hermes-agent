@@ -179,11 +179,15 @@ class TestStdioReconfigureErrorHandling:
             pytest.fail(f"bootstrap raised on non-reconfigurable stdout: {exc}")
 
 
-
-@pytest.mark.parametrize("path", [
+# Files run as ``__main__`` on the bare interpreter. ``kanban_skill_preflight`` is the child of the
+# pinned-skill create check: without the bootstrap it died on ``ruamel`` and the check failed open.
+_ENTRYPOINTS = [
     "hermes_cli/main.py", "run_agent.py", "acp_adapter/entry.py",
-    "gateway/run.py", "batch_runner.py", "cli.py",
-])
+    "gateway/run.py", "batch_runner.py", "cli.py", "hermes_cli/kanban_skill_preflight.py",
+]
+
+
+@pytest.mark.parametrize("path", _ENTRYPOINTS)
 def test_entrypoint_executes_bootstrap_before_application_imports(tmp_path, path):
     import subprocess
     from pathlib import Path
@@ -241,6 +245,7 @@ def test_library_imports_of_dual_use_entry_modules_stay_side_effect_free(tmp_pat
         import json, os, sys
         before = dict(os.environ)
         import agent.auxiliary_client, gateway.relay, tui_gateway.compute_host  # noqa: F401
+        import hermes_cli.kanban_skill_preflight  # noqa: F401  (imported in-process by kanban create)
         changed = sorted(k for k in before.keys() | os.environ.keys() if before.get(k) != os.environ.get(k))
         print(json.dumps({"bootstrapped": "hermes_bootstrap" in sys.modules, "changed": changed}))
     """)
@@ -290,10 +295,7 @@ print('reached-pm')
     assert result.stdout.strip() == "reached-pm"
 
 
-@pytest.mark.parametrize("path", [
-    "hermes_cli/main.py", "run_agent.py", "acp_adapter/entry.py",
-    "gateway/run.py", "batch_runner.py", "cli.py",
-])
+@pytest.mark.parametrize("path", _ENTRYPOINTS)
 @pytest.mark.parametrize("bootstrap,expected", [
     (None, "proceeded"),
     ("import hermes_missing_dependency_probe\n", "raised hermes_missing_dependency_probe"),
