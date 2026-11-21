@@ -156,7 +156,7 @@ def test_the_reader_pages_both_reads_and_fails_closed_on_a_slack_error():
 
 
 def test_the_reader_without_a_token_is_unavailable():
-    with pytest.raises(SourceUnavailable, match="no SLACK_USER_TOKEN"):
+    with pytest.raises(SourceUnavailable, match="nor the shared Slack reader has SLACK_USER_TOKEN"):
         SlackSources().slack_conversation(CHANNEL, f"{ROOT:.6f}", 0.5)
 
 
