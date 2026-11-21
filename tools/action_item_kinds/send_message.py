@@ -242,16 +242,19 @@ def _check_slack_current(payload: dict, sources: LiveSources) -> None:
     if stale:
         raise SchemaError(f"payload.last_inbound_at: must be the newest message not from Jack ({expected}), "
                           f"not {payload['last_inbound_at']}. {SLACK_FIX}")
-    _check_dm_thread(channel_id, thread_ts, max(inbound) if inbound else None, live, paired)
+    # The message being answered: the newest inbound one, else (every shown message is Jack's, e.g. an
+    # awaiting-reply bump) the newest one. The assistant's approve-time check (``action_items_readiness.
+    # slack_destination``) uses the same rule, so an item it would refuse after Jack's tap is refused here.
+    _check_dm_thread(channel_id, thread_ts, max(inbound) if inbound else max(supplied), live, paired)
 
 
-def _check_dm_thread(channel_id: str, thread_ts: Optional[str], answered: Optional[float], live: list[dict],
+def _check_dm_thread(channel_id: str, thread_ts: Optional[str], answered: float, live: list[dict],
                      paired: set[float]) -> None:
-    """In a DM, a thread key must hold the message being answered (the newest inbound one) as a reply in that
-    thread. A top-level DM message is never in a thread: replying with its ts (or an older one) as thread_ts
-    posts under an unrelated message (Disney Williams, Nov 21). A channel thread's root may be answered in its
-    thread (a top-level @mention), so channels are not judged here."""
-    if not (channel_id.startswith("D") and thread_ts and answered is not None):
+    """In a DM, a thread key must hold the message being answered as a reply in that thread. A top-level DM
+    message is never in a thread: replying with its ts (or an older one) as thread_ts posts under an unrelated
+    message (Disney Williams, Nov 21). A channel thread's root may be answered in its thread (a top-level
+    @mention), so channels are not judged here."""
+    if not (channel_id.startswith("D") and thread_ts):
         return
     near = [m for m in live if m["ts"] in paired and abs(m["ts"] - answered) < MATCH_SECONDS]
     hit = min(near, key=lambda m: abs(m["ts"] - answered)) if near else None

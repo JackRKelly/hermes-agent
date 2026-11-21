@@ -176,6 +176,28 @@ def test_a_real_dm_thread_reply_keeps_its_thread():
     assert env["payload"]["conversation_id"] == f"{DM}:{AMAZING:.6f}"
 
 
+# An awaiting-reply bump shows only Jack's messages: the newest one is judged, the same rule the assistant's
+# approve-time check uses, so the item is refused when parked, never only after Jack's tap.
+def jack_only(conversation_id: str, ts: float, text: str) -> dict:
+    return {**payload([entry(ts, text, who="jack")], last_inbound_at=iso(ts - 3600)),
+            "conversation_id": conversation_id}
+
+
+def test_a_jack_only_dm_thread_key_on_his_top_level_message_is_refused():
+    ask = msg(BURST, JACK, "Did the 79 units go live?")
+    slack = FakeSlack(thread=[ask], channel=[ask])  # his own top-level message, no replies: not a thread
+    with pytest.raises(SchemaError, match="top-level DM message, not a reply in thread"):
+        build(jack_only(f"{DM}:{BURST:.6f}", BURST, "Did the 79 units go live?"), slack)
+    assert build(jack_only(DM, BURST, "Did the 79 units go live?"), FakeSlack(channel=[ask]))
+
+
+def test_a_jack_only_reply_in_a_real_dm_thread_keeps_its_thread():
+    root, mine = msg(AMAZING, CUSTOMER, "Invoice question"), msg(BURST, JACK, "Did you get the October one?")
+    slack = FakeSlack(thread=[root, mine], channel=[root])
+    env = build(jack_only(f"{DM}:{AMAZING:.6f}", BURST, "Did you get the October one?"), slack)
+    assert env["payload"]["conversation_id"] == f"{DM}:{AMAZING:.6f}"
+
+
 # --- the reader --------------------------------------------------------------------------------
 
 def test_the_reader_pages_both_reads_and_fails_closed_on_a_slack_error():
