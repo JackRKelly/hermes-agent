@@ -479,6 +479,46 @@ def test_a_bound_id_the_park_reason_cannot_carry_is_refused_on_add(board, monkey
     assert call("action_item_get_decision", id=ok["id"])["trusted_item"] is True
 
 
+SMS = {"channel": "sms", "account": "this-mac", "conversation_id": "SMS;-;+15125550147",
+       "contact": {"handle": "+15125550147"}, "recipients": [{"handle": "+15125550147"}],
+       "last_messages": [{"from": "them", "at": "2026-11-10T09:00:00-06:00", "text": "eta?"}],
+       "last_inbound_at": "2026-11-10T09:00:00-06:00", "draft_text": "On my way", "draft_ref": None}
+EMAIL = {"account": "jack@cybership.io", "thread_id": "18f3a2b4c5d6e7f8", "draft_id": "r-1234567890123456789",
+         "from": {"name": "Dave Teeple", "email": "dave@example.com"}, "last_inbound_at": "2026-11-10T03:30:00-06:00",
+         "last_inbound_excerpt": "Might you have time on Wednesday?",
+         "to": [{"name": "Dave Teeple", "email": "dave@example.com"}], "cc": [], "bcc": [],
+         "subject": "Re: Quick chat", "body": "Hi Dave,\n\nWednesday works.\n\nJack", "attachments": []}
+SENDS = {"send_email": {"kind": "send_email", "payload": EMAIL, "ask": "Reply to Dave about Wednesday?"},
+         "send_message": {"kind": "send_message", "payload": SMS, "ask": "Send this text?"}}
+
+
+@pytest.mark.parametrize("kind", sorted(SENDS))
+@pytest.mark.parametrize("then, bound", [("ready", "then=ready"), (None, "then=complete")])
+def test_a_send_parks_with_then_ready_or_defaults_to_complete(board, monkeypatch, kind, then, bound):
+    """An awaiting-reply bump parks its send with ``then=ready`` so the card comes back after the
+    approved send; omitting ``then`` keeps a send's default of completing the card."""
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    args = {**SENDS[kind], **HUMAN, "why": "They asked; no reply yet.", "risk": {"level": "low", "note": "One send."}}
+    out = call("action_item_add", **args, **({} if then is None else {"then": then}))
+    assert out.get("ok"), out
+    status, _, events = card_state(tid)
+    park = [e for e in events if e.kind == "blocked"][-1]
+    assert status == "blocked" and f" {bound} " in park.payload["reason"]
+    assert call("action_item_get_decision", id=out["id"])["trusted_item"] is True
+
+
+@pytest.mark.parametrize("kind", sorted(SENDS))
+def test_a_send_with_an_unknown_then_is_refused_and_writes_nothing(board, monkeypatch, kind):
+    tid, run_id = make_card("engineering", claim=True)
+    as_worker(monkeypatch, "engineering", tid, run_id)
+    out = call("action_item_add", **SENDS[kind], **HUMAN, why="They asked; no reply yet.",
+               risk={"level": "low", "note": "One send."}, then="bogus")
+    assert "then" in out["error"] and "Nothing was written" in out["error"], out
+    status, comments, events = card_state(tid)
+    assert status == "running" and comments == [] and not [e for e in events if e.kind == "blocked"]
+
+
 def test_owner_update_reparks_in_place_and_voids_the_old_id(board, monkeypatch):
     tid, run_id = make_card("engineering", claim=True)
     as_worker(monkeypatch, "engineering", tid, run_id)
