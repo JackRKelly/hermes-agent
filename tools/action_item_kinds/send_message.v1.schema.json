@@ -8,7 +8,7 @@
   "required": ["channel", "account", "conversation_id", "contact", "recipients", "last_messages",
                "last_inbound_at", "draft_text", "draft_ref", "content_hash"],
   "properties": {
-    "channel": {"enum": ["imessage", "sms", "google_voice", "slack"]},
+    "channel": {"enum": ["imessage", "sms", "google_voice", "slack", "linkedin"]},
     "account": {"type": "string", "maxLength": 200, "x-text": "line"},
     "conversation_id": {"type": "string", "maxLength": 300, "x-text": "line"},
     "contact": {
