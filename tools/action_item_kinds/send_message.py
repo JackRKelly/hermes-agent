@@ -33,7 +33,11 @@ PAYLOAD_KEYS = frozenset({
 E164_RE = re.compile(r"^\+[1-9][0-9]{6,14}$")
 SLACK_USER_RE = re.compile(r"^[UW][A-Z0-9]{2,}$")
 SLACK_TEAM_RE = re.compile(r"^[TE][A-Z0-9]{2,}$")
-SLACK_CONVERSATION_RE = re.compile(r"^([CDG][A-Z0-9]{2,}):([0-9]{9,11}\.[0-9]{6})$")
+# A Slack ``conversation_id`` is where the reply posts (assistant docs/adr/0017): ``<channel>`` alone is a new
+# top-level message, ``<channel>:<thread_ts>`` a reply in that thread. ``content_hash`` covers it, so an approval
+# binds the destination. Before, a DM's top-level run was keyed by its first message's ts, and the approved reply
+# posted as a thread reply under that unrelated message (Disney Williams, Nov 21).
+SLACK_CONVERSATION_RE = re.compile(r"^([CDG][A-Z0-9]{2,})(?::([0-9]{9,11}\.[0-9]{6}))?$")
 # The LinkedIn conversation backend id: the ``<id>`` of ``/messaging/thread/<id>/`` (``2-ZjA3...==``).
 # No slash, so a pasted thread URL is refused instead of being stored as the id.
 LINKEDIN_CONVERSATION_RE = re.compile(r"^[A-Za-z0-9_=+\-]{8,200}$")
@@ -71,7 +75,10 @@ def source_key(channel: str, account: str, conversation_id: str) -> str:
 
 
 def slack_link(team: str, conversation_id: str) -> str:
+    """The thread for ``<channel>:<thread_ts>``, the DM or channel itself for ``<channel>``."""
     channel, _, ts = conversation_id.partition(":")
+    if not ts:
+        return f"https://app.slack.com/client/{team}/{channel}"
     return f"https://app.slack.com/client/{team}/{channel}/thread/{channel}-{ts}"
 
 
@@ -79,7 +86,7 @@ def default_links(p: dict) -> list[dict]:
     channel, account = str(p.get("channel") or ""), str(p.get("account") or "")
     conv = str(p.get("conversation_id") or "")
     if channel == "slack":
-        return [{"label": "Slack thread", "url": slack_link(account, conv)}]
+        return [{"label": "Slack thread" if ":" in conv else "Slack conversation", "url": slack_link(account, conv)}]
     if channel == "google_voice":
         return [{"label": "Google Voice thread", "url": f"https://mail.google.com/mail/u/{account}/#all/{conv}"}]
     if channel == "linkedin":
@@ -135,7 +142,8 @@ def _check(env: dict) -> None:
     channel = p["channel"]
     _check_account(p)
     if channel == "slack" and not SLACK_CONVERSATION_RE.match(p["conversation_id"]):
-        raise SchemaError("payload.conversation_id: <channel_id>:<thread_ts> for slack")
+        raise SchemaError("payload.conversation_id: <channel_id> (a new message) or <channel_id>:<thread_ts> "
+                          "(a reply in that thread) for slack")
     if channel == "linkedin" and not LINKEDIN_CONVERSATION_RE.match(p["conversation_id"]):
         raise SchemaError("payload.conversation_id: the LinkedIn thread id, the <id> of "
                           "https://www.linkedin.com/messaging/thread/<id>/, not the URL "
@@ -269,6 +277,27 @@ def _check_slack_current(payload: dict, sources: LiveSources) -> None:
     if stale:
         raise SchemaError(f"payload.last_inbound_at: must be the newest message not from Jack ({expected}), "
                           f"not {payload['last_inbound_at']}. {SLACK_FIX}")
+    # The message being answered: the newest inbound one, else (every shown message is Jack's, e.g. an
+    # awaiting-reply bump) the newest one. The assistant's approve-time check (``action_items_readiness.
+    # slack_destination``) uses the same rule, so an item it would refuse after Jack's tap is refused here.
+    _check_dm_thread(channel_id, thread_ts, max(inbound) if inbound else max(supplied), live, paired)
+
+
+def _check_dm_thread(channel_id: str, thread_ts: Optional[str], answered: float, live: list[dict],
+                     paired: set[float]) -> None:
+    """In a DM, a thread key must hold the message being answered as a reply in that thread. A top-level DM
+    message is never in a thread: replying with its ts (or an older one) as thread_ts posts under an unrelated
+    message (Disney Williams, Nov 21). A channel thread's root may be answered in its thread (a top-level
+    @mention), so channels are not judged here."""
+    if not (channel_id.startswith("D") and thread_ts):
+        return
+    near = [m for m in live if m["ts"] in paired and abs(m["ts"] - answered) < MATCH_SECONDS]
+    hit = min(near, key=lambda m: abs(m["ts"] - answered)) if near else None
+    if hit is None or (hit["where"] == "thread" and hit["ts"] != float(thread_ts)):
+        return
+    raise SchemaError(f"payload.conversation_id: the message being answered ({_iso(hit['ts'])}) is a top-level "
+                      f"DM message, not a reply in thread {thread_ts}, so the reply would post under an unrelated "
+                      f"message. Use conversation_id {channel_id} (a new message), or the thread it is in")
 
 
 def _legacy(reason: str) -> Optional[dict]:

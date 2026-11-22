@@ -136,6 +136,68 @@ def test_other_channels_are_not_read():
     assert build(p, FakeSlack(error="must not be read"))
 
 
+# --- where the reply posts (assistant docs/adr/0017) --------------------------------------------
+# Disney Williams (Nov 21): an unanswered "amazing, thank you!!!", then a top-level burst. The DM was keyed by the
+# first message's ts, and the approved reply posted as a thread reply under it.
+
+DM, AMAZING, BURST = "D07DISNEY", ROOT, ROOT + 19000.0
+
+
+def dm_payload(conversation_id: str, last_messages: list[dict]) -> dict:
+    return {**payload(last_messages), "conversation_id": conversation_id}
+
+
+DM_BURST = [msg(AMAZING, CUSTOMER, "amazing, thank you!!!"), msg(BURST, CUSTOMER, "I need help"),
+            msg(BURST + 30, CUSTOMER, "they need to be live asap")]
+DM_BURST_SHOWN = [entry(AMAZING, "amazing, thank you!!!"), entry(BURST, "I need help"),
+                  entry(BURST + 30, "they need to be live asap")]
+
+
+def test_a_dm_keyed_by_an_old_top_level_message_is_refused():
+    slack = FakeSlack(thread=DM_BURST[:1], channel=DM_BURST)  # the "thread" is only its root
+    with pytest.raises(SchemaError, match="top-level DM message, not a reply in thread"):
+        build(dm_payload(f"{DM}:{AMAZING:.6f}", DM_BURST_SHOWN), slack)
+
+
+def test_the_dm_itself_is_a_new_message():
+    slack = FakeSlack(channel=DM_BURST)
+    env = build(dm_payload(DM, DM_BURST_SHOWN), slack)
+    assert env["payload"]["conversation_id"] == DM
+    assert env["source_key"] == f"slack:T07LES81AAE:{DM}"
+    assert env["links"] == [{"label": "Slack conversation", "url": f"https://app.slack.com/client/T07LES81AAE/{DM}"}]
+    assert slack.reads == [(DM, None, int(AMAZING) - 1.0)]
+
+
+def test_a_real_dm_thread_reply_keeps_its_thread():
+    root, reply = msg(AMAZING, CUSTOMER, "Invoice question"), msg(BURST, CUSTOMER, "The October one")
+    slack = FakeSlack(thread=[root, reply], channel=[root])
+    env = build(dm_payload(f"{DM}:{AMAZING:.6f}", [entry(AMAZING, "Invoice question"),
+                                                   entry(BURST, "The October one")]), slack)
+    assert env["payload"]["conversation_id"] == f"{DM}:{AMAZING:.6f}"
+
+
+# An awaiting-reply bump shows only Jack's messages: the newest one is judged, the same rule the assistant's
+# approve-time check uses, so the item is refused when parked, never only after Jack's tap.
+def jack_only(conversation_id: str, ts: float, text: str) -> dict:
+    return {**payload([entry(ts, text, who="jack")], last_inbound_at=iso(ts - 3600)),
+            "conversation_id": conversation_id}
+
+
+def test_a_jack_only_dm_thread_key_on_his_top_level_message_is_refused():
+    ask = msg(BURST, JACK, "Did the 79 units go live?")
+    slack = FakeSlack(thread=[ask], channel=[ask])  # his own top-level message, no replies: not a thread
+    with pytest.raises(SchemaError, match="top-level DM message, not a reply in thread"):
+        build(jack_only(f"{DM}:{BURST:.6f}", BURST, "Did the 79 units go live?"), slack)
+    assert build(jack_only(DM, BURST, "Did the 79 units go live?"), FakeSlack(channel=[ask]))
+
+
+def test_a_jack_only_reply_in_a_real_dm_thread_keeps_its_thread():
+    root, mine = msg(AMAZING, CUSTOMER, "Invoice question"), msg(BURST, JACK, "Did you get the October one?")
+    slack = FakeSlack(thread=[root, mine], channel=[root])
+    env = build(jack_only(f"{DM}:{AMAZING:.6f}", BURST, "Did you get the October one?"), slack)
+    assert env["payload"]["conversation_id"] == f"{DM}:{AMAZING:.6f}"
+
+
 # --- the reader --------------------------------------------------------------------------------
 
 def test_the_reader_pages_both_reads_and_fails_closed_on_a_slack_error():
@@ -153,6 +215,9 @@ def test_the_reader_pages_both_reads_and_fails_closed_on_a_slack_error():
     assert calls == [("conversations.replies", None), ("conversations.replies", "p2"), ("conversations.history", None)]
     with pytest.raises(SourceUnavailable, match="conversations.replies: channel_not_found"):
         SlackSources(lambda m, p: {"ok": False, "error": "channel_not_found"}).slack_conversation(CHANNEL, "1.0", 0)
+    calls.clear()
+    read = SlackSources(api).slack_conversation(CHANNEL, None, 0.5)  # a new message: the history only
+    assert (read["thread"], calls) == ([], [("conversations.history", None)])
 
 
 def test_the_reader_without_a_token_is_unavailable():

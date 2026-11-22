@@ -98,8 +98,9 @@ class SlackSources(LiveSources):
             raise SourceUnavailable(f"neither this profile nor the shared Slack reader has {TOKEN_NAME}")
         return _http_api(token)
 
-    def slack_conversation(self, channel_id: str, thread_ts: str, oldest: float) -> dict[str, Any]:
+    def slack_conversation(self, channel_id: str, thread_ts: Optional[str], oldest: float) -> dict[str, Any]:
         api = self._client()
         window = {"channel": channel_id, "oldest": f"{oldest:.6f}", "inclusive": "true"}
-        return {"thread": _pages(api, "conversations.replies", {**window, "ts": thread_ts}),
+        # No thread_ts: the conversation is the DM or channel itself (a new message), only its history.
+        return {"thread": _pages(api, "conversations.replies", {**window, "ts": thread_ts}) if thread_ts else [],
                 "channel": _pages(api, "conversations.history", window)}
