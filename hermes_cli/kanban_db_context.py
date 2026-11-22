@@ -157,14 +157,20 @@ def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str
 def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
     """Done-parent handoffs: newest ``completed`` run's summary+metadata,
     falling back to ``task.result`` for pre-runs-table data. Stamped with a
-    relative age so the worker re-verifies stale upstream results."""
+    relative age so the worker re-verifies stale upstream results.
+
+    A parent archived AFTER it completed still hands off: archiving is a
+    reversible status move that keeps ``completed_at`` and the runs, and an
+    old-done-card archiver may archive a parent while its child is still open.
+    A parent archived without ever completing (no ``completed_at``) never
+    landed a result, so it is skipped like any unfinished parent."""
     parent_rows = conn.execute(
         "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id", (task_id,),
     ).fetchall()
     wrote_header = False
     for pid in (r["parent_id"] for r in parent_rows):
         pt = _kb.get_task(conn, pid)
-        if not pt or pt.status != "done":
+        if not pt or not (pt.status == "done" or (pt.status == "archived" and pt.completed_at)):
             continue
         runs = [r for r in _kb.list_runs(conn, pid) if r.outcome == "completed"]
         runs.sort(key=lambda r: r.started_at, reverse=True)
