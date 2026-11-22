@@ -41,10 +41,11 @@ class LiveSources:
         """``{last_inbound_at}`` of the thread."""
         raise SourceUnavailable("no message-thread reader in hermes-agent; the card owner re-checks")
 
-    def slack_conversation(self, channel_id: str, thread_ts: str, oldest: float) -> dict:
+    def slack_conversation(self, channel_id: str, thread_ts: Optional[str], oldest: float) -> dict:
         """``{"thread": [...], "channel": [...]}``: the raw Slack messages (``ts``, ``user``, ``text``,
         ...) of ``conversations.replies`` for the thread and ``conversations.history`` of the channel,
-        each from ``oldest`` (epoch seconds, inclusive) on."""
+        each from ``oldest`` (epoch seconds, inclusive) on. ``thread_ts`` None (a new message in the DM or
+        channel): ``thread`` is empty."""
         raise SourceUnavailable("no Slack reader configured")
 
 
