@@ -31,8 +31,9 @@ ITEM_RE = re.compile(r"(?<!\S)item=([0-9a-f]{16})(?!\S)")
 # assistant app's ``LINK_HOSTS`` (``scripts/action_item.py`` and the dashboard bundle) must list at
 # least these hosts, or its Links row drops them. The app lists are a superset: both also carry
 # ``cybershiptechnologies.slack.com``, which this set does not. LinkedIn (Jack, Nov 20): the
-# ``send_message`` linkedin channel's default link is its ``www.linkedin.com`` thread; the host is
-# global, like every other one here (no list is scoped per kind).
+# ``send_message`` linkedin channel's default link is its ``www.linkedin.com`` thread (and the
+# linkedin_comment channel's the post opened at the comment); the host is global, like every
+# other one here (no list is scoped per kind).
 STATIC_LINK_HOSTS = frozenset({"github.com", "linear.app", "mail.google.com", "app.slack.com",
                                "drive.google.com", "docs.google.com", "www.linkedin.com"})
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")

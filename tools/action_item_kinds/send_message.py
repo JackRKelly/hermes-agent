@@ -1,15 +1,22 @@
 """``send_message`` v1, FROZEN (design §3.2.1): byte-compatible with assistant ``scripts/action_item.py``.
 
-iMessage, SMS, Google Voice, Slack and LinkedIn. The draft lives in the payload (``draft_text``);
-the tool computes ``content_hash`` and the default links. Per-channel forms the JSON Schema cannot
-express (account, conversation id, handle) are checked in ``_check``. On add and update, a Slack
-draft must come from a full read: ``_check_slack_current`` re-reads the thread and the channel and
-refuses when ``last_messages`` misses any message since its earliest entry.
+iMessage, SMS, Google Voice, Slack, LinkedIn and LinkedIn comment replies. The draft lives in the
+payload (``draft_text``); the tool computes ``content_hash`` and the default links. Per-channel
+forms the JSON Schema cannot express (account, conversation id, handle) are checked in ``_check``.
+On add and update, a Slack draft must come from a full read: ``_check_slack_current`` re-reads the
+thread and the channel and refuses when ``last_messages`` misses any message since its earliest
+entry.
 
 LinkedIn has no such add-time read here: the only reader is Jack's signed-in LinkedIn session in
 the Ego browser (``account`` is always ``"ego"``), which this process does not own. The freshness
 check before a LinkedIn send lives in the assistant readiness and send-executor path that drives
 that session; this module checks only the forms (thread id, profile-URL handles).
+
+``linkedin_comment`` (Jack, Nov 20) is a PUBLIC reply to one comment on Jack's own post, from the
+same Ego session: ``conversation_id`` is ``<activity id>-<comment id>``, the one recipient is the
+commenter's profile URL, ``last_messages`` is the comment answered plus at most two earlier replies
+in its thread, and ``draft_text`` is the exact public reply. Same fail-closed live check, no
+add-time read, no executor here.
 """
 
 from __future__ import annotations
@@ -45,6 +52,15 @@ LINKEDIN_CONVERSATION_RE = re.compile(r"^[A-Za-z0-9_=+\-]{8,200}$")
 LINKEDIN_PROFILE_RE = re.compile(r"^https://www\.linkedin\.com/in/[^/?#\s]+/?$")
 LINKEDIN_HOST_RE = re.compile(r"^https://www\.linkedin\.com(?=/)", re.IGNORECASE)
 LINKEDIN_ACCOUNT = "ego"
+# A reply to a comment on Jack's post: ``<activity id>-<comment id>``, the decimal ids of
+# ``urn:li:activity:<a>`` and ``urn:li:comment:(activity:<a>,<c>)``. Digits only, so a pasted URL or
+# urn text is refused instead of being stored (and hashed) as the destination.
+LINKEDIN_COMMENT_RE = re.compile(r"^([0-9]{6,25})-([0-9]{6,25})$")
+# Both send from Jack's LinkedIn session in the Ego browser and address people by profile URL.
+LINKEDIN_CHANNELS = ("linkedin", "linkedin_comment")
+# The comment being answered plus at most two earlier replies in its thread: enough for Jack to see
+# what the public reply answers without the item turning into a copy of the whole thread.
+LINKEDIN_COMMENT_MAX_MESSAGES = 3
 
 
 def normal_handle(handle: str) -> str:
@@ -71,7 +87,17 @@ def source_key(channel: str, account: str, conversation_id: str) -> str:
             "google_voice": f"gvoice:{account}:{conversation_id}",
             "slack": f"slack:{account}:{conversation_id}",
             # Must equal the assistant LinkedIn monitor's source_key (one account: no account part).
-            "linkedin": f"linkedin:{conversation_id}"}.get(channel, "")
+            "linkedin": f"linkedin:{conversation_id}",
+            # Must equal the assistant LinkedIn comment monitor's source_key (same one-account rule).
+            "linkedin_comment": f"linkedin_comment:{conversation_id}"}.get(channel, "")
+
+
+def linkedin_comment_link(conversation_id: str) -> str:
+    """The post opened at the comment: ``/feed/update/urn:li:activity:<a>/`` with ``commentUrn`` set to
+    the percent-encoded ``urn:li:comment:(activity:<a>,<c>)``."""
+    activity, _, comment = conversation_id.partition("-")
+    return (f"https://www.linkedin.com/feed/update/urn:li:activity:{activity}/"
+            f"?commentUrn=urn%3Ali%3Acomment%3A%28activity%3A{activity}%2C{comment}%29")
 
 
 def slack_link(team: str, conversation_id: str) -> str:
@@ -91,6 +117,8 @@ def default_links(p: dict) -> list[dict]:
         return [{"label": "Google Voice thread", "url": f"https://mail.google.com/mail/u/{account}/#all/{conv}"}]
     if channel == "linkedin":
         return [{"label": "LinkedIn thread", "url": f"https://www.linkedin.com/messaging/thread/{conv}/"}]
+    if channel == "linkedin_comment":
+        return [{"label": "LinkedIn comment", "url": linkedin_comment_link(conv)}]
     return []
 
 
@@ -116,7 +144,7 @@ def _check_handle(value: str, channel: str, where: str) -> None:
     if channel == "slack":
         if not SLACK_USER_RE.match(value):
             raise SchemaError(f"{where}: a Slack user id (U... or W...) ({value!r})")
-    elif channel == "linkedin":
+    elif channel in LINKEDIN_CHANNELS:
         if not LINKEDIN_PROFILE_RE.match(value):
             raise SchemaError(f"{where}: a LinkedIn profile URL like https://www.linkedin.com/in/<slug>/ "
                               f"({value!r})")
@@ -132,9 +160,28 @@ def _check_account(p: dict) -> None:
         raise SchemaError(f"payload.account: Jack's Slack team id for slack ({account!r})")
     if channel in ("imessage", "sms") and account != "this-mac":
         raise SchemaError('payload.account: must be "this-mac" for imessage/sms')
-    if channel == "linkedin" and account != LINKEDIN_ACCOUNT:
-        raise SchemaError(f'payload.account: must be "{LINKEDIN_ACCOUNT}" for linkedin '
+    if channel in LINKEDIN_CHANNELS and account != LINKEDIN_ACCOUNT:
+        raise SchemaError(f'payload.account: must be "{LINKEDIN_ACCOUNT}" for {channel} '
                           "(Jack's LinkedIn session in the Ego browser)")
+
+
+def _check_linkedin_comment(p: dict) -> None:
+    """A public reply to one comment: the destination is ``<activity id>-<comment id>``, it answers
+    exactly one person (the commenter, who is also ``contact``), and ``last_messages`` stays the
+    comment plus at most two earlier replies."""
+    if not LINKEDIN_COMMENT_RE.match(p["conversation_id"]):
+        raise SchemaError("payload.conversation_id: <activity id>-<comment id> for linkedin_comment, the "
+                          "digits of urn:li:activity:<activity id> and urn:li:comment:(activity:<activity id>,"
+                          f"<comment id>), not a URL or urn text ({p['conversation_id']!r})")
+    if len(p["recipients"]) != 1:
+        raise SchemaError("payload.recipients: exactly one recipient (the commenter) for linkedin_comment "
+                          f"({len(p['recipients'])} given)")
+    if normal_handle(p["recipients"][0]["handle"]) != normal_handle(p["contact"]["handle"]):
+        raise SchemaError("payload.recipients[0].handle: must be the commenter, the same profile URL as "
+                          "payload.contact.handle, for linkedin_comment")
+    if len(p["last_messages"]) > LINKEDIN_COMMENT_MAX_MESSAGES:
+        raise SchemaError(f"payload.last_messages: at most {LINKEDIN_COMMENT_MAX_MESSAGES} for linkedin_comment "
+                          "(the comment being answered plus at most 2 earlier replies in its thread)")
 
 
 def _check(env: dict) -> None:
@@ -153,6 +200,8 @@ def _check(env: dict) -> None:
     _check_handle(p["contact"]["handle"], channel, "payload.contact.handle")
     for i, recipient in enumerate(p["recipients"]):
         _check_handle(recipient["handle"], channel, f"payload.recipients[{i}].handle")
+    if channel == "linkedin_comment":
+        _check_linkedin_comment(p)
     require_hash(p, "content_hash", _payload_hash(p))
     expected = source_key(channel, p["account"], p["conversation_id"])
     if env["source_key"] != expected:
