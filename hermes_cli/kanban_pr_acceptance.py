@@ -80,6 +80,7 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
         return None
     from tools.environments.local import _is_routed_home, hermes_subprocess_env, served_profile_child_env
     base = hermes_subprocess_env(inherit_credentials=True)
+    ambient = dict(base)
     routed = _is_routed_home(profile_home)
     if routed:
         # gh's config dir decides which login `gh api` uses, yet it is a path, not a
@@ -87,10 +88,12 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
         base.pop("GH_CONFIG_DIR", None)
     env = served_profile_child_env(base=base, target_home=profile_home, inherit_credentials=True)
     if routed and not (env.keys() & {"GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR"}):
-        # HOME/XDG_CONFIG_HOME are still the launch process's: without a login of its own the
-        # child would fall through to ~/.config/gh/hosts.yml — the ambient login. Pin gh's config
-        # to a profile-owned dir so it fails "not logged in" (exit 4 -> auth) instead.
-        env["GH_CONFIG_DIR"] = str(Path(profile_home) / "gh")
+        # The routed profile has no GitHub login of its own (crew profiles carry none; their
+        # workers pass only because the profile home is the process home). Acceptance only
+        # issues read-only GET/GraphQL queries, and Jack approved (t_ed1f2df8) the completing
+        # process's own gh login for these reads. A profile that has a login of its own still
+        # wins above (#122689); with no ambient login either, gh exits 4 -> `auth`.
+        return ambient
     return env
 
 
