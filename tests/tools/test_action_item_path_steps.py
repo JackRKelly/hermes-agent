@@ -40,7 +40,7 @@ def test_a_workspace_file_in_backticks_is_refused_with_inline_sql_as_the_fix(roo
     """In the card's own workspace and a type the app serves, but in `code`: the app prints it as text."""
     script = root / "kanban" / "workspaces" / CARD / "repair-committed-drift.md"
     with pytest.raises(SchemaError) as refused:
-        task([f"Open the repair notes at `{script}`", "Run it"])
+        task([f"Open the SQL repair notes at `{script}`", "Run it"])
     message = str(refused.value)
     assert message.startswith("payload.steps[0]: contains a local path"), message
     assert "another machine" in message and "```sql" in message
@@ -63,6 +63,24 @@ def test_a_local_path_in_a_step_is_refused_even_as_its_only_code_span(step):
 def test_the_folder_by_folder_step_is_still_refused():
     with pytest.raises(SchemaError, match=r"^payload\.steps\[1\]: names a local path folder by folder"):
         task(["Open System Settings > Privacy & Security > Full Disk Access and press +", FDA_STEP])
+
+
+def test_a_file_drop_or_pick_refusal_gives_the_plain_words_file_form_not_sql():
+    """Narration takes saved into a state folder, and a Full Disk Access pick, have no SQL: their refusal
+    shows the file form (AirDrop to the Hermes Mac, or the agent's `open -R` first), and that form parks."""
+    with pytest.raises(SchemaError) as dropped:
+        task(["Save the 7 narration takes into `~/.hermes/state/linkedin/narration/`", "Mark this Done"])
+    with pytest.raises(SchemaError) as picked:
+        task([FDA_STEP])
+    for refused in (dropped, picked):
+        message = str(refused.value)
+        assert "Hermes Mac" in message and "open -R" in message, message
+        assert "BEGIN;" not in message, message
+    assert "AirDrop" in str(dropped.value)
+    assert "Finder window the agent opened" in str(picked.value)
+    files = ["AirDrop the 7 narration takes to the Hermes Mac (they land in Downloads; the agent moves them)",
+             "Mark this Done"]
+    assert task(files, where="The Hermes Mac")["payload"]["steps"] == files
 
 
 @pytest.mark.parametrize("step", ["Go to `Users` > `jack` > `.hermes`", "Open `a`, `b`, `c`"])

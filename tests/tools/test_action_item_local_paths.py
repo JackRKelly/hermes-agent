@@ -95,7 +95,9 @@ def test_every_human_facing_text_refuses_a_local_path_with_its_field(root, kind,
     assert message.startswith(f"{where}: contains a local path"), message
     assert "another machine" in message
     if kind == "user_task" and where.startswith("payload."):
-        assert "Write e.g. [" in message and "SELECT" in message  # a task's fix is its SQL inline
+        # A task step with no SQL gets the file form (sent or picked on the Hermes Mac) as its example; the
+        # fix text still names the inline SQL form too.
+        assert "Write e.g. [" in message and "Hermes Mac" in message and "```sql" in message
     else:
         assert f'Write e.g. "Image: {root / "kanban" / "workspaces" / CARD}/post-image.png"' in message
     assert message.endswith(GUIDE_TAIL)

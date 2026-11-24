@@ -153,12 +153,28 @@ EXAMPLE_SQL_STEPS = [
     "Run the repair:\n```sql\nBEGIN;\nUPDATE inventory_level SET committed = 0 WHERE committed < 0;\nCOMMIT;\n```",
     "Verify, expect 0: `SELECT count(*) FROM inventory_level WHERE committed < 0;`",
 ]
+# What a task about a file on the Hermes Mac looks like with no path (narration takes, a Full Disk Access
+# binary): Jack sends the file and the agent moves it, or the agent first runs `open -R <path>` itself so
+# Finder shows the file selected and the step only says what to do with it.
+EXAMPLE_FILE_STEPS = [
+    "AirDrop the 7 narration takes to the Hermes Mac (they land in Downloads; the agent moves them)",
+    "Mark this Done",
+]
+EXAMPLE_PICK_STEPS = [
+    "On the Hermes Mac, open System Settings > Privacy & Security > Full Disk Access",
+    "Drag the file selected in the Finder window the agent opened into the list and turn it on",
+]
 LOCAL_PATH_FIX = (
     "Jack reads Action Items on another machine and cannot open a file on this Mac. Put the SQL or "
     "command itself in the text: one statement per user_task step as its code span, or a whole script as "
     "one ```sql fenced block in one step (or in an other body); the app shows both with a Copy button. A "
+    "file Jack sends or picks on the Hermes Mac is named in plain words, never by path: he AirDrops it to "
+    "the Hermes Mac (it lands in Downloads) and the agent moves it, or for a pick the agent first runs "
+    "`open -R <path>` itself so Finder shows the file selected. A "
     "picture, video or md/txt/log/json report the card shows is saved in this card's own workspace and named "
     "by its path in plain text (never in backticks), and the app embeds it")
+# A step about SQL gets the inline SQL example; any other step the file example.
+_SQL_HINT_RE = re.compile(r"\b(?:SELECT|INSERT|UPDATE|DELETE|BEGIN|COMMIT|SQL|psql)\b|\.sql\b")
 
 # Jack, Nov 17: a park put a Drive URL in its summary with ``links: []``, so the card face read as a
 # raw URL instead of a sentence. A URL in text stays accepted (the app links it in place), so this is
@@ -201,10 +217,12 @@ def _inside(raw: str, dirs: tuple[Path, ...]) -> bool:
 
 
 def _spans(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` of every match of ``pattern`` in ``text``."""
     return [m.span() for m in pattern.finditer(text)]
 
 
 def _within(pos: int, spans: list[tuple[int, int]]) -> bool:
+    """``pos`` falls inside one of ``spans``."""
     return any(start <= pos < end for start, end in spans)
 
 
@@ -235,8 +253,9 @@ def foreign_local_path(text: str, card: Optional[str]) -> Optional[str]:
 
 
 def check_local_paths(text: Any, where: str, card: Optional[str]) -> None:
-    """Refuse a local path Jack would see printed (``foreign_local_path``). The example is inline SQL steps
-    for a task's steps and where, else the one file form the app embeds."""
+    """Refuse a local path Jack would see printed (``foreign_local_path``). The example for a task's steps and
+    where is inline SQL steps when the text is about SQL, else the file Jack sends to the Hermes Mac; for any
+    other text it is the one file form the app embeds."""
     if not isinstance(text, str):
         return
     raw = foreign_local_path(text, card)
@@ -244,7 +263,7 @@ def check_local_paths(text: Any, where: str, card: Optional[str]) -> None:
         return
     example: Any
     if where.startswith(("payload.steps[", "payload.where")):
-        example = EXAMPLE_SQL_STEPS
+        example = EXAMPLE_SQL_STEPS if _SQL_HINT_RE.search(text) else EXAMPLE_FILE_STEPS
     elif card:
         example = f"Image: {card_file_dirs(card)[0]}/post-image.png"
     else:
@@ -334,7 +353,7 @@ def check_folder_chain(text: Any, where: str) -> None:
         joined = bool(gap.strip()) and _CHAIN_GAP_RE.fullmatch(gap) is not None
         run = run + 1 if joined else 1
         if run >= _CHAIN_MIN:
-            raise fix(where, f"names a local path folder by folder. {LOCAL_PATH_FIX}", EXAMPLE_SQL_STEPS)
+            raise fix(where, f"names a local path folder by folder. {LOCAL_PATH_FIX}", EXAMPLE_PICK_STEPS)
 
 
 def _check_sql_file(text: Any, where: str) -> None:
