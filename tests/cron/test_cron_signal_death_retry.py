@@ -49,13 +49,10 @@ def sent(cron_home, monkeypatch):
     return out
 
 
-def _grace(monkeypatch, runs: int) -> None:
-    from hermes_cli import config
-
-    real = config.load_config
-    monkeypatch.setattr(
-        config, "load_config",
-        lambda *a, **kw: {**real(*a, **kw), "cron": {"signal_death_grace_runs": runs}})
+def _grace(home, runs: int) -> None:
+    """Set ``cron.signal_death_grace_runs`` in the home's real config.yaml (read by the loader)."""
+    (home / "config.yaml").write_text(
+        f"cron:\n  signal_death_grace_runs: {runs}\n", encoding="utf-8")
 
 
 def _job(home, schedule: str = "every 5m"):
@@ -139,13 +136,24 @@ def test_non_signal_first_failure_still_alerts(cron_home, sent):
     assert _incident_count(job["id"]) == 1
 
 
-def test_grace_zero_alerts_on_the_first_signal_death(cron_home, sent, monkeypatch):
-    _grace(monkeypatch, 0)
+def test_grace_zero_alerts_on_the_first_signal_death(cron_home, sent):
+    _grace(cron_home, 0)
     job = _job(cron_home)
     _run(cron_home, job["id"], SIGTERM_SELF)
 
     assert len(sent) == 1
     assert _incident_count(job["id"]) == 1
+
+
+def test_grace_two_withholds_two_signal_deaths_then_alerts(cron_home, sent):
+    _grace(cron_home, 2)
+    job = _job(cron_home)
+    _run(cron_home, job["id"], SIGTERM_SELF)
+    _run(cron_home, job["id"], SIGTERM_SELF)
+    assert sent == []
+
+    _run(cron_home, job["id"], SIGTERM_SELF)
+    assert len(sent) == 1
 
 
 def test_one_shot_job_alerts_on_the_first_signal_death(cron_home, sent):
