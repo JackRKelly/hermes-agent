@@ -525,6 +525,24 @@ cron:
   failure_nudge_threshold: 3   # default; 0 disables the nudge
 ```
 
+### A script killed by a signal retries silently once
+
+When the script of a *recurring* `no_agent` job is killed by a signal (exit
+code `-N`, or `128+N` for SIGHUP, SIGINT, SIGKILL or SIGTERM from a `.sh`
+wrapper), something outside the job stopped it, and the next scheduled run
+usually succeeds. The first such failure in a row is therefore a silent
+retry: the run is still recorded (`last_status`, `last_failure`,
+`failure_streak`) and logged as a warning, but no failure message is sent and
+no incident is opened. If the next run fails too, for any reason, it alerts
+as usual and its message adds a line naming the signal that killed the
+previous run. One-shot jobs and every other kind of failure alert on the
+first run.
+
+```yaml
+cron:
+  signal_death_grace_runs: 1   # default; 0 alerts on the first signal death
+```
+
 ### Automatic re-runs when the model was unreachable
 
 A recurring job whose run fails with a transient network or DNS error before

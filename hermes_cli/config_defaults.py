@@ -1863,6 +1863,12 @@ DEFAULT_CONFIG = {
         # silences a signature for good. 0 = re-alert on every failing run. Keep in sync with
         # cron.scheduler.DEFAULT_FAILURE_REPEAT_ALERT_HOURS.
         "failure_repeat_alert_hours": 6,
+        # A recurring script (no_agent) job whose script is killed by a signal (SIGTERM from a
+        # broad pkill, a host stop) retries silently on its next run: this many consecutive
+        # signal deaths record the failure but neither alert nor open an incident; the next
+        # failure alerts and names the signal. 0 = alert on the first. Keep in sync with
+        # cron.scheduler_signal_retry.DEFAULT_SIGNAL_DEATH_GRACE_RUNS.
+        "signal_death_grace_runs": 1,
     },
     # Kanban multi-agent coordination. The dispatcher ticks every N seconds, reclaims stale claims,
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
