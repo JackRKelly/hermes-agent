@@ -1051,6 +1051,10 @@ class SlackAdapter(BasePlatformAdapter):
         self._channel_teams: dict[str, set] = {}
         # user target (team_id:user_id) → opened DM conversation ID (D...)
         self._dm_conversation_cache: dict[str, str] = {}
+        # (team_id, channel_id) → whether the bot itself is a party to that DM/MPIM. A user-token
+        # event subscription (message.im/mpim) also delivers the owner's DMs with OTHER people;
+        # those must never start a turn (the bot can't reply there and must not read them).
+        self._dm_bot_party_cache: dict[tuple[str, str], bool] = {}
         # Dedup for Socket Mode reconnect replays; TTL must outlast the worst-case
         # redelivery gap (max_size bounds memory, so a long window is safe).
         # Dedup cache: prevents duplicate bot responses when Socket Mode reconnects redeliver events
@@ -3523,6 +3527,44 @@ class SlackAdapter(BasePlatformAdapter):
             f"File not found: {file_path}", t("platform.shared.media.file_failed", name=display_name),
         )
 
+    async def _bot_is_dm_party(self, channel_id: str, team_id: str = "") -> bool:
+        """True when the bot itself belongs to DM/MPIM ``channel_id``.
+
+        A user-token subscription delivers the owner's DMs with other people too; the bot token
+        gets ``channel_not_found`` for those (an MPIM it can see but is not in reads
+        ``is_member: false``). Definite answers are cached; any other API error fails open so a
+        transient Slack hiccup never silences the owner's own DM with the bot."""
+        if not channel_id or not self._app:
+            return True
+        key = (team_id, channel_id)
+        cached = self._dm_bot_party_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            result = await self._get_client(channel_id, team_id=team_id or None).conversations_info(
+                channel=channel_id)
+            channel = (result or {}).get("channel") or {}
+            party = bool(channel.get("is_im")) or bool(channel.get("is_member", True))
+        except Exception as exc:
+            error = ""
+            response = getattr(exc, "response", None)
+            if response is not None:
+                try:
+                    error = str(response.get("error") or "")
+                except Exception:
+                    error = ""
+            if error in {"channel_not_found", "not_in_channel"}:
+                party = False
+            else:
+                logger.warning(
+                    "[Slack] Could not check bot membership of %s (%s); treating as the bot's DM",
+                    channel_id, error or type(exc).__name__)
+                return True
+        self._dm_bot_party_cache[key] = party
+        if len(self._dm_bot_party_cache) > 2048:
+            self._dm_bot_party_cache.pop(next(iter(self._dm_bot_party_cache)))
+        return party
+
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         """Get information about a Slack channel."""
         if not self._app:
@@ -4608,6 +4650,11 @@ class SlackAdapter(BasePlatformAdapter):
         # the runner's own auth check only runs after MessageEvent is built.
         thread_ts = self._session_thread_ts(event, ts, is_dm, assistant_meta)
         if self._early_reject_unauthorized(user_id, channel_id, is_dm, thread_id=thread_ts):
+            return
+        if is_dm and not await self._bot_is_dm_party(channel_id, str(team_id or "")):
+            logger.info(
+                "[Slack] Ignoring DM the bot is not part of (user-token event): channel=%s",
+                channel_id)
             return
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
         # Mentions may live only in Block Kit blocks.
