@@ -3,10 +3,14 @@
 Network work happens outside SQLite transactions. The lifecycle owner persists
 receipts only after rechecking the captured run/status/contract under its lock.
 
-``gh`` runs as the card's assignee profile (``profile_home``), not the ambient
-login: :func:`_gh_env` resolves that profile's own credentials/config for the
-subprocess — a multi-profile host's default ``gh`` login cannot read another
-org's private repos (#122689).
+``gh`` runs as the card's assignee profile (``profile_home``) when that profile
+has a GitHub login of its own: :func:`_gh_env` resolves its credentials/config
+for the subprocess, because a multi-profile host's default ``gh`` login cannot
+read another org's private repos (#122689). A routed assignee profile with no
+GitHub login of its own falls back to the completing process's ambient ``gh``
+login, which is enough for the read-only GET/GraphQL queries acceptance makes
+(Jack approved, t_ed1f2df8). Unassigned cards use the ambient login; an
+assignee whose profile cannot be resolved is ``auth``, never the ambient login.
 """
 from __future__ import annotations
 
@@ -46,7 +50,7 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
         if denied:
             raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}", status=int(denied[1])) from None
-        if exc.returncode == 4:  # gh's authentication-required exit: this profile has no login
+        if exc.returncode == 4:  # gh's authentication-required exit: no login in this env at all
             raise _GateAuthError(f"gh has no login for {endpoint.split('?')[0]}") from None
         raise
     value = json.loads(result.stdout)
@@ -57,8 +61,9 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
 
 class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
-    this profile's login cannot see the repo — an identity problem to fix, not
-    an infrastructure blip to retry."""
+    the login gh used (the profile's own, or the ambient one it fell back to)
+    cannot see the repo — an identity problem to fix, not an infrastructure
+    blip to retry."""
 
     def __init__(self, message: str, *, status: int | None = None):
         super().__init__(message)
@@ -66,7 +71,7 @@ class _GateAuthError(RuntimeError):
 
 
 def _gh_env(profile_home: str | None) -> dict[str, str] | None:
-    """Child env for ``gh``: the card's profile identity when one is resolvable.
+    """Child env for ``gh``: the card's profile identity when it has a GitHub login.
 
     The completion boundary runs in the worker (assignee), the CLI, or a
     reviewer/dispatcher turn, so an ambient ``gh`` login is whichever process
@@ -74,7 +79,10 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     is the seam for "this child acts for that profile": it scrubs the launch
     profile's credential residue and overlays the target profile's own
     ``GH_TOKEN``/``GH_CONFIG_DIR`` (its ``.env`` + external secret sources).
-    ``None`` keeps the ambient env — unassigned cards behave exactly as before.
+    A routed profile that ends up with none of ``GH_TOKEN``/``GITHUB_TOKEN``/
+    ``GH_CONFIG_DIR`` gets the ambient env instead (the read-only fallback
+    below). ``None`` keeps the ambient env — unassigned cards behave exactly
+    as before.
     """
     if not profile_home:
         return None
@@ -98,10 +106,12 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
 
 
 def _assignee_profile_home(assignee: str | None) -> str | None:
-    """Home whose ``gh`` login must read the contract repo — the assignee's, resolved
+    """Home whose ``gh`` login reads the contract repo — the assignee's, resolved
     exactly as the dispatcher resolves the worker's home — or None (unassigned) so the
-    ambient login is used. An assigned card whose profile cannot be resolved is an
-    identity failure (``auth``), never a silent fall-through to the ambient login."""
+    ambient login is used. A resolved routed profile with no GitHub login of its own
+    still reads with the ambient login (see :func:`_gh_env`). An assigned card whose
+    profile cannot be resolved is an identity failure (``auth``), never a silent
+    fall-through to the ambient login."""
     if not assignee:
         return None
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
