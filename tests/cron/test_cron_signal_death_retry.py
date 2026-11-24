@@ -149,7 +149,7 @@ def test_grace_zero_alerts_on_the_first_signal_death(cron_home, sent, monkeypatc
 
 
 def test_one_shot_job_alerts_on_the_first_signal_death(cron_home, sent):
-    job = _job(cron_home, schedule="30m")
+    job = _job(cron_home, schedule="2030-01-01T09:00:00Z")
     assert job["schedule"]["kind"] == "once"
     _run(cron_home, job["id"], SIGTERM_SELF)
 
