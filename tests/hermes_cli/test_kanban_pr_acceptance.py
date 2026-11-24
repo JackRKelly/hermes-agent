@@ -176,44 +176,56 @@ def test_acceptance_runs_gh_as_the_assignee_profile(tmp_path, monkeypatch):
 
 
 @pytest.mark.platforms("posix")
-def test_assignee_without_own_gh_login_never_falls_through_to_ambient_login(tmp_path, monkeypatch):
-    """An assignee profile with no GH_TOKEN/GH_CONFIG_DIR of its own must not inherit the
-    launch user's ~/.config/gh (HOME/XDG_CONFIG_HOME stay the launch process's): gh is pinned
-    to a profile-owned config dir, its 'not logged in' exit is classified `auth` naming the profile."""
+def test_assignee_without_own_gh_login_reads_with_ambient_login_from_outside_worker(tmp_path, monkeypatch):
+    """A routed assignee with no GH_TOKEN/GH_CONFIG_DIR of its own (crew profiles) is read with
+    the completing process's ambient gh login (read-only acceptance reads, approved by Jack);
+    only when that login is missing too is the result `auth` naming the profile."""
     launch_home = tmp_path / "home"
     launch_home.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(launch_home))
     assignee_home = launch_home / "profiles" / "b"
     assignee_home.mkdir(parents=True)
     (assignee_home / ".env").write_text("", encoding="utf-8")
-    monkeypatch.setenv("GH_TOKEN", "launch-token")
-    monkeypatch.setenv("GH_CONFIG_DIR", "/nonexistent/launch/gh")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "launch-xdg"))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    ambient_cfg = tmp_path / "ambient-gh"
+    ambient_cfg.mkdir()
+    monkeypatch.setenv("GH_CONFIG_DIR", str(ambient_cfg))
 
     env_dump = tmp_path / "gh_env.json"
     shim = tmp_path / "bin"
     shim.mkdir()
     gh = shim / "gh"
-    # Real gh: GH_CONFIG_DIR wins; a config dir without hosts.yml means "not logged in" (exit 4).
+    # Real gh: GH_CONFIG_DIR wins; a config dir that does not exist means "not logged in" (exit 4).
     gh.write_text(f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
                   f"pathlib.Path({str(env_dump)!r}).write_text(json.dumps(dict(os.environ)), encoding='utf-8')\n"
-                  "if 'GH_CONFIG_DIR' in os.environ and not os.path.exists(os.environ['GH_CONFIG_DIR']):\n"
+                  "if not os.path.exists(os.environ.get('GH_CONFIG_DIR', '/nonexistent')):\n"
                   "    sys.exit(4)\n"
                   "print(json.dumps({'data': {'repository': None}}))\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
     kb.init_db()
-    with connect() as conn:
-        tid = kb.create_task(conn, title="as-b", completion_contract="acme/repo", assignee="b")
-        assert not kb.complete_task(conn, tid, result="done",
-                                    metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
-        receipt = json.loads(conn.execute(
-            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
+
+    def run(title):
+        with connect() as conn:
+            tid = kb.create_task(conn, title=title, completion_contract="acme/repo", assignee="b")
+            assert not kb.complete_task(conn, tid, result="done",
+                                        metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+            return json.loads(conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
+
+    # Ambient login present: the read reaches GitHub (repo invisible -> auth about the repository, not "no login").
+    receipt = run("ambient-ok")
+    assert "no login" not in receipt["detail"]
+    captured = json.loads(env_dump.read_text(encoding="utf-8-sig"))
+    assert captured["GH_CONFIG_DIR"] == str(ambient_cfg)
+    assert captured["GH_CONFIG_DIR"] != str(assignee_home / "gh")
+
+    # No ambient login either: genuinely no identity still classifies `auth`.
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "missing-gh"))
+    receipt = run("no-identity")
     assert receipt["classification"] == "auth"
     assert "'b'" in receipt["detail"] and "no login" in receipt["detail"]
-    captured = json.loads(env_dump.read_text(encoding="utf-8-sig"))
-    assert captured["GH_CONFIG_DIR"] == str(assignee_home / "gh")
-    assert "GH_TOKEN" not in captured and "GITHUB_TOKEN" not in captured
 
 
 def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, monkeypatch):
