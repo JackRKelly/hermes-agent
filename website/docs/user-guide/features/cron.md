@@ -535,12 +535,19 @@ retry: the run is still recorded (`last_status`, `last_failure`,
 `failure_streak`) and logged as a warning, but no failure message is sent and
 no incident is opened. If the next run fails too, for any reason, it alerts
 as usual and its message adds a line naming the signal that killed the
-previous run. One-shot jobs and every other kind of failure alert on the
-first run.
+previous run. One-shot jobs alert on the first run.
+
+Beyond signals, a *recurring* `no_agent` job alerts only once it has failed
+`failure_alert_after` runs in a row (any cause); earlier failures are recorded
+and logged the same silent way, and the alert says how many runs failed and
+gives the previous run's cause. Unset, a job running daily or less often
+alerts on the first failure and any other uses the global default. A run is
+withheld while either rule withholds it.
 
 ```yaml
 cron:
-  signal_death_grace_runs: 1   # default; 0 alerts on the first signal death
+  signal_death_grace_runs: 1      # default; 0 alerts on the first signal death
+  script_failure_alert_after: 2   # default; the job's failure_alert_after wins
 ```
 
 ### Automatic re-runs when the model was unreachable
