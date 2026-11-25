@@ -1223,6 +1223,13 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
             ("scope_id", env("HERMES_SESSION_SCOPE_ID", "")),
             ("parent_chat_id", env("HERMES_SESSION_PARENT_CHAT_ID", "")),
         ) if v}
+    if platform != "tui":
+        # Marks the row as the requesting chat's own subscription (copied to worker-created
+        # children with the rest of the row). Automations that quiet a chat route (the assistant
+        # repo's owner watch makes the Captain topic wake-only) keep these visible: the person
+        # who asked for the card is told when it finishes.
+        from hermes_cli.kanban_db_notify import CHAT_ORIGIN_KEY
+        delivery_metadata[CHAT_ORIGIN_KEY] = True
     if (platform.lower() == "telegram" and thread_id
             and (chat_type or "").lower() in {"dm", "direct", "private"}):
         delivery_metadata["telegram_dm_topic_reply_fallback"] = True

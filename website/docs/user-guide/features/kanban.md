@@ -839,7 +839,7 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
 | `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = the root task keeps its own assignee, else the active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to the root task's assignee, else the active default. |
-| `auto_subscribe_on_create` | `true` | When `kanban_create` runs inside a persistent gateway/TUI session, terminal events resume that originating agent with a synthetic status turn. Set to `false` for passive completion or to require explicit `kanban_notify-subscribe` calls. Independent of `auto_decompose`. |
+| `auto_subscribe_on_create` | `true` | When `kanban_create` (or `hermes kanban create` from a gateway agent's terminal) runs inside a persistent gateway/TUI session, terminal events resume that originating agent with a synthetic status turn. Set to `false` for passive completion or to require explicit `kanban_notify-subscribe` calls. Independent of `auto_decompose`. |
 | `notify_in_gateway` | `true` | Poll and deliver Kanban subscriptions from this gateway. Set to `false` on profiles that own no notification subscriptions to stop the idle five-second notifier poll. Independent of `dispatch_in_gateway`; non-dispatch gateways may still own profile-specific delivery adapters. |
 | `done_sub_retention_days` | `30` | Notify subscriptions survive `done` (reopen-safe) and are removed on `archived`. The notifier GC purges subscriptions whose task has been `done` or `blocked` with no new events for this many days, bounding sub-table growth on boards that never archive. `0` disables the sweep. |
 
@@ -1200,6 +1200,8 @@ Built-in decomposition also inherits its root's durable session. Session lineage
 `notify-unsubscribe` to change where events are delivered.
 
 A chat-originated auto-subscribe is created in `notify+wake` mode: on a terminal event the destination agent both receives the passive message **and** takes a real turn, so it can read the board context and reply in its own voice. See [Delivery modes](#delivery-modes) below.
+
+The same auto-subscribe runs when a gateway agent creates a card with the terminal command `hermes kanban create` (with or without `--json`): the gateway passes the session's `HERMES_SESSION_*` variables to its terminal children, so the CLI subscribes that chat and thread exactly like the `kanban_create` tool. A CLI run with no chat in its environment (your own shell, cron, a worker) subscribes nothing. Rows written this way, and the copies a worker's child cards inherit, carry `chat_origin: true` in their delivery metadata, marking the chat the card was requested from; `hermes kanban notify-subscribe --chat-origin` sets it by hand (for example to backfill older cards). The notifier ignores the flag; it is there for tooling that quiets a chat for automations but still wants the requester told when the card finishes.
 
 ### Output truncation in messaging
 

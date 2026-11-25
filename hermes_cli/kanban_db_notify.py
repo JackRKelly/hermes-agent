@@ -27,6 +27,14 @@ _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
 
 _SCALAR_TYPES = (str, int, float, bool)
 
+#: ``delivery_metadata`` flag (``True``) on a subscription that belongs to the chat a card was
+#: requested from: the auto-subscription a chat session gets when it creates a card (tool or
+#: CLI), copied to the cards its workers create, or set by hand with ``notify-subscribe
+#: --chat-origin``. The notifier itself ignores it; it lets a deployment that quiets a chat
+#: route for automations still tell the person who asked that the card finished. Metadata
+#: merges on re-subscribe, so a later mode change keeps the flag.
+CHAT_ORIGIN_KEY = "chat_origin"
+
 # Subscription primary key predicate; every per-row statement below binds
 # ``(task_id, platform, chat_id, thread_id or "")`` against it.
 _SUB_KEY_WHERE = "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?"
