@@ -52,9 +52,8 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
     """A validated envelope from an agent's call: tool fields are filled by the kind's ``enrich``
     (reading the live source), never taken from the agent. The add-time readability rules
     (``readability.py``) apply here only, so a stored item still reads. ``card`` is the card the item
-    parks on: its own workspace is the one place a text may name a file by path; with no card, every
-    local path is refused, except a path inside a ``user_task`` step's only code span (Jack pastes
-    it). Raises ``SchemaError``."""
+    parks on: a file the app serves from its own workspace is the one thing a text may name by path;
+    with no card, every local path is refused. Raises ``SchemaError``."""
     spec = spec_for(kind)
     if not isinstance(payload, dict):
         raise SchemaError("payload: must be an object")
@@ -67,7 +66,8 @@ def build_envelope(kind: str, *, payload: Any, title: Any, summary: Any, ask: An
         raise SchemaError(f"payload: {tool_fields} are filled by the tool from the live source; "
                           f"pass only {sorted(spec.agent_fields)}{hint}")
     readability.check_new_envelope(title=title, summary=summary, risk=risk)
-    readability.check_item_paths(spec.kind, payload, ask=ask, why=why, risk=risk, card=card)
+    readability.check_item_paths(spec.kind, payload, title=title, summary=summary, ask=ask, why=why, risk=risk,
+                                 card=card)
     readability.check_self_task(spec.kind, payload, ask=ask, title=title)
     readability.check_no_op(spec.kind, payload, title=title, summary=summary, ask=ask, why=why)
     if sources is None:

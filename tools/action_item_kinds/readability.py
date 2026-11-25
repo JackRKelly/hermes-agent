@@ -9,12 +9,14 @@ enforces them on every new item. An item stored before they existed still loads,
 schemas only carry the hard length caps. Every refusal names the field, the rule, the offending
 token or length, a conforming example and the guide, so the calling agent can fix it in one retry.
 
-BANNED (mirrored by the app's adapter) refuses every local path in the title, summary, questions and
-option labels. The other texts Jack reads (ask, why, risk.note, an ``other`` body, steps, option
-effects, rec_reason) refuse a local path too, with two exceptions the app needs: a file inside the
-card's own workspace or LinkedIn preview dir, named by its path, which the app embeds (that one
-depends on the card, so ``check_item_paths`` takes the card id the tool resolved); and a path inside a
-``user_task`` step's only inline code span, which the app shows raw for Jack to paste.
+Jack reads Action Items from another machine (Nov 24: "stop sharing paths of files on the action items
+cards ... i dont have access to view from web on another machine"), so no text he reads may name a
+local path. BANNED (mirrored by the app's adapter) refuses the commonest ones in the title, summary,
+questions and option labels, and ``check_item_paths`` refuses every local path in every text Jack reads,
+with one exception: a file the app itself serves (an image, video, audio clip or md/txt/log/json report)
+inside the card's own workspace or LinkedIn preview dir, named in plain text, which the app replaces with
+the file (that one depends on the card, so ``check_item_paths`` takes the card id the tool resolved).
+SQL or a command Jack must run goes in the text itself, never in a file he is pointed to.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from tools.action_item_kinds.core import SchemaError
+from tools.action_item_kinds.core import MARKDOWN_RE, SchemaError
 
 GUIDE = "docs/action-items-card-guide.md"
 
@@ -127,11 +129,52 @@ def check_banned(text: str, where: str, example: str) -> None:
 # ``scripts/action_items_face.py`` PATH_RE): what it embeds when the path is inside the card's own
 # workspace, and otherwise blanks.
 PATH_RE = re.compile(r"(?:~|/Users|/private|/var|/tmp|/home|/opt)/\S+|\S*\.hermes/\S*")
+# Beyond the app's PATH_RE: a home directory spelled as a variable (``$HOME/x``, ``${HERMES_HOME}``) names
+# this Mac just as much, so the refusal finds it too.
+_HOME_VAR = r"\$\{?(?:HOME|HERMES_HOME|TMPDIR)\b\}?\S*"
+LOCAL_PATH_RE = re.compile(rf"{PATH_RE.pattern}|{_HOME_VAR}")
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _WORD_START_RE = re.compile(r"[\s(\[{\"'`=<*]")
-_ALWAYS_LOCAL_RE = re.compile(r"/Users/|~/|/private/|\.hermes/", re.IGNORECASE)
+_ALWAYS_LOCAL_RE = re.compile(r"/Users/|~/|/private/|\.hermes/|\$\{?(?:HOME|HERMES_HOME|TMPDIR)\b", re.IGNORECASE)
 _PATH_EDGE = ".,;:()[]{}<>\"'`*"
+# Inline `code` and ```fenced``` blocks: the app shows them verbatim and never swaps a path in them for the file.
+_CODE_RE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]+`", re.S)
+# The file types the app serves from a card's own directories (JackRKelly/assistant
+# ``scripts/action_items_app.py`` ``item_file``: IMAGE_TYPES, VIDEO_TYPES, AUDIO_TYPES, TEXT_FILE_RE). Any other
+# file there (a ``.sql`` script, Nov 24) shows as a bare "file" Jack cannot open, so naming it is refused.
+SERVED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".webm", ".m4a", ".mp3", ".wav",
+                             ".md", ".txt", ".log", ".json"})
 EXAMPLE_PLAIN_FILE = "the rollout report is attached to the card"
+# What a task with SQL looks like with no file: each statement inline (the app gives a step's one code span its
+# own Copy box), or the whole script as one fenced block in one step (the app renders it with Copy).
+EXAMPLE_SQL_STEPS = [
+    "Open a prod Postgres session with write access",
+    "Preview, expect 12 rows: `SELECT id, committed FROM inventory_level WHERE committed < 0;`",
+    "Run the repair:\n```sql\nBEGIN;\nUPDATE inventory_level SET committed = 0 WHERE committed < 0;\nCOMMIT;\n```",
+    "Verify, expect 0: `SELECT count(*) FROM inventory_level WHERE committed < 0;`",
+]
+# What a task about a file on the Hermes Mac looks like with no path (narration takes, a Full Disk Access
+# binary): Jack sends the file and the agent moves it, or the agent first runs `open -R <path>` itself so
+# Finder shows the file selected and the step only says what to do with it.
+EXAMPLE_FILE_STEPS = [
+    "AirDrop the 7 narration takes to the Hermes Mac (they land in Downloads; the agent moves them)",
+    "Mark this Done",
+]
+EXAMPLE_PICK_STEPS = [
+    "On the Hermes Mac, open System Settings > Privacy & Security > Full Disk Access",
+    "Drag the file selected in the Finder window the agent opened into the list and turn it on",
+]
+LOCAL_PATH_FIX = (
+    "Jack reads Action Items on another machine and cannot open a file on this Mac. Put the SQL or "
+    "command itself in the text: one statement per user_task step as its code span, or a whole script as "
+    "one ```sql fenced block in one step (or in an other body); the app shows both with a Copy button. A "
+    "file Jack sends or picks on the Hermes Mac is named in plain words, never by path: he AirDrops it to "
+    "the Hermes Mac (it lands in Downloads) and the agent moves it, or for a pick the agent first runs "
+    "`open -R <path>` itself so Finder shows the file selected. A "
+    "picture, video or md/txt/log/json report the card shows is saved in this card's own workspace and named "
+    "by its path in plain text (never in backticks), and the app embeds it")
+# A step about SQL gets the inline SQL example; any other step the file example.
+_SQL_HINT_RE = re.compile(r"\b(?:SELECT|INSERT|UPDATE|DELETE|BEGIN|COMMIT|SQL|psql)\b|\.sql\b")
 
 # Jack, Nov 17: a park put a Drive URL in its summary with ``links: []``, so the card face read as a
 # raw URL instead of a sentence. A URL in text stays accepted (the app links it in place), so this is
@@ -173,48 +216,63 @@ def _inside(raw: str, dirs: tuple[Path, ...]) -> bool:
     return any(path != d and path.is_relative_to(d) for d in roots)
 
 
+def _spans(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` of every match of ``pattern`` in ``text``."""
+    return [m.span() for m in pattern.finditer(text)]
+
+
+def _within(pos: int, spans: list[tuple[int, int]]) -> bool:
+    """``pos`` falls inside one of ``spans``."""
+    return any(start <= pos < end for start, end in spans)
+
+
+def _served_file(raw: str, dirs: tuple[Path, ...]) -> bool:
+    """``raw`` names a file the app serves (``SERVED_SUFFIXES``) inside one of ``dirs``, so it shows the file."""
+    return Path(raw).suffix.lower() in SERVED_SUFFIXES and _inside(raw, dirs)
+
+
 def foreign_local_path(text: str, card: Optional[str]) -> Optional[str]:
-    """The first local path in ``text`` that is not a file inside ``card``'s own workspace or
-    LinkedIn preview dir, else None. With no card every local path is foreign. A path inside a URL
-    is part of the URL, not a local path."""
-    urls = [m.span() for m in _URL_RE.finditer(text)]
+    """The first local path in ``text`` that the app does not replace with the file itself, else None.
+    The one path it replaces is a served file type inside ``card``'s own workspace or LinkedIn preview
+    dir, written in plain text: in `code` or a fenced block the app prints it as text. With no card every
+    local path is foreign. A path inside a URL is part of the URL, not a local path."""
+    urls = _spans(_URL_RE, text)
+    code = _spans(_CODE_RE, text)
     dirs = card_file_dirs(card) if card else ()
-    for match in PATH_RE.finditer(text):
-        if any(start <= match.start() < end for start, end in urls):
+    for match in LOCAL_PATH_RE.finditer(text):
+        if _within(match.start(), urls):
             continue
         # "src/home/page.tsx" is a repo path, not /home; a home or Hermes path is local wherever it sits.
         mid_word = match.start() > 0 and not _WORD_START_RE.match(text[match.start() - 1])
         if mid_word and not _ALWAYS_LOCAL_RE.search(match.group(0)):
             continue
         raw = match.group(0).strip(_PATH_EDGE)
-        if not raw or not (dirs and _inside(raw, dirs)):
+        if not raw or _within(match.start(), code) or not (dirs and _served_file(raw, dirs)):
             return raw or match.group(0)
     return None
 
 
 def check_local_paths(text: Any, where: str, card: Optional[str]) -> None:
-    """Refuse a local path Jack would see printed; a file inside the card's own workspace or LinkedIn
-    preview dir is the one exception here, because the app replaces that path with the file itself.
-    (``check_item_paths`` blanks a ``user_task`` step's only code span before calling this.)"""
+    """Refuse a local path Jack would see printed (``foreign_local_path``). The example for a task's steps and
+    where is inline SQL steps when the text is about SQL, else the file Jack sends to the Hermes Mac; for any
+    other text it is the one file form the app embeds."""
     if not isinstance(text, str):
         return
     raw = foreign_local_path(text, card)
     if raw is None:
         return
-    if card:
-        workspace, previews = card_file_dirs(card)
-        allowed = (f"only a file inside this card's own workspace ({workspace}/) or LinkedIn preview dir "
-                   f"({previews}/) may be named by its path, and the app embeds it")
-        example: str = f"Image: {workspace}/post-image.png"
+    example: Any
+    if where.startswith(("payload.steps[", "payload.where")):
+        example = EXAMPLE_SQL_STEPS if _SQL_HINT_RE.search(text) else EXAMPLE_FILE_STEPS
+    elif card:
+        example = f"Image: {card_file_dirs(card)[0]}/post-image.png"
     else:
-        allowed = "only a file inside the card's own workspace may be named, and this call names no card"
         example = EXAMPLE_PLAIN_FILE
-    raise fix(where, f"contains a local path ({raw!r}) Jack would see printed; {allowed}. Otherwise say "
-                     f"it in plain words. {STYLE_HINT}", example)
+    raise fix(where, f"contains a local path ({raw!r}). {LOCAL_PATH_FIX}. {STYLE_HINT}", example)
 
 
-# Each kind's payload texts Jack reads, beside ask, why and risk.note (title, summary, questions and
-# option labels already refuse every local path through BANNED). A send's draft is the message itself.
+# Every text of an item Jack reads, as ``(field, text)``. A send's draft is the message itself, never text
+# about the card, so it is not here.
 def _payload_texts(kind: str, payload: dict) -> list[tuple[str, Any]]:
     if kind == "other":
         return [("payload.title", payload.get("title")), ("payload.body", payload.get("body"))]
@@ -226,44 +284,61 @@ def _payload_texts(kind: str, payload: dict) -> list[tuple[str, Any]]:
         questions = payload.get("questions") if isinstance(payload.get("questions"), list) else []
         for i, q in enumerate(x for x in questions if isinstance(x, dict)):
             options = q.get("options") if isinstance(q.get("options"), list) else []
-            texts += [(f"payload.questions[{i}].options[{j}].effect", o.get("effect"))
-                      for j, o in enumerate(o for o in options if isinstance(o, dict))]
+            texts.append((f"payload.questions[{i}].question", q.get("question")))
+            for j, o in enumerate(o for o in options if isinstance(o, dict)):
+                texts += [(f"payload.questions[{i}].options[{j}].label", o.get("label")),
+                          (f"payload.questions[{i}].options[{j}].effect", o.get("effect"))]
         return texts
     return []
 
 
-def check_item_paths(kind: str, payload: dict, *, ask: Any, why: Any, risk: Any, card: Optional[str]) -> None:
-    """The add-time local-path rule on every human-facing text of a new item (Jack, Nov 12)."""
+def item_texts(kind: str, payload: dict, *, title: Any, summary: Any, ask: Any, why: Any,
+               risk: Any) -> list[tuple[str, Any]]:
+    """Every ``(field, text)`` of an item that Jack reads on its card."""
     note = risk.get("note") if isinstance(risk, dict) else None
-    for where, text in [("ask", ask), ("why", why), ("risk.note", note), *_payload_texts(kind, payload)]:
-        if kind == "user_task" and where.startswith("payload.steps["):
-            check_folder_chain(text, where)
-            text = _without_sole_code_span(text)
+    return [("title", title), ("summary", summary), ("ask", ask), ("why", why), ("risk.note", note),
+            *_payload_texts(kind, payload)]
+
+
+def item_path_problems(kind: str, payload: dict, *, title: Any, summary: Any, ask: Any, why: Any, risk: Any,
+                       card: Optional[str]) -> list[str]:
+    """``"<field> names a local path (<path>)"`` for every text of a stored item that shows Jack a local
+    path (``foreign_local_path``), empty when none does. The read-time twin of ``check_item_paths``: the
+    Action Items readiness check sends such an open item back to its owner (JackRKelly/assistant
+    ``scripts/action_items_readiness.py``), so an item parked before this rule is fixed too."""
+    out = []
+    for where, text in item_texts(kind, payload if isinstance(payload, dict) else {}, title=title,
+                                  summary=summary, ask=ask, why=why, risk=risk):
+        raw = foreign_local_path(text, card) if isinstance(text, str) else None
+        if raw is not None:
+            out.append(f"{where} names a local path ({raw})")
+    return out
+
+
+def check_item_paths(kind: str, payload: dict, *, title: Any, summary: Any, ask: Any, why: Any, risk: Any,
+                     card: Optional[str]) -> None:
+    """The add-time local-path rule on every human-facing text of a new item (Jack, Nov 12 and Nov 24),
+    plus a ``user_task``'s step rules (``check_task_steps``)."""
+    if kind == "user_task":
+        check_task_steps(payload)
+    for where, text in item_texts(kind, payload, title=title, summary=summary, ask=ask, why=why, risk=risk):
         check_local_paths(text, where, card)
 
 
 # Jack, Nov 14: a Full Disk Access task named its path folder by folder ("Open `.hermes`, then `tools`,
-# then ... `bin`") and he could not follow it. A user_task step that needs a path gives the full ``~/``
-# path once, as the step's only code span (the app shows it raw with one Copy box and never resolves it
-# as a file), then the Cmd+Shift+G step (JackRKelly/assistant docs/action-items-card-guide.md, Task cards).
-_CODE_SPAN_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+# then ... `bin`") and he could not follow it. Since Nov 24 no step names a local path at all, written whole
+# or folder by folder: Jack works from another machine.
 _NAME_SPAN_RE = re.compile(r"`([^`/\s]+)`")
 _CHAIN_GAP_RE = re.compile(r"\s*(?:[,>]\s*)?(?:(?:and\s+)?then\s+)?(?:(?:open|go\s+(?:in)?to|double-click|click)\s+)?",
                            re.IGNORECASE)
 _CHAIN_MIN = 3
-EXAMPLE_PATH_STEPS = ["Copy this path: `~/.hermes/tools/<dir>/bin/python3.14`",
-                      "In the file picker press Cmd+Shift+G, paste the path and press Enter"]
-
-
-def _without_sole_code_span(text: Any) -> Any:
-    """``text`` with its code span blanked when it has exactly one: a path inside it is what Jack
-    pastes, so only a path outside that span is printed. Two or more spans keep today's rule."""
-    if not isinstance(text, str) or "```" in text:
-        return text
-    spans = list(_CODE_SPAN_RE.finditer(text))
-    if len(spans) != 1:
-        return text
-    return text[:spans[0].start()] + "`path`" + text[spans[0].end():]
+# A step is short (the app shows it as one numbered line) unless it carries a fenced block: a SQL script too
+# long for one line goes in ONE step as ```sql ... ``` (the app renders it with Copy), up to the schema's cap.
+STEP_MAX_CHARS = 300
+STEP_BLOCK_MAX_CHARS = 4000
+_FENCE_LINE_RE = re.compile(r"^\s*```", re.M)
+# A SQL file named in a step: Jack, Nov 24, a repair task said "Open the repair script at <path>.sql".
+_SQL_FILE_RE = re.compile(r"[\w.-]+\.sql\b", re.IGNORECASE)
 
 
 def check_folder_chain(text: Any, where: str) -> None:
@@ -278,8 +353,48 @@ def check_folder_chain(text: Any, where: str) -> None:
         joined = bool(gap.strip()) and _CHAIN_GAP_RE.fullmatch(gap) is not None
         run = run + 1 if joined else 1
         if run >= _CHAIN_MIN:
-            raise fix(where, "names a path folder by folder; give the full ~/ path once as its own step "
-                             "(its only code span), then a step to open it with Cmd+Shift+G", EXAMPLE_PATH_STEPS)
+            raise fix(where, f"names a local path folder by folder. {LOCAL_PATH_FIX}", EXAMPLE_PICK_STEPS)
+
+
+def _check_sql_file(text: Any, where: str) -> None:
+    if not isinstance(text, str):
+        return
+    urls = _spans(_URL_RE, text)
+    for found in _SQL_FILE_RE.finditer(text):
+        if not _within(found.start(), urls):
+            raise fix(where, f"points Jack to the SQL file {found.group(0)!r}, which he cannot open from his "
+                             "machine; put its SQL in the steps instead: the preview `SELECT` with the row count "
+                             "to expect, the repair as one ```sql block from `BEGIN;` to `COMMIT;`, and the "
+                             "verify query", EXAMPLE_SQL_STEPS)
+
+
+def _check_step_form(text: Any, where: str) -> None:
+    """A step is plain text (the schema stores steps as markdown only so one can hold a fenced block)."""
+    if not isinstance(text, str):
+        return
+    fences = len(_FENCE_LINE_RE.findall(text))
+    if fences % 2:
+        raise fix(where, "has a ``` fence that is never closed; end the block with a ``` line", EXAMPLE_SQL_STEPS[2])
+    prose = _CODE_RE.sub(" ", text)
+    if MARKDOWN_RE.search(prose):
+        raise fix(where, "plain text only outside a ```sql fenced block (no links, headings or bold; the app "
+                         "numbers the steps itself)", EXAMPLE_SQL_STEPS[1])
+    limit = STEP_BLOCK_MAX_CHARS if fences else STEP_MAX_CHARS
+    if len(text) > limit:
+        more = "" if fences else "; a longer script goes in this step as one ```sql fenced block"
+        raise fix(where, f"{len(text)} chars, max {limit}{more}", EXAMPLE_SQL_STEPS[2])
+
+
+def check_task_steps(payload: dict) -> None:
+    """A ``user_task``'s step rules: no folder-by-folder path, no SQL file named instead of its SQL, a plain
+    step within ``STEP_MAX_CHARS`` and a step with a closed fenced block within ``STEP_BLOCK_MAX_CHARS``."""
+    steps = payload.get("steps")
+    for i, step in enumerate(steps if isinstance(steps, list) else []):
+        where = f"payload.steps[{i}]"
+        check_folder_chain(step, where)
+        _check_sql_file(step, where)
+        _check_step_form(step, where)
+    _check_sql_file(payload.get("where"), "payload.where")
 
 
 # Jack, Nov 13: "Run this SQL to pause two webhooks" was parked as ``other``, so the app offered Approve
