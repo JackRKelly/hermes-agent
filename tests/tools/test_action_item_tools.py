@@ -579,6 +579,20 @@ def test_only_an_owners_withdrawal_of_this_item_counts(board, monkeypatch):
     assert call("action_item_get_decision", id=item["id"])["status"] == "open"
 
 
+def test_the_autopilots_captain_op_withdrawal_counts(board, monkeypatch):
+    # JackRKelly/assistant#632: the autopilot applies main-captain's [captain-op:withdraw] under its own name.
+    tid, item, _ = _parked(monkeypatch)
+    _comment(tid, "kanban-autopilot", f"[action-item-withdrawn:{item['id']}] moot: restarted (captain-op 7, done)")
+    assert call("action_item_get_decision", id=item["id"])["status"] == "withdrawn"
+
+
+def test_a_main_captain_withdrawal_comment_is_not_the_op(board, monkeypatch):
+    # Captain asks through the op; its own comment in the withdrawn shape is still not a withdrawal.
+    tid, item, _ = _parked(monkeypatch)
+    _comment(tid, "main-captain", f"[action-item-withdrawn:{item['id']}] moot")
+    assert call("action_item_get_decision", id=item["id"])["status"] == "open"
+
+
 # --- get_decision verification -----------------------------------------------------------------------
 
 def _comment(tid: str, author: str, body: str) -> None:

@@ -43,6 +43,10 @@ from tools.action_item_kinds.hostcfg import dashboard_principal
 from tools.action_item_view import ItemView
 
 WEBAPP_AUTHOR = "action-items"
+# The kanban autopilot (JackRKelly/assistant ``scripts/kanban_gates.py`` ``AUTOPILOT_AUTHOR``) writes
+# ``[action-item-withdrawn:<id>]`` under this name when it applies main-captain's ``[captain-op:withdraw]``
+# to a moot item. No agent profile carries the name, so it is the one non-owner whose withdrawal counts.
+AUTOPILOT_WITHDRAW_AUTHOR = "kanban-autopilot"
 _DECISION_RE = re.compile(r"^\[jack-(?P<verdict>approved|rejected|done|answer):(?P<id>[^\]\s]+)\]\s*(?P<rest>.*)$", re.DOTALL)
 _VERDICT = {"approved": "approve", "rejected": "reject", "done": "done", "answer": "answer"}
 # Row verdicts each comment prefix may carry (§3.3 step 6).
@@ -212,9 +216,10 @@ def decide(view: ItemView, comments: list, next_park_at: Optional[int],
                  "decided_by": None, "via": None, "at": None, "audit_id": None, "verified": False,
                  "outcome": None, "carried_from": None, "carried_to": None,
                  "trusted_item": view.trusted, "problems": list(view.problems)}
-    # Only the owners withdraw (§4.2), so a withdrawal is theirs and cites this item's id.
+    # Only the owners withdraw (§4.2), plus the kanban autopilot applying main-captain's
+    # ``[captain-op:withdraw]`` on a moot item; any other author's withdrawal comment is ignored.
     withdrawn = f"{WITHDRAWN_PREFIX}:{view.id}]"
-    owners = {owner for owner in (view.actor, assignee) if owner}
+    owners = {owner for owner in (view.actor, assignee, AUTOPILOT_WITHDRAW_AUTHOR) if owner}
     if any(c.body.startswith(withdrawn) and c.author in owners for c in window):
         out["status"] = "withdrawn"
     picked = _pick_decision(view, window, comments)
