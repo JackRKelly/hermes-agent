@@ -1032,6 +1032,24 @@ mcp_servers:
 
 The 5-minute default timeout mirrors the gateway approval default so users on async surfaces have time to respond before the server gives up. Per-server metrics (requests, accepted, declined, errors) are tracked on the handler.
 
+### Stateless servers and Google Workspace approvals
+
+A stateless (2026-07-28) server cannot send `elicitation/create` mid-call. It answers `tools/call` with an approval form instead (`resultType: "input_required"`), and the client re-sends the same call with the user's answer. With `protocol: stateless` and the mcp 2.x SDK, Hermes declares form elicitation on every `tools/list` and `tools/call`, shows the form through the same approval surface, and re-sends the call with your answer. After three rounds of forms for one call, Hermes stops it.
+
+Google Workspace MCP servers (`gmailmcp`, `calendarmcp`, `drivemcp`, `docsmcp`, `sheetsmcp`, `slidesmcp`, `chatmcp` on `googleapis.com/mcp/v1`) use this to ask before sensitive actions such as sending mail or inviting attendees. Hermes shows Google's message, its question and every option it offers as Google wrote them. **Allow Once** sends `ALLOW_ONCE` and **Deny** sends `DENY_ONCE`. Google's standing grants (`ALLOW_TOOL_ALWAYS`, `ALLOW_AUDIENCE_ALWAYS` and the like) are listed but never sent. A timeout, an error, or a session nobody can answer (cron, `hermes chat -q`, a gateway with no approver) never accepts.
+
+These servers also answer the legacy `initialize` handshake, so the default `protocol: auto` stays on the legacy era. That era does not declare the capability, and gated tools then fail with JSON-RPC error `-32021` (`MissingRequiredClientCapability`). Set the protocol explicitly:
+
+```yaml
+mcp_servers:
+  google_calendar:
+    url: https://calendarmcp.googleapis.com/mcp/v1
+    auth: oauth
+    protocol: stateless   # server/discover + per-request capabilities (needs the mcp 2.x SDK)
+```
+
+Keep `elicitation` enabled (the default) on these servers. With it disabled, Hermes does not declare the capability and gated calls fail with the same `-32021` error.
+
 ## MCP Events (experimental)
 
 Some MCP servers can notify an agent when something happens upstream (a new email, an incident, a
