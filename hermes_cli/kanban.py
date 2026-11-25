@@ -381,6 +381,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if is_dispatcher_owned_worker_context() else None),
         )
+        # A chat session that shells out to `hermes kanban create` (its terminal child carries the
+        # session's HERMES_SESSION_* vars) is subscribed exactly like the kanban_create tool:
+        # without it, a card a captain created from a Telegram topic never told that topic it
+        # finished. Plain CLI/cron/worker runs have no chat in their env, so nothing is written.
+        from tools.kanban_tools import _maybe_auto_subscribe
+        _maybe_auto_subscribe(conn, task_id)
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
         _print_json(_task_to_dict(task))
@@ -1201,6 +1207,7 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         for key, value in (
             ("parent_chat_id", getattr(args, "parent_chat_id", None)),
             ("guild_id", getattr(args, "guild_id", None)),
+            (kbn.CHAT_ORIGIN_KEY, bool(getattr(args, "chat_origin", False))),
         )
         if value
     }
