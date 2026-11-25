@@ -4,7 +4,8 @@ A recurring ``no_agent`` script fails for causes that clear on their own: a GitH
 limit, lock contention, a signal from something outside it (a broad ``pkill``, a supervisor
 stopping the host). Paging the operator for one such run is noise, so a failed run of a recurring
 ``no_agent`` job is withheld until the failures in a row reach the job's alert threshold
-(``failure_alert_after``; see ``failure_alert_after``): no failure delivery and no incident-ledger
+(the job's ``failure_alert_after`` field, else a schedule/config default; see
+``failure_alert_after()``): no failure delivery and no incident-ledger
 row, while ``mark_job_run`` still records ``last_failure`` / ``last_status`` / ``failure_streak``
 as usual. The run that reaches the threshold alerts, saying how many runs failed in a row and
 giving the previous run's cause in one line (naming the signal when a signal killed it).
@@ -129,14 +130,40 @@ def normalize_failure_alert_after(value: Any) -> Optional[int]:
     return int(value)
 
 
+# A bad stored value is read on every failed run of that job; warn once per (job, value), the way
+# ``cron.jobs_time`` warns once about a corrupt timezone or grace value.
+_warned_bad_values: set[tuple[Any, str]] = set()
+
+
+def _stored_failure_alert_after(job: dict) -> Optional[int]:
+    """The job's own ``failure_alert_after``, or None when unset or invalid.
+
+    ``create_job``/``update_job`` validate the field, but a hand edit of ``jobs.json`` or a
+    profile-distribution import (``merge_job_definition`` copies authored fields as written) can
+    store anything. Raising here would fail inside the failure path itself and lose the notice,
+    so an invalid value behaves as unset (the computed default) and logs one warning."""
+    value = job.get("failure_alert_after")
+    try:
+        return normalize_failure_alert_after(value)
+    except ValueError:
+        key = (job.get("id"), repr(value))
+        if key not in _warned_bad_values:
+            _warned_bad_values.add(key)
+            logger.warning(
+                "Job '%s' failure_alert_after %r is invalid (a whole number, 1 or more); using "
+                "the default. Fix or clear it with `hermes cron edit %s --failure-alert-after`.",
+                job.get("id"), value, job.get("id"))
+        return None
+
+
 def failure_alert_after(job: dict) -> int:
     """Consecutive failures a recurring script job needs before one alerts (>= 1).
 
     The job's own ``failure_alert_after`` wins; unset, a job that runs daily or less often alerts
     on the first failure, and any other job uses ``cron.script_failure_alert_after``."""
-    explicit = job.get("failure_alert_after")
+    explicit = _stored_failure_alert_after(job)
     if explicit is not None:
-        return max(1, int(explicit))
+        return explicit
     if _runs_daily_or_less_often(job.get("schedule") or {}):
         return 1
     from cron.jobs import _cron_config_number
@@ -180,8 +207,9 @@ def withhold_signal_death(job: dict, error: Optional[str]) -> bool:
     streak = int(job.get("failure_streak") or 0)
     if streak >= _grace_runs():
         return False
-    # A streak that began with a real failure already alerted; a later signal death in it is not
-    # a fresh "first failure", so only an all-signal-death streak stays silent.
+    # The signal grace covers a streak of signal deaths. When the previous run failed for another
+    # reason, this signal death is not a fresh "first failure", so this rule does not withhold it;
+    # whether it alerts is then up to the streak threshold (``failure_alert_after``) alone.
     if streak and _previous_run_signal(job) is None:
         return False
     logger.warning(

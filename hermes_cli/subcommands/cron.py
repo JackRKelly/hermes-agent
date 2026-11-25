@@ -51,6 +51,10 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "--deliver). 'local' suppresses failure notices entirely; run "
             "state stays visible in `hermes cron list`. Omit = failures "
             "follow --deliver.")
+    cron_create.add_argument("--failure-alert-after", dest="failure_alert_after",
+        help="Recurring --no-agent script jobs only: alert only after this many failed runs "
+            "in a row (1 = every failure). Omit for the default: 1 for a job running daily "
+            "or less often, else cron.script_failure_alert_after (2).")
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     _add_catch_up(cron_create)
     cron_create.add_argument("--skill", dest="skills", action="append",
@@ -132,6 +136,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument("--failure-deliver", dest="failure_deliver",
         help="Override target for failure notices (same grammar as --deliver; "
             "'local' suppresses; '' clears the override)")
+    cron_edit.add_argument("--failure-alert-after", dest="failure_alert_after",
+        help="Failed runs in a row before a recurring script job alerts (1 or more); "
+            "'' clears it back to the default")
     cron_edit.add_argument("--repeat", type=int, help="New repeat count")
     _add_catch_up(cron_edit)
     cron_edit.add_argument("--skill", dest="skills", action="append",

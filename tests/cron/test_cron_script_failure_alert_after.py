@@ -222,6 +222,104 @@ def test_failure_alert_after_is_stored_only_when_set_and_updatable(cron_home):
         update_job(job["id"], {"failure_alert_after": 0})
 
 
+def _store_raw(job_id: str, value) -> None:
+    """Write *value* straight into the stored record, the way a hand edit of ``jobs.json`` or a
+    profile-distribution import does (neither goes through ``update_job``'s validation)."""
+    from cron.jobs import load_jobs, save_jobs
+
+    jobs = load_jobs()
+    next(j for j in jobs if j["id"] == job_id)["failure_alert_after"] = value
+    save_jobs(jobs)
+
+
+@pytest.mark.parametrize("bad", ["two", 0, -3, "", [2]])
+def test_invalid_stored_value_behaves_as_unset(cron_home, sent, caplog, bad):
+    import cron.scheduler_signal_retry as retry
+
+    retry._warned_bad_values.clear()
+    job = _job(cron_home)
+    _store_raw(job["id"], bad)
+
+    with caplog.at_level("WARNING", logger="cron.scheduler"):
+        after = _run(cron_home, job["id"], PLAIN_FAILURE)
+        assert sent == []  # the sub-daily default (2) withholds the first failure
+        assert after["failure_streak"] == 1 and after["last_status"] == "error"
+
+        after = _run(cron_home, job["id"], PLAIN_FAILURE)
+    assert len(sent) == 1 and "It has failed 2 runs in a row." in sent[0][1]
+    assert after["failure_streak"] == 2
+    assert _incident_count(job["id"]) == 1
+    invalid = [r for r in caplog.records if "failure_alert_after" in r.getMessage()
+               and "is invalid" in r.getMessage()]
+    assert len(invalid) == (0 if bad == "" else 1), "one warning per job and bad value"
+
+
+def test_invalid_stored_value_on_the_crash_path_still_delivers(cron_home, sent):
+    import cron.scheduler as sched
+
+    job = {"id": "crash-bad", "name": "c", "no_agent": True, "deliver": "telegram:1",
+           "schedule": {"kind": "interval", "minutes": 5}, "failure_alert_after": "nope",
+           "failure_streak": 1, "last_failure": {"at": "x", "detail": "RuntimeError: boom"}}
+    sched._deliver_crash_failure(job, "RuntimeError: boom", adapters=None, loop=None)
+
+    assert len(sent) == 1 and "It has failed 2 runs in a row." in sent[0][1]
+
+
+def _cli(*argv: str) -> int:
+    """Run ``hermes cron <argv>`` through the real parser and handler."""
+    import argparse
+
+    from hermes_cli.cron import cron_command
+    from hermes_cli.subcommands.cron import build_cron_parser
+
+    parser = argparse.ArgumentParser(prog="hermes")
+    build_cron_parser(parser.add_subparsers(dest="command"), cmd_cron=cron_command)
+    args = parser.parse_args(["cron", *argv])
+    return args.func(args)
+
+
+def test_cli_create_edit_and_clear_failure_alert_after(cron_home, capsys):
+    from cron.jobs import get_job, list_jobs
+
+    (cron_home / "scripts" / "probe.sh").write_text(SILENT_SUCCESS, encoding="utf-8")
+    assert _cli("create", "every 5m", "--script", "probe.sh", "--no-agent",
+                "--deliver", "local", "--failure-alert-after", "3") == 0
+    job_id = list_jobs()[0]["id"]
+    assert get_job(job_id)["failure_alert_after"] == 3
+
+    assert _cli("edit", job_id, "--failure-alert-after", "1") == 0
+    assert get_job(job_id)["failure_alert_after"] == 1
+
+    assert _cli("edit", job_id, "--failure-alert-after", "0") == 1
+    assert "failure_alert_after" in capsys.readouterr().out
+    assert get_job(job_id)["failure_alert_after"] == 1
+
+    assert _cli("edit", job_id, "--failure-alert-after", "") == 0
+    assert get_job(job_id).get("failure_alert_after") is None  # cleared = the default
+
+
+def test_tool_update_clears_with_empty_string_and_ignores_null(cron_home):
+    import json
+
+    from cron.jobs import get_job
+    from tools.registry import registry
+
+    job = _job(cron_home, failure_alert_after=3)
+
+    def call(**args):
+        return json.loads(registry.dispatch(
+            "cronjob_manage", {"action": "update", "job_id": job["id"], **args}))
+
+    assert call(failure_alert_after=None, name="renamed")["success"] is True
+    assert get_job(job["id"])["failure_alert_after"] == 3, "null is 'not sent', never a clear"
+
+    assert call(failure_alert_after="")["success"] is True
+    assert get_job(job["id"]).get("failure_alert_after") is None  # cleared = the default
+
+    assert call(failure_alert_after=2)["success"] is True
+    assert get_job(job["id"])["failure_alert_after"] == 2
+
+
 @pytest.mark.parametrize(
     ("schedule", "daily"),
     [
