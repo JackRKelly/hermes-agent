@@ -21,6 +21,7 @@ import threading
 import time
 from cron.env_settings import cron_env_setting
 from cron.jobs import _ensure_cron_dir
+from cron.scheduler_signal_retry import SCRIPT_EXIT_PREFIX
 from pathlib import Path
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
@@ -527,7 +528,8 @@ def _run_job_script(
             stdout = stderr = "[REDACTED - redaction failed]"
 
         if proc.returncode != 0:
-            parts = [f"Script exited with code {proc.returncode}"]
+            # The prefix is the contract scheduler_signal_retry reads a signal death back from.
+            parts = [f"{SCRIPT_EXIT_PREFIX}{proc.returncode}"]
             if stderr:
                 parts.append(f"stderr:\n{stderr}")
             if stdout:
