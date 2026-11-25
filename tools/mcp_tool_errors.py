@@ -18,6 +18,15 @@ logger = logging.getLogger("tools.mcp_tool")
 
 # Stateless (2026-07-28) servers reject a legacy ``initialize`` with this or plain method-not-found.
 _JSONRPC_UNSUPPORTED_PROTOCOL_VERSION = -32022
+# A 2026-07-28 server (Google Workspace MCP) refuses a call that needs the user's approval when the
+# request's ``_meta`` client capabilities did not declare form elicitation. On Hermes that means
+# the server runs in the legacy era (``protocol`` not ``stateless``), on an mcp 1.x SDK, or with
+# ``elicitation.enabled: false``; the model cannot fix any of them, so the error says who can.
+_JSONRPC_MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
+_MISSING_CAPABILITY_HINT = (
+    " This server asks the user to approve this action (form elicitation), and this connection did not "
+    "declare that it can show the prompt. Do NOT retry: the user must set `protocol: stateless` and keep "
+    "`elicitation` enabled for this server in config.yaml, and run Hermes on the mcp 2.x SDK.")
 
 
 def _jsonrpc_matches(exc: BaseException, codes: tuple, markers: tuple, code=None) -> bool:
@@ -171,7 +180,10 @@ def _mcp_call_failed_message(exc: BaseException) -> str:
     """Generic tool-error text naming the group root cause: the transport's TaskGroup wrapper ``str()`` is
     "unhandled errors in a TaskGroup (1 sub-exception)", which tells the model nothing."""
     root = _unwrap_exception_group(exc)
-    return _sanitize_error(f"MCP call failed: {type(root).__name__}: {_exc_str(root)}")
+    text = f"MCP call failed: {type(root).__name__}: {_exc_str(root)}"
+    if _jsonrpc_matches(root, (_JSONRPC_MISSING_REQUIRED_CLIENT_CAPABILITY,), ("missingrequiredclientcapability",)):
+        text += _MISSING_CAPABILITY_HINT
+    return _sanitize_error(text)
 
 
 def _classify_mcp_failure(exc: BaseException) -> str:

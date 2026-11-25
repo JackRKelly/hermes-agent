@@ -7,7 +7,8 @@ import json
 import logging
 import time
 from contextvars import Context
-from typing import TYPE_CHECKING, Callable, List, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 from utils import is_truthy_value
 from tools.mcp_tool_common import _MISSING, _exc_str, _safe_numeric, _sanitize_error, mcp_field, _core
 from tools.mcp_tool_schema import _normalize_mcp_input_schema
@@ -251,6 +252,69 @@ def _format_elicitation_schema_summary(schema: dict, server_name: str) -> str:
     return "\n".join(lines)
 
 
+# Google Workspace approval forms (https://developers.google.com/workspace/guides/mcp-elicitation)
+# ask one question whose enum holds ALLOW_ONCE, DENY_ONCE and, where policy allows, standing
+# grants (ALLOW_TOOL_ALWAYS, ALLOW_AUDIENCE_ALWAYS, ...). Hermes' consent surface answers one
+# call at a time (Allow Once / Deny), so a yes is sent as ALLOW_ONCE and a no as DENY_ONCE; the
+# standing grants are shown to the user but never sent, since nobody could have picked them.
+_APPROVAL_ALLOW_ONCE = "ALLOW_ONCE"
+_APPROVAL_DENY_ONCE = "DENY_ONCE"
+
+
+@dataclass(frozen=True)
+class ApprovalChoiceForm:
+    """A form that is one approval question: its field, the server's question and its options.
+
+    ``options`` keeps the server's order as ``(value, label)`` pairs, labels taken from
+    ``enumNames`` (Google) or ``oneOf`` titles, falling back to the value itself.
+    """
+    field: str
+    question: str
+    options: Tuple[Tuple[str, str], ...]
+
+    def offers(self, value: str) -> bool:
+        """True when the server listed *value* among this request's choices."""
+        return any(option_value == value for option_value, _ in self.options)
+
+
+def approval_choice_form(schema) -> Optional[ApprovalChoiceForm]:
+    """The approval question in *schema*, or None when it is any other form.
+
+    Recognized only when the schema has exactly one property and its choices include
+    ``ALLOW_ONCE``: the one value Hermes can send for a yes. Every other form keeps the generic
+    elicitation path unchanged.
+    """
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict) or len(props) != 1:
+        return None
+    (field, spec), = props.items()
+    if not isinstance(spec, dict):
+        return None
+    if isinstance(spec.get("enum"), list):
+        raw_names = spec.get("enumNames")
+        names: list = raw_names if isinstance(raw_names, list) else []
+        options = tuple((str(value), str(names[i]) if i < len(names) else str(value))
+                        for i, value in enumerate(spec["enum"]))
+    elif isinstance(spec.get("oneOf"), list):
+        options = tuple((str(item.get("const")), str(item.get("title") or item.get("const")))
+                        for item in spec["oneOf"] if isinstance(item, dict) and "const" in item)
+    else:
+        return None
+    form = ApprovalChoiceForm(field=str(field), question=str(spec.get("title") or ""), options=options)
+    return form if form.offers(_APPROVAL_ALLOW_ONCE) else None
+
+
+def _format_approval_choice_description(form: ApprovalChoiceForm, server_name: str) -> str:
+    """The server's question and every option it offered, verbatim, plus what each Hermes button sends."""
+    lines = [form.question] if form.question else []
+    lines.append(f"Options offered by MCP server '{server_name}':")
+    lines.extend(f"  - {label} ({value})" for value, label in form.options)
+    deny = _APPROVAL_DENY_ONCE if form.offers(_APPROVAL_DENY_ONCE) else "decline"
+    lines.append(f"Allow Once sends {_APPROVAL_ALLOW_ONCE}; Deny sends {deny}. "
+                 "Hermes never sends a standing (always) grant.")
+    return "\n".join(lines)
+
+
 class ElicitationHandler:
     """``elicitation_callback`` for one MCP server. Form-mode routes through Hermes' approval system
     (CLI, TUI, Telegram, ...); URL-mode is declined. Fail-closed: any timeout, exception or unexpected
@@ -282,14 +346,28 @@ class ElicitationHandler:
         self.metrics[metric] += 1
         return _core.ElicitResult(action=action, **({"content": {}} if action == "accept" else {}))
 
-    def _consent_thunk(self, message: str, description: str) -> Callable[[], str]:
+    def _approval_result(self, form: ApprovalChoiceForm, answer: str):
+        """Consent *answer* -> the approval form's ElicitResult: a yes is ALLOW_ONCE, a no is
+        DENY_ONCE when offered (else a plain decline), no answer is cancel. Never a standing grant."""
+        if answer == "accept":
+            self.metrics["accepted"] += 1
+            return _core.ElicitResult(action="accept", content={form.field: _APPROVAL_ALLOW_ONCE})
+        if answer == "cancel":
+            return self._result("cancel", "errors")
+        if not form.offers(_APPROVAL_DENY_ONCE):
+            return self._result("decline", "declined")
+        self.metrics["declined"] += 1
+        return _core.ElicitResult(action="accept", content={form.field: _APPROVAL_DENY_ONCE})
+
+    def _consent_thunk(self, message: str, description: str, title: Optional[str] = None) -> Callable[[], str]:
         """Sync consent call replaying the agent's contextvars snapshot when the owning task captured one
         (the recv-loop task does NOT inherit them; gateway-platform detection needs them).
         ``Context.run`` runs a context once, so it is copied per elicitation."""
         from tools.approval_prompt import request_elicitation_consent
 
         consent = functools.partial(request_elicitation_consent, message, description,
-                                    timeout_seconds=int(self.timeout), surface=f"mcp-elicitation/{self.server_name}")
+                                    timeout_seconds=int(self.timeout), surface=f"mcp-elicitation/{self.server_name}",
+                                    **({"title": title} if title else {}))
         captured = self._call_context()
         return consent if captured is None else (lambda: captured.copy().run(consent))
 
@@ -306,8 +384,11 @@ class ElicitationHandler:
         # access) — read both or the user approves without seeing the fields.
         schema = getattr(params, "requestedSchema", None) or getattr(params, "requested_schema", None) or {}
         logger.info("MCP server '%s' elicitation request: %s", self.server_name, _sanitize_error(message)[:200])
+        form = approval_choice_form(schema)
+        description = (_format_approval_choice_description(form, self.server_name) if form is not None
+                       else _format_elicitation_schema_summary(schema, self.server_name))
         try:  # lazy import inside avoids import-order coupling with early-bootstrap tools.approval
-            invoke_consent = self._consent_thunk(message, _format_elicitation_schema_summary(schema, self.server_name))
+            invoke_consent = self._consent_thunk(message, description, form.question if form is not None else None)
         except Exception as exc:  # pragma: no cover -- defensive
             logger.error("MCP server '%s' elicitation: approval system unavailable: %s", self.server_name, exc)
             return self._result("decline", "errors")
@@ -320,4 +401,6 @@ class ElicitationHandler:
         except Exception as exc:
             logger.error("MCP server '%s' elicitation failed: %s", self.server_name, exc, exc_info=True)
             return self._result("decline", "errors")
+        if form is not None:
+            return self._approval_result(form, answer)
         return self._result(*self._ANSWER_RESULTS.get(answer, ("decline", "declined")))
