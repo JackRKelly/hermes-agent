@@ -44,8 +44,11 @@ from tools.action_item_view import ItemView
 
 WEBAPP_AUTHOR = "action-items"
 # The kanban autopilot (JackRKelly/assistant ``scripts/kanban_gates.py`` ``AUTOPILOT_AUTHOR``) writes
-# ``[action-item-withdrawn:<id>]`` under this name when it applies main-captain's ``[captain-op:withdraw]``
-# to a moot item. No agent profile carries the name, so it is the one non-owner whose withdrawal counts.
+# ``[action-item-withdrawn:<id>]`` under this name on two paths: when it applies main-captain's
+# ``[captain-op:withdraw]`` to a moot item, and when its "already replied" sweep (``kanban_autopilot.py``
+# ``_close_replied`` -> ``action_items_readiness.close_replied``) closes a send item Jack answered himself
+# (``... You already replied at <time> (<evidence>)``). No agent profile carries the name, so it is the one
+# non-owner whose withdrawal counts.
 AUTOPILOT_WITHDRAW_AUTHOR = "kanban-autopilot"
 _DECISION_RE = re.compile(r"^\[jack-(?P<verdict>approved|rejected|done|answer):(?P<id>[^\]\s]+)\]\s*(?P<rest>.*)$", re.DOTALL)
 _VERDICT = {"approved": "approve", "rejected": "reject", "done": "done", "answer": "answer"}
@@ -216,8 +219,9 @@ def decide(view: ItemView, comments: list, next_park_at: Optional[int],
                  "decided_by": None, "via": None, "at": None, "audit_id": None, "verified": False,
                  "outcome": None, "carried_from": None, "carried_to": None,
                  "trusted_item": view.trusted, "problems": list(view.problems)}
-    # Only the owners withdraw (§4.2), plus the kanban autopilot applying main-captain's
-    # ``[captain-op:withdraw]`` on a moot item; any other author's withdrawal comment is ignored.
+    # Only the owners withdraw (§4.2), plus the kanban autopilot (a main-captain ``[captain-op:withdraw]`` on a
+    # moot item, or its "already replied" close of a send item); any other author's withdrawal is ignored, and
+    # every withdrawal must cite this item's id.
     withdrawn = f"{WITHDRAWN_PREFIX}:{view.id}]"
     owners = {owner for owner in (view.actor, assignee, AUTOPILOT_WITHDRAW_AUTHOR) if owner}
     if any(c.body.startswith(withdrawn) and c.author in owners for c in window):

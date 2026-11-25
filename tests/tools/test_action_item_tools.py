@@ -586,6 +586,22 @@ def test_the_autopilots_captain_op_withdrawal_counts(board, monkeypatch):
     assert call("action_item_get_decision", id=item["id"])["status"] == "withdrawn"
 
 
+def test_the_autopilots_already_replied_close_counts(board, monkeypatch):
+    # The autopilot's "already replied" sweep closes a send item under the same author.
+    tid, item, _ = _parked(monkeypatch)
+    _comment(tid, "kanban-autopilot", f"[action-item-withdrawn:{item['id']}] You already replied at 10:41 CT (Gmail message 18c2)")
+    assert call("action_item_get_decision", id=item["id"])["status"] == "withdrawn"
+
+
+def test_an_autopilot_withdrawal_of_another_item_leaves_this_one_open(board, monkeypatch):
+    # The trusted author widens who withdraws, never which item: an older park's id does not touch the current one.
+    tid, item, _ = _parked(monkeypatch)
+    other = f"default:{tid}@1"
+    assert other != item["id"]
+    _comment(tid, "kanban-autopilot", f"[action-item-withdrawn:{other}] moot: restarted (captain-op 7, done)")
+    assert call("action_item_get_decision", id=item["id"])["status"] == "open"
+
+
 def test_a_main_captain_withdrawal_comment_is_not_the_op(board, monkeypatch):
     # Captain asks through the op; its own comment in the withdrawn shape is still not a withdrawal.
     tid, item, _ = _parked(monkeypatch)
