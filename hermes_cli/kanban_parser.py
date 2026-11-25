@@ -425,6 +425,10 @@ _SPECS = [
              help="Parent channel ID for a thread or forum post, used for multiplex profile routing."),
         _arg("--guild-id",
              help="Discord guild ID, used for multiplex profile routing."),
+        _arg("--chat-origin", action="store_true",
+             help="Mark this as the chat the card was requested from (what auto-subscribe on "
+                  "create records), e.g. to backfill a card created before it existed. Never "
+                  "cleared by a later subscribe without the flag."),
         _arg("--notifier-profile",
              help="Profile gateway that owns/delivers this subscription (default: active profile)"),
         # choices: single source of truth shared with the DB/watcher enum.
