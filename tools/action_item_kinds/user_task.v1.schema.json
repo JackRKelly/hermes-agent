@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "action_item_kinds/user_task.v1.schema.json",
   "title": "user_task v1 payload",
-  "description": "Agent fields: steps, where. steps_hash is computed by the tool.",
+  "description": "Agent fields: steps, where. steps_hash is computed by the tool. A step may hold one ```sql fenced block (a script Jack runs, rendered with Copy), so steps are markdown up to 4000 chars; the add-time rules keep a step without a fence plain text within 300 chars.",
   "type": "object",
   "additionalProperties": false,
   "required": ["steps", "where", "steps_hash"],
   "properties": {
-    "steps": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string", "maxLength": 300, "x-text": "text"}},
+    "steps": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string", "maxLength": 4000, "x-text": "markdown"}},
     "where": {"type": "string", "maxLength": 200, "x-text": "text-line", "x-allow-blank": true},
     "steps_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
   }

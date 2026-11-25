@@ -93,8 +93,31 @@ def test_every_human_facing_text_refuses_a_local_path_with_its_field(root, kind,
         build(kind, payload, card=CARD, **overrides)
     message = str(refused.value)
     assert message.startswith(f"{where}: contains a local path"), message
-    assert f'Write e.g. "Image: {root / "kanban" / "workspaces" / CARD}/post-image.png"' in message
+    assert "another machine" in message
+    if kind == "user_task" and where.startswith("payload."):
+        # A task step with no SQL gets the file form (sent or picked on the Hermes Mac) as its example; the
+        # fix text still names the inline SQL form too.
+        assert "Write e.g. [" in message and "Hermes Mac" in message and "```sql" in message
+    else:
+        assert f'Write e.g. "Image: {root / "kanban" / "workspaces" / CARD}/post-image.png"' in message
     assert message.endswith(GUIDE_TAIL)
+
+
+@pytest.mark.parametrize("name", ["report.sql", "dump.csv", "notes.pdf"])
+def test_a_workspace_file_the_app_cannot_serve_is_refused(root, name):
+    """The app serves images, videos, audio and md/txt/log/json from the card's workspace; any other file
+    there shows as a bare "file" Jack cannot open (Nov 24: a `.sql` repair script)."""
+    path = root / "kanban" / "workspaces" / CARD / name
+    with pytest.raises(SchemaError, match=r"^payload\.body: contains a local path"):
+        other(f"Details: {path}", card=CARD)
+
+
+def test_a_served_workspace_file_in_backticks_is_refused(root):
+    """In `code` the app prints the path as text instead of embedding the file."""
+    image = root / "kanban" / "workspaces" / CARD / "post-image.png"
+    assert other(f"Image: {image}", card=CARD)
+    with pytest.raises(SchemaError, match=r"^payload\.body: contains a local path"):
+        other(f"Image: `{image}`", card=CARD)
 
 
 @pytest.mark.parametrize("text", [
