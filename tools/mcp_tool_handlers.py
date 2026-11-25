@@ -17,6 +17,7 @@ from tools.registry import invalidate_check_fn_cache, tool_error
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import _exc_str, _sanitize_error, mcp_field, _core
 from tools import mcp_tool_loop as _loop
+from tools import mcp_tool_input_required as _input_required
 from tools.mcp_tool_content import (
     _MCP_HARD_RESULT_CAP_CHARS, _cache_mcp_audio_block, _cache_mcp_image_block, _mcp_result_with_native_images,
     _render_mcp_dropped_block_notice, _render_mcp_resource_block, _strip_reserved_meta_keys,
@@ -519,7 +520,13 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
     # A progress callback makes the SDK send ``_meta.progressToken``, the spec's opt-in for
     # ``notifications/progress``; without one the server must stay silent.
     extra = {"progress_callback": progress_callback} if progress_callback is not None else {}
-    _call_coro = server.session.call_tool(tool_name, arguments=args, **extra)
+    if _input_required.supports_input_required(server.session):
+        # mcp >= 2.0: a stateless server may answer with an approval form (input_required); the
+        # loop shows it to the user and re-sends the call with their answer.
+        _call_coro = _input_required.call_tool_answering_input_required(
+            server.session, server_name, tool_name, args, progress_callback)
+    else:
+        _call_coro = server.session.call_tool(tool_name, arguments=args, **extra)
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
