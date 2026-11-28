@@ -1041,6 +1041,8 @@ kanban:
 
 The gateway dispatcher re-reads the three caps (`max_in_progress`, `max_in_progress_per_profile`, `max_in_progress_by_profile`) before every tick, so a change applies within one `dispatch_interval_seconds` with no gateway restart. The other `kanban.*` keys are still read at gateway start.
 
+A manual `hermes kanban dispatch` applies those caps too, whichever profile runs it: the pass reads its `kanban:` settings from the same `config.yaml` the gateway dispatcher reads — the path in that dispatcher's caps record, else the default home's `config.yaml`, else the invoking profile's own file. Its output always names the caps applied, their source file, and (when something was held) the held-back counts; add `--ignore-caps` to step past the total and per-profile caps for one pass, still bounded by `--max`.
+
 ```bash
 hermes kanban caps                                   # configured vs live caps, running/ready per lane
 hermes kanban caps set --total 14 --per-profile 7    # validated, backed up, applied on the next tick

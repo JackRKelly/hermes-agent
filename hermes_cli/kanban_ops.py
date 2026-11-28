@@ -11,7 +11,9 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any, Mapping, Optional
 
+from hermes_cli import kanban_caps as kcaps
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
@@ -60,37 +62,118 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
+def _dispatcher_kanban_config() -> tuple[Optional[Path], dict[str, Any]]:
+    """``(path, kanban section)`` of the config the gateway dispatcher reads.
+
+    The concurrency caps bound the HOST, so ``hermes kanban dispatch`` must apply the same
+    set the gateway's embedded dispatcher enforces — whatever profile invokes it. The
+    dispatcher records its config path in the live-caps record (written at boot;
+    ``read_live_caps_record`` may return the record of a dispatcher that is gone). Without
+    a record, the default home's ``config.yaml`` is what a gateway would have launched
+    with. Only then fall back to the invoking profile's own file — the historical
+    behaviour, and the path that let a pass from a profile without a ``kanban:`` section
+    spawn 78 workers past the host cap (Nov 27, 2026).
+    """
+    from hermes_cli.config_backend import ConfigBackendUnavailable, read_config_doc_readonly
+
+    record = kcaps.read_live_caps_record()
+    if (record or {}).get("config_path"):
+        path, section = kcaps._dispatcher_kanban_section(record)
+        if section is not None:
+            return path, section
+        # The recorded file is unreadable right now (moved/deleted home): fall through.
+    home_config = kb.kanban_home() / "config.yaml"
+    try:
+        if home_config.exists():
+            doc = read_config_doc_readonly(home_config) or {}
+            section = doc.get("kanban") if isinstance(doc, Mapping) else None
+            if isinstance(section, Mapping):
+                return home_config, dict(section)
+    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- try the next candidate
+        pass
+    path, section = kcaps._dispatcher_kanban_section(None)
+    return path, section or {}
+
+
+def _positive_or_none(value: Any) -> Optional[int]:
+    """``value`` as a positive integer, else ``None`` (the gateway's lenient cap parse,
+    ``gateway/kanban_watchers_common.py::_positive_int_setting``: unset or invalid -> no cap)."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 1 else None
+
+
+def _dispatch_caps(section: Mapping[str, Any]) -> kcaps.KanbanCaps:
+    """The three cap keys, validated exactly like the gateway's boot path.
+
+    ``kanban_caps.parse_caps`` is all-or-nothing (1..32, per-lane caps at most the total).
+    On a failing set the gateway boots on the plain integer values with no per-lane
+    overrides (``gateway/kanban_watchers_dispatcher.py::_boot_caps``); mirroring that keeps
+    this pass on the same cap set the running dispatcher enforces, instead of silently
+    dropping every cap in a half-valid file.
+    """
+    caps, errors = kcaps.parse_caps(section)
+    if caps is not None:
+        return caps
+    print("warning: kanban caps in the dispatcher's config fail validation "
+          f"({'; '.join(errors)}); applying the plain integer values like the gateway boot",
+          file=sys.stderr)
+    return kcaps.KanbanCaps(
+        total=_positive_or_none(section.get(kcaps.TOTAL_KEY)),
+        per_profile=_positive_or_none(section.get(kcaps.PER_PROFILE_KEY)),
+    )
+
+
+def _caps_line(caps: kcaps.KanbanCaps, effective_total: Optional[int], source: Optional[Path]) -> str:
+    """One line naming the caps this pass applied and the config file they came from."""
+    total = "uncapped" if effective_total is None else str(effective_total)
+    per = "no per-profile cap" if caps.per_profile is None else f"{caps.per_profile} per profile"
+    by = ""
+    if caps.by_profile:
+        by = " [" + ", ".join(f"{name}={cap}" for name, cap in caps.by_profile) + "]"
+    src = f" ({source})" if source else ""
+    return f"Caps: {total} total / {per}{by}{src}"
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     # Honour kanban.default_assignee, kanban.max_in_progress,
     # kanban.max_in_progress_per_profile, kanban.fast_lane and kanban.max_spawn with the same
-    # semantics as the gateway dispatch path.
+    # semantics as the gateway dispatch path — read from the config the gateway dispatcher
+    # reads, so a pass from another profile applies the same host caps
+    # (_dispatcher_kanban_config).
+    ignore_caps = bool(getattr(args, "ignore_caps", False))
+    caps = kcaps.KanbanCaps()
+    caps_path: Optional[Path] = None
+    effective_total: Optional[int] = None
+    default_assignee = None
+    max_spawn_from_config = None
+    fast_lane = None
     try:
-        from hermes_cli.config import load_config
-        _cfg = load_config()
-        _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
-        default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
-        max_in_progress_per_profile = kbd._positive_int(
-            _kanban_cfg.get("max_in_progress_per_profile"), None
-        )
-        # Per-lane overrides; dispatch_once drops non-positive entries.
-        by_profile = _kanban_cfg.get("max_in_progress_by_profile")
-        max_in_progress_by_profile = dict(by_profile) if isinstance(by_profile, dict) else None
+        caps_path, section = _dispatcher_kanban_config()
+        caps = _dispatch_caps(section)
         # Memory-derived default when unset — same fallback the gateway applies.
-        max_in_progress = kbd.resolve_max_in_progress(
-            kbd._positive_int(_kanban_cfg.get("max_in_progress"), None)
-        )
-        # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
-        cli_max = getattr(args, "max", None)
-        max_spawn = (
-            cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
-        )
-        fast_lane = parse_fast_lane(_kanban_cfg.get("fast_lane"))
-        disk_guard = parse_disk_guard(_kanban_cfg.get("disk_guard"))
+        effective_total = kbd.resolve_max_in_progress(caps.total)
+        default_assignee = (section.get("default_assignee") or "").strip() or None
+        max_spawn_from_config = _positive_or_none(section.get("max_spawn"))
+        fast_lane = parse_fast_lane(section.get("fast_lane"))
+        disk_guard = parse_disk_guard(section.get("disk_guard"))
     except Exception:
-        default_assignee = max_in_progress_per_profile = max_in_progress = fast_lane = None
         disk_guard = parse_disk_guard(None)  # unreadable config: guarded with the defaults
-        max_in_progress_by_profile = None
-        max_spawn = getattr(args, "max", None)
+    max_in_progress = effective_total
+    max_in_progress_per_profile = caps.per_profile
+    # Per-lane overrides; dispatch_once drops non-positive entries.
+    max_in_progress_by_profile = dict(caps.by_profile) or None
+    # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
+    cli_max = getattr(args, "max", None)
+    max_spawn = cli_max if cli_max is not None else max_spawn_from_config
+    if ignore_caps:
+        # One deliberate pass past the caps for an operator who takes responsibility; --max,
+        # the respawn guards, the provider breaker and the memory and disk guards still bound it.
+        max_in_progress = max_in_progress_per_profile = max_in_progress_by_profile = None
+        print("warning: --ignore-caps: ignoring the total and per-profile caps for this pass "
+              "(still bounded by --max)", file=sys.stderr)
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,
@@ -127,8 +210,14 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "rate_limited": res.rate_limited,
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
+            "caps": {**caps.as_dict(), "effective_total": effective_total,
+                     "source": str(caps_path) if caps_path else None},
+            "held_back": {"cap": res.held_cap,
+                          "per_profile_cap": len(res.skipped_per_profile_capped)},
+            "caps_ignored": ignore_caps,
         }, ascii=True)
         return 0
+    print(_caps_line(caps, effective_total, caps_path))
     print(f"Reclaimed:    {res.reclaimed}")
     if res.reaped_terminal_workers:
         print(f"Reaped workers of finished tasks: {', '.join(res.reaped_terminal_workers)}")
@@ -170,6 +259,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print("Skipped: another dispatcher holds this board's lock (no writes this tick)")
     if res.memory_pressure:
         print(f"Memory pressure {res.memory_pressure}: new workers restricted this tick")
+    held_profile = len(res.skipped_per_profile_capped)
+    if res.held_cap or held_profile:
+        print(f"Held back by caps: {res.held_cap + held_profile} (host cap: {res.held_cap}, "
+              f"per-profile caps: {held_profile}); --ignore-caps exceeds them")
     return 0
 
 

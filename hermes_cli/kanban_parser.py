@@ -374,6 +374,10 @@ _SPECS = [
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
              help=f"Auto-block a task after this many consecutive non-success attempts "
                   f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
+        _arg("--ignore-caps", action="store_true",
+             help="One pass past the host total and per-profile caps (kanban.max_in_progress, "
+                  "kanban.max_in_progress_per_profile; still bounded by --max). Respawn guards, "
+                  "the provider breaker and the memory and disk guards still apply"),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
     _cmd("daemon", [
