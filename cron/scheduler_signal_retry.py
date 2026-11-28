@@ -1,14 +1,18 @@
-"""Silent retry for a recurring script job whose first failure in a row was a signal death.
+"""Silent retry for a recurring script job's failure that the next run usually heals.
 
-A ``no_agent`` script that dies because something outside it sent a signal (a broad ``pkill``,
-a supervisor stopping the host) did not find a problem with the job: the next scheduled run
-usually succeeds. Paging the operator for that one run is noise, so the FIRST such failure in a
-row of a recurring job is withheld: no failure delivery and no incident-ledger row, while
-``mark_job_run`` still records ``last_failure`` / ``last_status`` / ``failure_streak`` as usual.
-The next failed run (any cause) alerts normally, with one line naming the signal that killed the
-previous run. ``cron.signal_death_grace_runs`` (default 1) sets how many consecutive signal deaths
-stay silent; 0 alerts on the first, as before. One-shot jobs and every other failure kind keep
-alerting on the first failure.
+A recurring ``no_agent`` script fails for causes that clear on their own: a GitHub 504 or rate
+limit, lock contention, a signal from something outside it (a broad ``pkill``, a supervisor
+stopping the host). Paging the operator for one such run is noise, so a failed run of a recurring
+``no_agent`` job is withheld until the failures in a row reach the job's alert threshold
+(the job's ``failure_alert_after`` field, else a schedule/config default; see
+``failure_alert_after()``): no failure delivery and no incident-ledger
+row, while ``mark_job_run`` still records ``last_failure`` / ``last_status`` / ``failure_streak``
+as usual. The run that reaches the threshold alerts, saying how many runs failed in a row and
+giving the previous run's cause in one line (naming the signal when a signal killed it).
+
+The older signal rule still applies on top: ``cron.signal_death_grace_runs`` (default 1) sets how
+many consecutive signal deaths stay silent; a run is withheld while EITHER rule withholds it.
+One-shot jobs and agent jobs keep alerting on the first failure.
 """
 
 from __future__ import annotations
@@ -16,7 +20,8 @@ from __future__ import annotations
 import logging
 import re
 import signal
-from typing import Optional
+from datetime import datetime
+from typing import Any, Optional
 
 logger = logging.getLogger("cron.scheduler")
 
@@ -33,6 +38,19 @@ _SCRIPT_EXIT_RE = re.compile(r"\A" + re.escape(SCRIPT_EXIT_PREFIX) + r"(-?\d+)\b
 _SHELL_WRAPPED_STOP_SIGNALS = {1: "SIGHUP", 2: "SIGINT", 9: "SIGKILL", 15: "SIGTERM"}
 
 DEFAULT_SIGNAL_DEATH_GRACE_RUNS = 1
+
+#: ``cron.script_failure_alert_after`` default: a sub-daily script job alerts on its 2nd failure
+#: in a row, so a single transient failure that the next run heals never pages.
+DEFAULT_SCRIPT_FAILURE_ALERT_AFTER = 2
+
+# A job that runs daily or less often alerts on its first failure by default: waiting for a
+# second failure there would hide a real outage for a day or more.
+_DAILY_SECONDS = 24 * 60 * 60
+# Fire times sampled to find a cron expression's smallest gap ("0 9 * * 1-5" has 24h and 72h gaps).
+_CRON_GAP_SAMPLES = 8
+
+#: Cap on the previous run's cause quoted in an alert, so a long stderr stays one line.
+_CAUSE_MAX_CHARS = 160
 
 _RECURRING_KINDS = frozenset({"cron", "interval"})
 
@@ -70,22 +88,117 @@ def _grace_runs() -> int:
         "signal_death_grace_runs", DEFAULT_SIGNAL_DEATH_GRACE_RUNS, int))
 
 
-def _previous_run_signal(job: dict) -> Optional[int]:
-    """Signal that killed the PREVIOUS run, when that run failed. ``job`` is the stored record
-    from before this run: ``failure_streak`` > 0 means the previous run failed, and
-    ``last_failure`` (sticky across successes, so only read under a live streak) holds its error."""
+def _is_recurring_script_job(job: dict) -> bool:
+    """The jobs both withholding rules cover: recurring (``cron``/``interval``) ``no_agent``."""
+    return bool(job.get("no_agent")) and (
+        (job.get("schedule") or {}).get("kind") in _RECURRING_KINDS)
+
+
+def _runs_daily_or_less_often(schedule: dict[str, Any]) -> bool:
+    """True when every gap between fires is at least 24h: an interval of >= 24h, or a cron
+    expression whose smallest gap among its next ``_CRON_GAP_SAMPLES`` fires is >= 24h. Gaps are
+    measured on the naive wall clock so a daily job stays daily across a 23h DST day. An
+    uncheckable expression (croniter missing, malformed) counts as sub-daily."""
+    kind = schedule.get("kind")
+    if kind == "interval":
+        try:
+            return float(schedule.get("minutes") or 0) * 60 >= _DAILY_SECONDS
+        except (TypeError, ValueError):
+            return False
+    if kind != "cron" or not schedule.get("expr"):
+        return False
+    from cron import jobs
+
+    if not jobs._ensure_croniter():
+        return False
+    try:
+        it = jobs.croniter(schedule["expr"], datetime.now().replace(microsecond=0))
+        fires = [it.get_next(datetime) for _ in range(_CRON_GAP_SAMPLES)]
+    except (ValueError, KeyError, TypeError):  # croniter's errors subclass ValueError
+        return False
+    return min((b - a).total_seconds() for a, b in zip(fires, fires[1:])) >= _DAILY_SECONDS
+
+
+def normalize_failure_alert_after(value: Any) -> Optional[int]:
+    """Validate a job's ``failure_alert_after`` (failures in a row before a recurring script job
+    alerts); None or '' = unset (the schedule/config default). Bools are refused: ``True == 1``."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool) or not str(value).strip().isdigit() or int(value) < 1:
+        raise ValueError(
+            f"failure_alert_after must be a whole number of runs, 1 or more, not {value!r}.")
+    return int(value)
+
+
+# A bad stored value is read on every failed run of that job; warn once per (job, value), the way
+# ``cron.jobs_time`` warns once about a corrupt timezone or grace value.
+_warned_bad_values: set[tuple[Any, str]] = set()
+
+
+def _stored_failure_alert_after(job: dict) -> Optional[int]:
+    """The job's own ``failure_alert_after``, or None when unset or invalid.
+
+    ``create_job``/``update_job`` validate the field, but a hand edit of ``jobs.json`` or a
+    profile-distribution import (``merge_job_definition`` copies authored fields as written) can
+    store anything. Raising here would fail inside the failure path itself and lose the notice,
+    so an invalid value behaves as unset (the computed default) and logs one warning."""
+    value = job.get("failure_alert_after")
+    try:
+        return normalize_failure_alert_after(value)
+    except ValueError:
+        key = (job.get("id"), repr(value))
+        if key not in _warned_bad_values:
+            _warned_bad_values.add(key)
+            logger.warning(
+                "Job '%s' failure_alert_after %r is invalid (a whole number, 1 or more); using "
+                "the default. Fix or clear it with `hermes cron edit %s --failure-alert-after`.",
+                job.get("id"), value, job.get("id"))
+        return None
+
+
+def failure_alert_after(job: dict) -> int:
+    """Consecutive failures a recurring script job needs before one alerts (>= 1).
+
+    The job's own ``failure_alert_after`` wins; unset, a job that runs daily or less often alerts
+    on the first failure, and any other job uses ``cron.script_failure_alert_after``."""
+    explicit = _stored_failure_alert_after(job)
+    if explicit is not None:
+        return explicit
+    if _runs_daily_or_less_often(job.get("schedule") or {}):
+        return 1
+    from cron.jobs import _cron_config_number
+
+    return max(1, _cron_config_number(
+        "script_failure_alert_after", DEFAULT_SCRIPT_FAILURE_ALERT_AFTER, int))
+
+
+def _one_line(text: Optional[str]) -> str:
+    """*text* collapsed to one line of at most ``_CAUSE_MAX_CHARS`` characters."""
+    line = re.sub(r"\s+", " ", str(text or "")).strip().rstrip(".") or "unknown error"
+    if len(line) > _CAUSE_MAX_CHARS:
+        line = line[:_CAUSE_MAX_CHARS - 3].rstrip() + "..."
+    return line
+
+
+def _previous_failure_detail(job: dict) -> Optional[str]:
+    """The PREVIOUS run's error when that run failed, else None. ``job`` is the stored record from
+    before this run: ``failure_streak`` > 0 means the previous run failed, and ``last_failure``
+    (sticky across successes, so only read under a live streak) holds its error."""
     if int(job.get("failure_streak") or 0) <= 0:
         return None
     last_failure = job.get("last_failure")
-    detail = last_failure.get("detail") if isinstance(last_failure, dict) else None
-    return script_signal_number(job, detail)
+    return last_failure.get("detail") if isinstance(last_failure, dict) else None
+
+
+def _previous_run_signal(job: dict) -> Optional[int]:
+    """Signal that killed the PREVIOUS run, when that run failed."""
+    return script_signal_number(job, _previous_failure_detail(job))
 
 
 def withhold_signal_death(job: dict, error: Optional[str]) -> bool:
     """True when this failed run is a silent retry: a recurring ``no_agent`` job whose script was
     killed by a signal, inside ``cron.signal_death_grace_runs`` consecutive failures that were all
-    signal deaths. Logs the one WARNING line the withheld run leaves. The caller skips both the
-    failure delivery and the incident upsert, so the next failure still alerts as a new incident."""
+    signal deaths. Logs the one WARNING line the withheld run leaves."""
     if (job.get("schedule") or {}).get("kind") not in _RECURRING_KINDS:
         return False
     signum = script_signal_number(job, error)
@@ -94,8 +207,9 @@ def withhold_signal_death(job: dict, error: Optional[str]) -> bool:
     streak = int(job.get("failure_streak") or 0)
     if streak >= _grace_runs():
         return False
-    # A streak that began with a real failure already alerted; a later signal death in it is not
-    # a fresh "first failure", so only an all-signal-death streak stays silent.
+    # The signal grace covers a streak of signal deaths. When the previous run failed for another
+    # reason, this signal death is not a fresh "first failure", so this rule does not withhold it;
+    # whether it alerts is then up to the streak threshold (``failure_alert_after``) alone.
     if streak and _previous_run_signal(job) is None:
         return False
     logger.warning(
@@ -106,11 +220,38 @@ def withhold_signal_death(job: dict, error: Optional[str]) -> bool:
     return True
 
 
-def previous_signal_death_note(job: dict) -> str:
-    """One line for a failure notice when the previous run was killed by a signal, else ""."""
-    signum = _previous_run_signal(job)
-    if signum is None:
+def withhold_failure_alert(job: dict, error: Optional[str]) -> bool:
+    """True when this failed run of a recurring ``no_agent`` job must not alert: the signal rule
+    (``withhold_signal_death``) or the streak threshold (``failure_alert_after``) withholds it.
+    Logs exactly one WARNING line for a withheld run. The caller skips both the failure delivery
+    and the incident upsert, so the run that does alert opens the incident as new."""
+    if not _is_recurring_script_job(job):
+        return False
+    if withhold_signal_death(job, error):
+        return True
+    failures = int(job.get("failure_streak") or 0) + 1  # +1 = this run, not yet recorded
+    threshold = failure_alert_after(job)
+    if failures >= threshold:
+        return False
+    logger.warning(
+        "Job '%s' (%s): failed (%s), failure %d in a row of %d before alerting; not alerting, "
+        "the next scheduled run is the retry",
+        job.get("id"), job.get("name") or job.get("id"), _one_line(error), failures, threshold)
+    return True
+
+
+def previous_failure_note(job: dict) -> str:
+    """One line for a failure notice when the previous run also failed, else "": how many runs
+    failed in a row and the previous run's cause (the signal, when a signal killed it). Only
+    recurring script jobs get the generic line; agent job notices are unchanged."""
+    if int(job.get("failure_streak") or 0) <= 0:
         return ""
-    return (
-        f"\nThe previous run also failed: its script was killed by signal {signum} "
-        f"({_signal_name(signum)}).")
+    signum = _previous_run_signal(job)
+    if signum is not None:
+        cause = f"its script was killed by signal {signum} ({_signal_name(signum)})"
+    elif _is_recurring_script_job(job):
+        cause = _one_line(_previous_failure_detail(job))
+    else:
+        return ""
+    failures = int(job.get("failure_streak") or 0) + 1
+    return f"\nIt has failed {failures} runs in a row. The previous run also failed: {cause}."

@@ -531,7 +531,7 @@ from cron.executions import (
     recover_interrupted_executions, settle_unstarted_execution, terminalize_dead_owner)
 from cron.scheduler_liveness import ExecutionProgressStamper, _inactivity_watchdog_loop
 from cron.scheduler_bookkeeping import _classify_delivery_outcome
-from cron.scheduler_signal_retry import previous_signal_death_note, withhold_signal_death
+from cron.scheduler_signal_retry import previous_failure_note, withhold_failure_alert
 from cron.cancellation import (CancelRequest, _CancelEventLike, _CombinedCancelEvent, cancel_reason,
                                clear_cancel, finish_lost_execution,
                                run_job_unless_cancelled as _run_job_unless_cancelled)
@@ -2956,7 +2956,7 @@ def _compose_run_delivery(
     elif success:
         deliver_content = final_response
         _resolve_incidents_for_recovered_job(job)
-    elif withhold_signal_death(job, err):
+    elif withhold_failure_alert(job, err):
         deliver_content = ""  # silent retry: no ping AND no incident row (scheduler_signal_retry)
     else:
         # Record the job+error signature once; withhold the per-run ping while the operator
@@ -2979,7 +2979,7 @@ def _compose_run_delivery(
             from cron.quota_hold import hold_notice
             deliver_content = (
                 _summarize_cron_failure_for_delivery(job, error)
-                + previous_signal_death_note(job) + _failure_streak_nudge(job)
+                + previous_failure_note(job) + _failure_streak_nudge(job)
                 # The one alert on entering a provider-window hold says so (#89376).
                 + hold_notice(job, job.get("_quota_hold_seconds"))
             )
@@ -3179,7 +3179,7 @@ def _deliver_crash_failure(
 ) -> tuple[Optional[str], str]:
     """Failure notice for a run that raised out of run_job. Returns (delivery_error, outcome)."""
     normalized_deliver = _normalize_deliver_value(_delivery_lane_value(job, for_failure=True))
-    if withhold_signal_death(job, err_text):  # same silent-retry gate as _compose_run_delivery
+    if withhold_failure_alert(job, err_text):  # same silent-retry gate as _compose_run_delivery
         return None, "suppressed"
     # Same ack gate as the normal failure delivery: acked signatures stay silent here too.
     incident_acked, failure_incident_id = _upsert_incident_for_failure(job, err_text)
@@ -3191,7 +3191,7 @@ def _deliver_crash_failure(
             job,
             # Same text as the normal failure delivery: this run also counts toward
             # failure_streak, so the nudge must leave through here too.
-            _summarize_cron_failure_for_delivery(job, err_text) + previous_signal_death_note(job)
+            _summarize_cron_failure_for_delivery(job, err_text) + previous_failure_note(job)
             + _failure_streak_nudge(job),
             adapters=adapters,
             loop=loop,

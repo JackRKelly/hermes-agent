@@ -1869,6 +1869,11 @@ DEFAULT_CONFIG = {
         # failure alerts and names the signal. 0 = alert on the first. Keep in sync with
         # cron.scheduler_signal_retry.DEFAULT_SIGNAL_DEATH_GRACE_RUNS.
         "signal_death_grace_runs": 1,
+        # A recurring script (no_agent) job alerts only on this many failures in a row (any cause:
+        # a 504, a lock, a signal), so one failure the next run heals never pages; the job's own
+        # failure_alert_after wins, and a job running daily or less often alerts on the first.
+        # Keep in sync with cron.scheduler_signal_retry.DEFAULT_SCRIPT_FAILURE_ALERT_AFTER.
+        "script_failure_alert_after": 2,
     },
     # Kanban multi-agent coordination. The dispatcher ticks every N seconds, reclaims stale claims,
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
