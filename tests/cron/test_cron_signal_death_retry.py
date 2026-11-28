@@ -55,13 +55,15 @@ def _grace(home, runs: int) -> None:
         f"cron:\n  signal_death_grace_runs: {runs}\n", encoding="utf-8")
 
 
-def _job(home, schedule: str = "every 5m"):
+def _job(home, schedule: str = "every 5m", failure_alert_after=None):
+    """A script job. Tests of the signal rule alone pass ``failure_alert_after=1`` so the
+    failures-in-a-row threshold (default 2 for a sub-daily job) does not withhold too."""
     from cron.jobs import create_job
 
     (home / "scripts" / "probe.sh").write_text(SILENT_SUCCESS, encoding="utf-8")
     return create_job(
         prompt=None, schedule=schedule, script="probe.sh", no_agent=True,
-        deliver="telegram:123")
+        deliver="telegram:123", failure_alert_after=failure_alert_after)
 
 
 def _run(home, job_id: str, script: str) -> dict:
@@ -128,7 +130,7 @@ def test_sigterm_success_sigterm_stays_silent_both_times(cron_home, sent):
 
 
 def test_non_signal_first_failure_still_alerts(cron_home, sent):
-    job = _job(cron_home)
+    job = _job(cron_home, failure_alert_after=1)
     _run(cron_home, job["id"], PLAIN_FAILURE)
 
     assert len(sent) == 1
@@ -138,7 +140,7 @@ def test_non_signal_first_failure_still_alerts(cron_home, sent):
 
 def test_grace_zero_alerts_on_the_first_signal_death(cron_home, sent):
     _grace(cron_home, 0)
-    job = _job(cron_home)
+    job = _job(cron_home, failure_alert_after=1)
     _run(cron_home, job["id"], SIGTERM_SELF)
 
     assert len(sent) == 1
@@ -179,7 +181,8 @@ def test_crash_path_uses_the_same_silent_retry_gate(cron_home, sent):
     import cron.scheduler as sched
 
     job = {"id": "crash", "name": "c", "no_agent": True, "deliver": "telegram:1",
-           "schedule": {"kind": "interval", "minutes": 2}, "failure_streak": 0}
+           "schedule": {"kind": "interval", "minutes": 2}, "failure_streak": 0,
+           "failure_alert_after": 1}
     assert sched._deliver_crash_failure(
         job, "Script exited with code -9", adapters=None, loop=None) == (None, "suppressed")
     assert sent == []

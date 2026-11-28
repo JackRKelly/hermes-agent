@@ -736,6 +736,7 @@ def _action_create(a: dict[str, Any]) -> str:
             grace_minutes=a["grace_minutes"],
             pinned=bool(a["pinned"]),
             failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])),
+            failure_alert_after=a["failure_alert_after"],
             catch_up=a["catch_up"],
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
                if a["paused"] is not False or a["paused_reason"] is not None else {}))
@@ -879,6 +880,11 @@ def _update_core_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[st
                 return bot_chat_error
             _norm_fd = _resolve_cron_context_deliver(_norm_fd)
         updates["failure_deliver"] = _norm_fd
+    if a["failure_alert_after"] is not None:
+        # '' clears (the job falls back to the default); update_job validates anything else.
+        # A null is "not sent", never a clear: some providers send null for every unset
+        # optional field, which would wipe the threshold on unrelated updates.
+        updates["failure_alert_after"] = a["failure_alert_after"]
     if a["catch_up"] is not None:
         updates["catch_up"] = a["catch_up"]
     if skills is not None or skill is not None:
@@ -1078,6 +1084,7 @@ def cronjob(
     monitor_quiet_empty: Optional[bool] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str | list[str]] = None,
+    failure_alert_after: Optional[int | str] = None,
     catch_up: Optional[bool] = None,
     task_id: str | None = None,
     session_id: Optional[str] = None,
@@ -1172,6 +1179,12 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "type": "string",
                 "description": "Optional override target for FAILURE notices only (same grammar as deliver). When set, engine failure/interruption notices go here instead of the deliver target; 'local' suppresses them entirely (state still recorded in cron list/run history). Use for jobs delivering into shared channels where failure noise is unwanted. Omit = failures follow deliver (default). On update, '' clears."
             },
+            "failure_alert_after": {
+                # string only for the '' clear; update_job refuses any other non-integer.
+                "type": ["integer", "string"],
+                "minimum": 1,
+                "description": "Recurring no_agent script jobs only: alert only after this many failed runs in a row (1 = every failure). Omit for the default: 1 for a job running daily or less often, else 2 (cron.script_failure_alert_after). On update, '' clears."
+            },
             "skills": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -1250,7 +1263,8 @@ def check_cronjob_requirements() -> bool:
 # create/edit --model`, hand-edited jobs) — the agent must not point unattended spend at a
 # different model. Programmatic callers of cronjob() itself retain the parameters.
 _HANDLER_FORWARDED_ARGS = (
-    "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
+    "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "failure_alert_after",
+    "skill", "skills", "reason",
     "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session",
     "paused_reason", "pinned", "timezone", "grace_minutes", "catch_up", "monitor_quiet_empty")
 

@@ -38,6 +38,7 @@ from cron.jobs_invariants import _validate_job_mode_invariants, validate_schedul
 from cron.jobs_model_pin import _main_model_pin
 from cron import jobs_time
 from cron.scheduler_ownership import _claim_owner_is_dead
+from cron.scheduler_signal_retry import normalize_failure_alert_after
 from cron import extra_fire, store_health
 from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Collection
 
@@ -1774,6 +1775,7 @@ _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "no_agent": bool,
     "context_from": _normalize_context_from,
     "failure_deliver": _normalize_failure_deliver,
+    "failure_alert_after": normalize_failure_alert_after,
     "interpreter": _normalize_job_optional_text,
     "timezone": jobs_time.normalize_timezone,
     "grace_minutes": jobs_time.normalize_grace_minutes,
@@ -1788,6 +1790,7 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "monitor_quiet_empty": _normalize_monitor_quiet_empty,
     "interpreter": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
+    "failure_alert_after": normalize_failure_alert_after,
     # ``0`` is a real grace value (never catch up), so this normalizer must never use an
     # ``in {None, "", False}`` test — ``0 == False`` would silently clear it.
     "timezone": jobs_time.normalize_timezone,
@@ -1841,6 +1844,7 @@ def create_job(
     monitor_quiet_empty: bool = False,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
+    failure_alert_after: Optional[int] = None,
     catch_up: Optional[bool] = None,
     paused: bool = False,
     paused_reason: Optional[str] = None,
@@ -1862,7 +1866,8 @@ def create_job(
     interpreter: absolute/``~`` Python for ``.py`` script/monitor_script, validated at run time
     (a venv can be rebuilt or moved after creation). timezone: IANA key pinning the schedule's
     wall clock (None/'' = inherit the profile zone). grace_minutes: catch-up window override
-    (0 = never catch up)."""
+    (0 = never catch up). failure_alert_after: failures in a row before a recurring script job
+    alerts (None = default, ``cron.scheduler_signal_retry.failure_alert_after``)."""
     if not isinstance(paused, bool):
         raise ValueError("paused must be a boolean.")
     if paused_reason is not None and not isinstance(paused_reason, str):
@@ -1954,7 +1959,7 @@ def create_job(
         ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
         ("timezone", f["timezone"]), ("grace_minutes", f["grace_minutes"]),
-        ("catch_up", f["catch_up"]),
+        ("catch_up", f["catch_up"]), ("failure_alert_after", f["failure_alert_after"]),
     ):
         if value is not None:
             job[key] = value
